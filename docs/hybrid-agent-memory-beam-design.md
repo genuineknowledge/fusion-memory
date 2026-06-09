@@ -12,8 +12,8 @@
 
 参考来源：
 
-- Mem0 本地源码复盘：`/home/wwb/memory/mem0`，commit `366945965df43aa7084be98d1b5073b62a20b431`
-- MemPalace 本地源码复盘：`/home/wwb/memory/mempalace`，commit `939a076baf0b349e1f5b3a7e27ad1d545364f18b`
+- Mem0 本地源码复盘：外部参考仓库 `mem0ai/mem0`，commit `366945965df43aa7084be98d1b5073b62a20b431`
+- MemPalace 本地源码复盘：外部参考仓库 `MemPalace/mempalace`，commit `939a076baf0b349e1f5b3a7e27ad1d545364f18b`
 - Mem0 官方 BEAM 评测页：https://docs.mem0.ai/core-concepts/memory-evaluation
 - BEAM 官方仓库：https://github.com/mohammadtavakoli78/BEAM
 - BEAM 论文页：https://arxiv.org/abs/2510.27246

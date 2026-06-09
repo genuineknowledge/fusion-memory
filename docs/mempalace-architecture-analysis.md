@@ -1,6 +1,6 @@
 # MemPalace 架构复盘
 
-本文以 GitHub `MemPalace/mempalace` 默认分支 `develop` 的 commit `939a076baf0b349e1f5b3a7e27ad1d545364f18b` 为准，按本机展开目录 `/home/wwb/memory/mempalace` 中的源码复核。核心文件：
+本文以 GitHub `MemPalace/mempalace` 默认分支 `develop` 的 commit `939a076baf0b349e1f5b3a7e27ad1d545364f18b` 为准复核源码。核心文件：
 
 ```text
 mempalace/cli.py

@@ -107,6 +107,7 @@ production implementation described in the architecture document.
   - CLI `run-benchmark`, `run-beam`, and `run-longmemeval` accept answer/judge model endpoint options.
   - CLI `audit` command for operation audit events.
   - CLI `tasks` command for listing and processing background tasks.
+  - Persistent stdlib HTTP service wrapper with `/health`, `/add`, `/search`, and `/answer-context`.
 
 - Production storage boundary
   - Postgres/pgvector migration SQL is present at `fusion_memory/storage/migrations/postgres/001_init.sql`.
@@ -125,9 +126,9 @@ production implementation described in the architecture document.
 
 ## Pending
 
-- Provision a Python 3.11/3.12 ML runtime for local Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B, or point the HTTP model adapters at a GPU-backed model service.
-- Wire the model adapters to chosen production providers and validate latency/cost/token accounting on real traffic.
-- Execute `verify-postgres` against a live Postgres/pgvector instance in this environment or CI and record the result.
+- Continue validating and tuning the configured production LLM extractor prompt/schema on representative traffic.
+- Validate latency/cost/token accounting on real traffic for the configured Qwen embedding/reranker and extractor providers.
+- Add the live Postgres/pgvector verifier to CI or a repeatable deployment script.
 - Add real BM25/Tantivy/OpenSearch backend or Postgres FTS ranking.
 - Validate Retrieval Utility Scorer on real benchmark/replay data before enabling it for ranking.
 - Configure leaderboard-grade BEAM/LongMemEval answer and judge models, then validate on official small/dev data.
@@ -139,9 +140,9 @@ production implementation described in the architecture document.
 Current local verification command:
 
 ```bash
-cd /home/wwb/fusion-memory
-python -Werror::ResourceWarning -m unittest discover -s tests -v
-python -m compileall -q fusion_memory tests
+cd /public/home/wwb/memory
+PYTHONDONTWRITEBYTECODE=1 python -Werror::ResourceWarning -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 python -m compileall -q fusion_memory tests
 ```
 
-Last verified: 2026-06-09, 69 unittest cases passing/skipped as expected plus compileall. Manual Docker Postgres/pgvector verifier also passed locally.
+Last verified: 2026-06-09, 70 unittest cases passing/skipped as expected plus compileall. Manual Docker Postgres/pgvector verifier and local Qwen runtime smoke also passed locally.

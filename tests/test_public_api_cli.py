@@ -185,7 +185,7 @@ class PublicApiCliTests(unittest.TestCase):
                 "s",
                 *args,
             ],
-            cwd="/home/wwb/fusion-memory",
+            cwd=Path(__file__).resolve().parents[1],
             check=True,
             text=True,
             capture_output=True,

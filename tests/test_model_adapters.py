@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ from fusion_memory import MemoryService, Scope
 from fusion_memory.core.config import DEFAULT_EMBEDDING_DIMENSION, DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL
 from fusion_memory.core.embedding import DeterministicEmbedder, HTTPEmbeddingClient, Qwen3EmbeddingClient
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
+from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.adapter import BenchmarkAdapter, EvalDocument, EvalQuery
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
@@ -74,6 +76,48 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertTrue(any(call["component"] == "reranker" and call["model"] == "test-rerank" for call in trace["model_calls"]))
             self.assertTrue(reranker.calls)
             self.assertTrue(any(request["path"] == "/rerank" for request in server.requests))
+
+    def test_runtime_config_wires_http_model_adapters_from_env(self) -> None:
+        with FakeModelServer() as server:
+            env = {
+                "FUSION_MEMORY_EMBEDDING_PROVIDER": "http",
+                "FUSION_MEMORY_EMBEDDING_ENDPOINT": server.url("/embed"),
+                "FUSION_MEMORY_EMBEDDING_MODEL": "env-embed",
+                "FUSION_MEMORY_RERANKER_PROVIDER": "http",
+                "FUSION_MEMORY_RERANKER_ENDPOINT": server.url("/rerank"),
+                "FUSION_MEMORY_RERANKER_MODEL": "env-rerank",
+                "FUSION_MEMORY_EXTRACTOR_ENDPOINT": server.url("/llm"),
+                "FUSION_MEMORY_EXTRACTOR_MODEL": "env-extractor",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                memory = memory_service_from_env(":memory:")
+                scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+                memory.add("Please remember reports should use PostgreSQL.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
+                result = memory.search("PostgreSQL reports", scope, options={"mode": "balanced"})
+                memory.close()
+
+            self.assertTrue(result.candidates)
+            paths = [request["path"] for request in server.requests]
+            self.assertIn("/llm", paths)
+            self.assertIn("/embed", paths)
+            self.assertIn("/rerank", paths)
+            self.assertTrue(any(request["json"].get("model") == "env-embed" for request in server.requests))
+            self.assertTrue(any(request["json"].get("model") == "env-rerank" for request in server.requests))
+            self.assertTrue(any(request["json"].get("model") == "env-extractor" for request in server.requests))
+
+    def test_runtime_config_accepts_extractor_base_url(self) -> None:
+        with FakeModelServer() as server:
+            env = {
+                "FUSION_MEMORY_EXTRACTOR_BASE_URL": server.url(""),
+                "FUSION_MEMORY_EXTRACTOR_MODEL": "env-extractor",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                memory = memory_service_from_env(":memory:")
+                scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+                memory.add("Please remember reports should use PostgreSQL.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
+                memory.close()
+
+            self.assertTrue(any(request["path"] == "/chat/completions" for request in server.requests))
 
     def test_qwen_defaults_are_configured_without_required_runtime_dependency(self) -> None:
         self.assertEqual(len(DeterministicEmbedder().embed_text("Atlas")), DEFAULT_EMBEDDING_DIMENSION)
@@ -158,7 +202,7 @@ class ModelAdapterTests(unittest.TestCase):
                     "--judge-model",
                     "judge-model",
                 ],
-                cwd="/home/wwb/fusion-memory",
+                cwd=Path(__file__).resolve().parents[1],
                 check=True,
                 text=True,
                 capture_output=True,
@@ -180,7 +224,7 @@ class FakeModelServer:
                 length = int(handler_self.headers.get("Content-Length", "0"))
                 payload = json.loads(handler_self.rfile.read(length).decode("utf-8"))
                 requests_ref.append({"path": handler_self.path, "json": payload})
-                if handler_self.path == "/llm":
+                if handler_self.path in {"/llm", "/chat/completions"}:
                     span_id = payload["messages"][1]["content"]
                     data = json.loads(span_id)
                     source_id = data["input"]["spans"][0]["span_id"]

@@ -1300,8 +1300,9 @@ def _sanitize_model_call(component: str, source: Any, call: dict[str, Any]) -> d
     }
     if model:
         out["model"] = model
-    prompt_version = call.get("prompt")
+    prompt_version = call.get("prompt_version") or call.get("prompt")
     if isinstance(prompt_version, str):
+        prompt_version = prompt_version.splitlines()[0]
         out["prompt_version"] = prompt_version
     latency_ms = call.get("latency_ms")
     if isinstance(latency_ms, int | float):

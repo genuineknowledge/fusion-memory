@@ -186,7 +186,7 @@ Layer 8 Benchmark/Product Integration:
 Local verification:
 
 ```bash
-cd /home/wwb/fusion-memory
+cd /public/home/wwb/memory
 python -Werror::ResourceWarning -m unittest discover -s tests -v
 python -m compileall -q fusion_memory tests deploy
 ```
@@ -194,7 +194,7 @@ python -m compileall -q fusion_memory tests deploy
 Postgres smoke:
 
 ```bash
-cd /home/wwb/fusion-memory
+cd /public/home/wwb/memory
 docker compose -f deploy/docker-compose.postgres.yml up -d
 python -m fusion_memory.cli migrate-postgres postgresql://fusion:fusion@localhost:5432/fusion_memory
 python -m fusion_memory.cli verify-postgres postgresql://fusion:fusion@localhost:5432/fusion_memory
@@ -203,8 +203,13 @@ python -m fusion_memory.cli verify-postgres postgresql://fusion:fusion@localhost
 Qwen smoke, after installing optional dependencies:
 
 ```bash
-cd /home/wwb/fusion-memory
-python deploy/qwen_smoke.py
+cd /public/home/wwb/memory
+source deploy/fusion-memory.env.example
+python deploy/qwen_smoke.py \
+  --embedding-model "$FUSION_MEMORY_EMBEDDING_MODEL" \
+  --reranker-model "$FUSION_MEMORY_RERANKER_MODEL" \
+  --device "$FUSION_MEMORY_EMBEDDING_DEVICE" \
+  --cache-dir "$FUSION_MEMORY_MODEL_CACHE"
 ```
 
 Expected Qwen smoke result:
@@ -227,7 +232,8 @@ Benchmark evaluation:
 3. Run the default unittest suite.
 4. Start Postgres/pgvector with `deploy/docker-compose.postgres.yml`.
 5. Run migration and `verify-postgres`.
-6. Install `.[postgres,qwen]` in a Python 3.11/3.12 virtualenv.
+6. Install `.[postgres,qwen]` or reproduce the pinned conda environment described in `docs/deployment-qwen-postgres.md`.
+7. Source `deploy/fusion-memory.env.example` and replace only the LLM extractor endpoint/model/API key when the provider is chosen.
 7. Run `python deploy/qwen_smoke.py`.
 8. Configure the LLM extractor endpoint/model/API key.
 9. Configure benchmark answer/judge models.

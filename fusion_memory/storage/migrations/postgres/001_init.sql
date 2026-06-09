@@ -1,5 +1,5 @@
 -- Fusion Memory Postgres/pgvector schema.
--- Mirrors /home/wwb/fusion-memory-execution-plan.md for production backends.
+-- Mirrors the production storage boundary described in docs/requirements.md.
 
 create extension if not exists vector;
 

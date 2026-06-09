@@ -7,6 +7,7 @@ dependencies = []
 
 [project.scripts]
 fusion-memory = "fusion_memory.cli:main"
+fusion-memory-server = "fusion_memory.server:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

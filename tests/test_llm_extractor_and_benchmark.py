@@ -48,6 +48,20 @@ class LLMExtractorAndBenchmarkTests(unittest.TestCase):
         self.assertIn("structured_llm_extractor", str(trace))
         self.assertTrue(client.calls)
 
+    def test_structured_llm_extractor_accepts_string_fact_for_single_span(self) -> None:
+        class StringFactClient:
+            def structured(self, prompt, schema, input):
+                return {"facts": ["User prefers Qdrant for Atlas retrieval."]}
+
+        extractor = StructuredLLMExtractor(StringFactClient())
+        memory = MemoryService(extractor=extractor)
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+        result = memory.add("Please remember I prefer Qdrant for Atlas retrieval.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
+
+        self.assertTrue(result.accepted_fact_ids)
+        fact = memory.get(result.accepted_fact_ids[0], "fact")
+        self.assertEqual(fact.source_span_ids, result.span_ids)
+
     def test_dataset_loader_and_benchmark_report_from_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "dataset.json"
@@ -116,7 +130,7 @@ class LLMExtractorAndBenchmarkTests(unittest.TestCase):
                     "run-benchmark",
                     str(dataset),
                 ],
-                cwd="/home/wwb/fusion-memory",
+                cwd=Path(__file__).resolve().parents[1],
                 check=True,
                 text=True,
                 capture_output=True,

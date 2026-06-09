@@ -67,6 +67,7 @@ class OpenAICompatibleLLMClient:
         self.calls.append(
             {
                 "prompt": prompt,
+                "prompt_version": prompt.splitlines()[0] if prompt else "",
                 "schema": schema,
                 "input": input,
                 "model": self.model,

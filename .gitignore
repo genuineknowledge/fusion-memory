@@ -5,6 +5,12 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+.runtime/
+
+.env
+*.env
+!*.env.example
+*.local.env
 
 *.sqlite
 *.sqlite3

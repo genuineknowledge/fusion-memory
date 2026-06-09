@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from fusion_memory import MemoryService, Scope
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
+from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.adapter import BenchmarkAdapter
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.longmemeval_adapter import LONGMEMEVAL_SPLITS, LongMemEvalAdapter
@@ -133,7 +134,7 @@ def main() -> None:
         run_id=args.run_id,
         session_id=args.session_id,
     )
-    service = MemoryService(args.db)
+    service = memory_service_from_env(args.db)
     try:
         if args.command == "add":
             session_time = datetime.fromisoformat(args.time) if args.time else datetime.now(timezone.utc)

@@ -16,6 +16,17 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
     },
 }
 
+EXTRACTION_PROMPT = """Extract only durable memory candidates from the input spans.
+
+Return a JSON object with optional arrays: facts, events, relations.
+Each fact must be an object with text, subject, predicate, object, category,
+confidence, salience, and source_span_ids. source_span_ids must only contain
+span_id values present in the input. Do not return plain strings.
+Use facts for stable preferences, instructions, profile details, project state,
+or other information that should be remembered later. Leave arrays empty when
+there is nothing durable to remember.
+"""
+
 
 class StructuredLLMExtractor:
     """Adapter for production structured extraction.
@@ -34,7 +45,7 @@ class StructuredLLMExtractor:
         if not spans:
             return []
         response = self.client.structured(
-            prompt=self.prompt_version,
+            prompt=f"{self.prompt_version}\n\n{EXTRACTION_PROMPT}",
             schema=EXTRACTION_SCHEMA,
             input={
                 "session_time": session_time.isoformat(),
@@ -64,12 +75,26 @@ class StructuredLLMExtractor:
         for fact in response.get("facts", []) or []:
             out.append(self._fact_candidate(fact, valid_span_ids))
         for event in response.get("events", []) or []:
+            if not isinstance(event, dict):
+                continue
             out.append(self._event_candidate(event, valid_span_ids))
         for relation in response.get("relations", []) or []:
+            if not isinstance(relation, dict):
+                continue
             out.append(self._relation_candidate(relation))
         return out
 
-    def _fact_candidate(self, fact: dict[str, Any], valid_span_ids: set[str]) -> ExtractedCandidate:
+    def _fact_candidate(self, fact: dict[str, Any] | str, valid_span_ids: set[str]) -> ExtractedCandidate:
+        if isinstance(fact, str):
+            fact = {
+                "text": fact,
+                "category": "general_fact",
+                "confidence": 0.75,
+                "salience": 0.6,
+                "source_span_ids": list(valid_span_ids) if len(valid_span_ids) == 1 else [],
+            }
+        elif not isinstance(fact, dict):
+            fact = {"text": str(fact), "source_span_ids": []}
         source_span_ids = self._source_span_ids(fact, valid_span_ids)
         structured = {
             "subject": fact.get("subject", "user"),
@@ -134,4 +159,3 @@ class StructuredLLMExtractor:
     def _source_span_ids(self, item: dict[str, Any], valid_span_ids: set[str]) -> list[str]:
         source_span_ids = [span_id for span_id in item.get("source_span_ids", []) if span_id in valid_span_ids]
         return list(dict.fromkeys(source_span_ids))
-
