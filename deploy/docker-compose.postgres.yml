@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: fusion-memory-postgres
+    environment:
+      POSTGRES_USER: fusion
+      POSTGRES_PASSWORD: fusion
+      POSTGRES_DB: fusion_memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - fusion_memory_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fusion -d fusion_memory"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  fusion_memory_pgdata:

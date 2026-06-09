@@ -1,0 +1,25 @@
+[project]
+name = "fusion-memory"
+version = "0.1.0"
+description = "Local MVP implementation of Fusion Memory."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+fusion-memory = "fusion_memory.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+postgres = ["psycopg2-binary>=2.9"]
+qwen = ["sentence-transformers>=3.4", "torch>=2.5", "transformers>=4.51"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fusion_memory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
