@@ -11,10 +11,10 @@ from fusion_memory.server import serve
 
 
 class ServerTests(unittest.TestCase):
-    def test_runtime_status_defaults_to_postgres_backend(self) -> None:
+    def test_runtime_status_defaults_to_sqlite_backend(self) -> None:
         status = runtime_status_payload()
 
-        self.assertEqual(status["database"]["backend"], "postgres")
+        self.assertEqual(status["database"]["backend"], "sqlite")
 
     def test_status_endpoint_reports_readiness(self) -> None:
         ready = threading.Event()
@@ -42,9 +42,37 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(status["ok"])
             self.assertEqual(status["service"], "running")
             self.assertTrue(status["database"]["ok"])
-            self.assertEqual(status["database"]["backend"], "postgres")
+            self.assertEqual(status["database"]["backend"], "sqlite")
             self.assertTrue(status["models"]["ok"])
             self.assertIn("version", status)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+    def test_status_endpoint_reports_explicit_postgres_backend(self) -> None:
+        ready = threading.Event()
+        holder = {}
+
+        def run_server() -> None:
+            service = MemoryService(storage_backend="postgres", store=_CloseOnlyStore())
+            server = serve(service, host="127.0.0.1", port=0)
+            holder["service"] = service
+            holder["server"] = server
+            ready.set()
+            try:
+                server.serve_forever()
+            finally:
+                server.server_close()
+                service.close()
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=5))
+        server = holder["server"]
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            status = _post_or_get(f"{base_url}/status")
+            self.assertEqual(status["database"]["backend"], "postgres")
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -182,6 +210,11 @@ def _post_or_get(url: str, payload: dict | None = None) -> dict:
     )
     with request.urlopen(req, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+class _CloseOnlyStore:
+    def close(self) -> None:
+        pass
 
 
 if __name__ == "__main__":

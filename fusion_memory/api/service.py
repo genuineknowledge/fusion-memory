@@ -158,6 +158,7 @@ class MemoryService:
             self.store = PostgresMemoryStore(str(db_path), embedder=embedder, connect=store_connect)
         else:
             raise ValueError(f"unsupported storage_backend: {storage_backend}")
+        self.storage_backend = storage_backend
         self.authorizer = authorizer or AllowAllAuthorizer()
         self.extractor = extractor or RuleBasedExtractor()
         self.gate = EncodingGate(self.config)
