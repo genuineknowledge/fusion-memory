@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import threading
 import unittest
-from urllib import request
+from urllib import error, request
 
 from fusion_memory import MemoryService
+from fusion_memory.product import runtime_status_payload
 from fusion_memory.server import serve
 
 
 class ServerTests(unittest.TestCase):
+    def test_runtime_status_defaults_to_postgres_backend(self) -> None:
+        status = runtime_status_payload()
+
+        self.assertEqual(status["database"]["backend"], "postgres")
+
     def test_status_endpoint_reports_readiness(self) -> None:
         ready = threading.Event()
         holder = {}
@@ -36,6 +42,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(status["ok"])
             self.assertEqual(status["service"], "running")
             self.assertTrue(status["database"]["ok"])
+            self.assertEqual(status["database"]["backend"], "postgres")
             self.assertTrue(status["models"]["ok"])
             self.assertIn("version", status)
         finally:
@@ -151,7 +158,7 @@ class ServerTests(unittest.TestCase):
             try:
                 request.urlopen(req, timeout=5)
                 self.fail("expected HTTPError")
-            except Exception as exc:
+            except error.HTTPError as exc:
                 response = exc.fp.read().decode("utf-8")
                 payload = json.loads(response)
             self.assertEqual(payload["error"], "request_failed")

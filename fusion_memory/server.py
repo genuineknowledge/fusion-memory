@@ -36,7 +36,7 @@ def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
                 self._write_json(
                     200,
                     runtime_status_payload(
-                        storage_backend=self.server.storage_backend if hasattr(self.server, "storage_backend") else "sqlite"
+                        storage_backend=self.server.storage_backend if hasattr(self.server, "storage_backend") else "postgres"
                     ),
                 )
                 return
@@ -117,7 +117,7 @@ def serve(
 ) -> HTTPServer:
     state = MemoryServerState(service)
     server = HTTPServer((host, port), make_handler(state))
-    server.storage_backend = getattr(service, "storage_backend", "sqlite")  # type: ignore[attr-defined]
+    server.storage_backend = getattr(service, "storage_backend", "postgres")  # type: ignore[attr-defined]
     return server
 
 
@@ -138,7 +138,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        print(json.dumps({"host": args.host, "port": args.port, "storage_backend": args.storage_backend or "sqlite"}), flush=True)
+        print(json.dumps({"host": args.host, "port": args.port, "storage_backend": args.storage_backend or "postgres"}), flush=True)
         server.serve_forever()
     finally:
         server.server_close()
