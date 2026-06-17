@@ -63,8 +63,22 @@ fusion-memory doctor
 
 启动 memory 服务后，在 psi-agent 中设置：
 
+Linux / macOS:
+
 ```bash
 export PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
+```
+
+Windows PowerShell:
+
+```powershell
+$env:PSI_MEMORY_BASE_URL = "http://127.0.0.1:8765"
+```
+
+Windows cmd:
+
+```bat
+set PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
 ```
 
 然后给 `psi-agent session` 加上 `--memory-enabled`。
