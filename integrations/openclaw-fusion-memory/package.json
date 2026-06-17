@@ -1,0 +1,12 @@
+{
+  "name": "@fusion-memory/openclaw-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "id": "fusion-memory",
+  "name": "Fusion Memory",
+  "description": "Connects OpenClaw to a local Fusion Memory service.",
+  "kind": "memory",
+  "contracts": {
+    "tools": [
+      "fusion_memory_search",
+      "fusion_memory_get",
+      "fusion_memory_store",
+      "fusion_memory_clear"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "uiHints": {
+    "baseUrl": {
+      "label": "Fusion Memory URL",
+      "placeholder": "http://127.0.0.1:8765"
+    },
+    "timeoutMs": {
+      "label": "Timeout in milliseconds",
+      "placeholder": "1500",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {"type": "string"},
+      "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 10000}
+    }
+  }
+}
