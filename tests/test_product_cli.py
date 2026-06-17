@@ -5,6 +5,8 @@ import os
 import tempfile
 import unittest
 import socket
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +18,7 @@ from fusion_memory.product import (
     init_home,
     load_config,
     product_paths,
+    render_human,
     service_status,
     start_service,
     stop_service,
@@ -32,6 +35,7 @@ class ProductCliTests(unittest.TestCase):
             self.assertTrue(init["ok"])
             self.assertTrue((home / "config.json").exists())
             config = load_config(home)
+            self.assertEqual(init["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory")
             self.assertEqual(config["storage_backend"], "postgres")
             self.assertEqual(config["embedding"]["provider"], "qwen")
             self.assertIn("Qwen3-Embedding-0.6B", config["embedding"]["model"])
@@ -96,6 +100,50 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(env["FUSION_MEMORY_EMBEDDING_API_KEY"], "secret-value")
             self.assertEqual(env["FUSION_MEMORY_RERANKER_PROVIDER"], "qwen")
             self.assertEqual(env["FUSION_MEMORY_EXTRACTOR_API_KEY"], "secret-value")
+
+    def test_interactive_and_human_output_redact_default_postgres_credentials(self) -> None:
+        answers = iter(
+            [
+                "",  # host
+                "18767",  # port
+                "",  # default postgres database
+                "",  # default postgres DSN
+                "",  # default qwen embedding
+                "",  # default qwen embedding model
+                "",  # default qwen embedding device
+                "",  # default qwen reranker
+                "",  # default qwen reranker model
+                "",  # default qwen reranker device
+                "",  # default rule extractor
+                "",  # default off query router
+            ]
+        )
+        output = StringIO()
+
+        def fake_input(prompt: str = "") -> str:
+            print(prompt, end="")
+            return next(answers)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("builtins.input", fake_input),
+            redirect_stdout(output),
+        ):
+            result = configure_interactive(Path(tmp))
+
+        self.assertEqual(result["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory")
+        self.assertNotIn("fusion:fusion", json.dumps(result))
+        rendered = render_human(result)
+        self.assertIn("postgresql://***:***@127.0.0.1:55433/fusion_memory", rendered)
+        self.assertNotIn("fusion:fusion", rendered)
+        wizard_text = output.getvalue()
+        self.assertIn("Postgres / pgvector (recommended)", wizard_text)
+        self.assertIn("Qwen3 embedding (recommended)", wizard_text)
+        self.assertIn("Qwen3 reranker (recommended)", wizard_text)
+        self.assertNotIn("fusion:fusion", wizard_text)
+        self.assertNotIn("SQLite local file (recommended)", wizard_text)
+        self.assertNotIn("Built-in lightweight embedding (recommended)", wizard_text)
+        self.assertNotIn("Built-in lexical reranker (recommended)", wizard_text)
 
     def test_start_status_and_stop_service(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

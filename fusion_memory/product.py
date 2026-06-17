@@ -77,7 +77,7 @@ def init_home(
         "ok": True,
         "home": str(paths.home),
         "config": str(paths.config),
-        "db": str(paths.db),
+        "db": _redact_dsn(str(load_config(home)["db"])),
         "log": str(paths.log),
         "message": "initialized",
     }
@@ -103,33 +103,35 @@ def configure_interactive(
     storage_choice = _ask_choice(
         "Database",
         [
-            ("sqlite", "SQLite local file (recommended)"),
-            ("postgres", "Postgres / pgvector"),
+            ("postgres", "Postgres / pgvector (recommended)"),
+            ("sqlite", "SQLite local file"),
         ],
-        str(existing.get("storage_backend") or "sqlite"),
+        str(existing.get("storage_backend") or "postgres"),
     )
     if storage_choice == "postgres":
-        db = _ask("Postgres DSN", str(existing.get("db") if str(existing.get("db", "")).startswith("postgres") else "postgresql://user:pass@127.0.0.1:5432/fusion_memory"))
+        default_dsn = str(existing.get("db") if str(existing.get("db", "")).startswith("postgres") else DEFAULT_POSTGRES_DSN)
+        db_answer = _ask("Postgres DSN", _redact_dsn(default_dsn))
+        db = default_dsn if db_answer == _redact_dsn(default_dsn) else db_answer
     else:
         db = _ask("SQLite database file", str(existing.get("db") or paths.db))
 
     embedding = _configure_model(
         "Embedding model",
         existing.get("embedding") if isinstance(existing.get("embedding"), dict) else {},
-        default_provider="deterministic",
+        default_provider="qwen",
         choices=[
-            ("deterministic", "Built-in lightweight embedding (recommended)"),
-            ("qwen", "Local Qwen3 embedding"),
+            ("qwen", "Qwen3 embedding (recommended)"),
+            ("deterministic", "Built-in lightweight embedding"),
             ("http", "API embedding service"),
         ],
     )
     reranker = _configure_model(
         "Reranker model",
         existing.get("reranker") if isinstance(existing.get("reranker"), dict) else {},
-        default_provider="lexical",
+        default_provider="qwen",
         choices=[
-            ("lexical", "Built-in lexical reranker (recommended)"),
-            ("qwen", "Local Qwen3 reranker"),
+            ("qwen", "Qwen3 reranker (recommended)"),
+            ("lexical", "Built-in lexical reranker"),
             ("http", "API reranker service"),
         ],
     )
@@ -168,7 +170,7 @@ def configure_interactive(
         "ok": True,
         "home": str(paths.home),
         "config": str(paths.config),
-        "db": str(result["db"]),
+        "db": _redact_dsn(str(result["db"])),
         "log": str(paths.log),
         "message": "configured",
         "providers": {
@@ -446,7 +448,7 @@ def render_human(result: dict[str, Any]) -> str:
                 f"{APP_NAME}: OK",
                 f"- Home: {result['home']}",
                 f"- Config: {result['config']}",
-                f"- Database: {result['db']}",
+                f"- Database: {_redact_dsn(str(result['db']))}",
             ]
         )
     if result.get("ok"):
@@ -499,7 +501,7 @@ def _configure_model(
     provider = _ask_choice(title, choices, str(existing.get("provider") or default_provider))
     config: dict[str, Any] = {"provider": provider}
     if provider == "qwen":
-        default_model = str(existing.get("model") or "")
+        default_model = str(existing.get("model") or _default_qwen_model(title))
         config["model"] = _ask(f"{title} local model path/name", default_model)
         device = _ask(f"{title} device", str(existing.get("device") or "auto"))
         if device and device != "auto":
@@ -509,6 +511,12 @@ def _configure_model(
         config["model"] = _ask(f"{title} API model", str(existing.get("model") or ""))
         config["api_key_env"] = _ask(f"{title} API key env var", str(existing.get("api_key_env") or "FUSION_MEMORY_MODEL_API_KEY"))
     return config
+
+
+def _default_qwen_model(title: str) -> str:
+    if "Reranker" in title:
+        return DEFAULT_QWEN_RERANKER_MODEL
+    return DEFAULT_QWEN_EMBEDDING_MODEL
 
 
 def _configure_llm(
