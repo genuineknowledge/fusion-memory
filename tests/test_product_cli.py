@@ -28,6 +28,24 @@ from fusion_memory.product import (
 
 
 class ProductCliTests(unittest.TestCase):
+    def test_install_agent_dry_run_cli_json(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        try:
+            sys.argv = ["fusion-memory", "install-agent", "--target", "all", "--dry-run", "--json"]
+            sys.stdout = StringIO()
+            main()
+            payload = json.loads(sys.stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+            sys.stdout = old_stdout
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+
     def test_init_doctor_backup_and_upgrade_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

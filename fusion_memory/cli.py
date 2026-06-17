@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fusion_memory import MemoryService, Scope
+from fusion_memory.agent_installer import install_agent
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
 from fusion_memory.product import (
@@ -72,6 +73,12 @@ def main() -> None:
     upgrade_cmd.add_argument("--package", default=None, help="Package/path to upgrade from")
     upgrade_cmd.add_argument("--dry-run", action="store_true")
     upgrade_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    install_agent_cmd = sub.add_parser("install-agent", help="Install or configure Agent adapters")
+    install_agent_cmd.add_argument("--target", default="all", choices=["all", "openclaw", "hermes", "fusion-agent"])
+    install_agent_cmd.add_argument("--dry-run", action="store_true")
+    install_agent_cmd.add_argument("--home", default=None)
+    install_agent_cmd.add_argument("--json", action="store_true")
 
     add = sub.add_parser("add", help="Add a memory input")
     add.add_argument("content")
@@ -178,6 +185,12 @@ def main() -> None:
         return
     if args.command == "upgrade":
         _print_product_result(upgrade(args.home, package=args.package, dry_run=args.dry_run), json_output=args.json)
+        return
+    if args.command == "install-agent":
+        _print_product_result(
+            install_agent(args.target, dry_run=args.dry_run, home=args.home),
+            json_output=args.json,
+        )
         return
     if args.command == "migrate-postgres":
         runner = PostgresMigrationRunner(args.dsn)
