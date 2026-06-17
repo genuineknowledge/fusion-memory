@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fusion_memory import MemoryService, Scope
+from fusion_memory.alpha_beta import run_alpha, run_beta
 from fusion_memory.agent_installer import install_agent
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
@@ -79,6 +80,14 @@ def main() -> None:
     install_agent_cmd.add_argument("--dry-run", action="store_true")
     install_agent_cmd.add_argument("--home", default=None)
     install_agent_cmd.add_argument("--json", action="store_true")
+
+    alpha_cmd = sub.add_parser("alpha-test", help="Run local Fusion Memory alpha simulation")
+    alpha_cmd.add_argument("--report", default=None)
+    alpha_cmd.add_argument("--json", action="store_true")
+
+    beta_cmd = sub.add_parser("beta-test", help="Run Fusion Memory beta simulation checks")
+    beta_cmd.add_argument("--report", default=None)
+    beta_cmd.add_argument("--json", action="store_true")
 
     add = sub.add_parser("add", help="Add a memory input")
     add.add_argument("content")
@@ -191,6 +200,12 @@ def main() -> None:
             install_agent(args.target, dry_run=args.dry_run, home=args.home),
             json_output=args.json,
         )
+        return
+    if args.command == "alpha-test":
+        _print_product_result(run_alpha(report_path=args.report), json_output=args.json)
+        return
+    if args.command == "beta-test":
+        _print_product_result(run_beta(report_path=args.report), json_output=args.json)
         return
     if args.command == "migrate-postgres":
         runner = PostgresMigrationRunner(args.dsn)
