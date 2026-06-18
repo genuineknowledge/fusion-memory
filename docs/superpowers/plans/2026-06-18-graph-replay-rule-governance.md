@@ -579,7 +579,7 @@ Expected: JSON and CSV exist and include `rule_id`, `hit_count`, `contribution_c
 Append to `.git/sdd/progress.md`:
 
 ```text
-Graph replay full run: <date>; graph_f1=<value>; legacy_f1=<value>; hybrid_f1=<value>; graph_tau=<value>; legacy_tau=<value>; gate_passed=<true|false>; audit_rows=<count>.
+Graph replay full run: date=YYYY-MM-DD; graph_f1=NUMBER_FROM_REPORT; legacy_f1=NUMBER_FROM_REPORT; hybrid_f1=NUMBER_FROM_REPORT; graph_tau=NUMBER_FROM_REPORT; legacy_tau=NUMBER_FROM_REPORT; gate_passed=true_or_false; audit_rows=INTEGER_FROM_AUDIT.
 ```
 
 - [ ] **Step 5: Commit code only**
@@ -648,7 +648,7 @@ Expected: Unit tests PASS. Replay smoke writes JSON. Gate may fail, but graph/le
 - [ ] **Step 4: Commit**
 
 ```bash
-git add <touched rule files> tests/test_rule_registry.py tests/test_rule_audit.py
+git add PATHS_PRINTED_BY_GIT_STATUS tests/test_rule_registry.py tests/test_rule_audit.py
 git commit -m "chore: prune unused retrieval rules"
 ```
 
@@ -781,13 +781,13 @@ Do not delete legacy rules unless all are true:
 Append one of:
 
 ```text
-Legacy event_ordering deletion decision: keep legacy fallback; graph parity not reached because <reason>.
+Legacy event_ordering deletion decision: keep legacy fallback; graph parity not reached because REASON_FROM_REPLAY_METRICS.
 ```
 
 or:
 
 ```text
-Legacy event_ordering deletion decision: delete selected legacy rules <rule_ids>; graph parity reached with graph_f1=<value>, legacy_f1=<value>, hybrid_f1=<value>.
+Legacy event_ordering deletion decision: delete selected legacy rules RULE_ID_LIST_FROM_AUDIT; graph parity reached with graph_f1=NUMBER_FROM_REPORT, legacy_f1=NUMBER_FROM_REPORT, hybrid_f1=NUMBER_FROM_REPORT.
 ```
 
 - [ ] **Step 4: Delete only approved legacy rules**
@@ -871,4 +871,3 @@ python3 tools/rule_audit.py \
 ```bash
 git diff --check
 ```
-
