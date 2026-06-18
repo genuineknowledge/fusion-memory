@@ -26,6 +26,15 @@ class RuleHit:
 
 _RULE_REGISTRY: dict[str, RuleDefinition] = {}
 _RULE_HITS: list[RuleHit] = []
+_SENSITIVE_METADATA_KEY_PARTS = (
+    "raw_text",
+    "text",
+    "content",
+    "span",
+    "message",
+    "query",
+    "prompt",
+)
 
 
 def register_rule(rule: RuleDefinition) -> RuleDefinition:
@@ -47,7 +56,7 @@ def record_rule_hit(
         text_hash=sha1(text.encode("utf-8")).hexdigest()[:12],
         contributed_candidate_id=contributed_candidate_id,
         stage=stage,
-        metadata=dict(metadata or {}),
+        metadata=_sanitize_metadata(metadata),
     )
     _RULE_HITS.append(hit)
     return hit
@@ -61,3 +70,22 @@ def drain_rule_hits() -> list[RuleHit]:
 
 def registered_rules() -> list[RuleDefinition]:
     return list(_RULE_REGISTRY.values())
+
+
+def _sanitize_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
+    sanitized: dict[str, object] = {}
+    for key, value in (metadata or {}).items():
+        if _metadata_key_contains_raw_text(key):
+            sanitized[key] = _hash_metadata_value(value)
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
+def _metadata_key_contains_raw_text(key: str) -> bool:
+    normalized = key.lower()
+    return any(part in normalized for part in _SENSITIVE_METADATA_KEY_PARTS)
+
+
+def _hash_metadata_value(value: object) -> str:
+    return sha1(repr(value).encode("utf-8")).hexdigest()[:12]

@@ -80,6 +80,9 @@ class RuleRegistryTests(unittest.TestCase):
             "confidence": 0.75,
             "details": {"source": "candidate_1"},
             "raw_text": "I initially used SQLite.",
+            "decision": "suppress",
+            "span_message": "I initially used SQLite.",
+            "label": "history-marker",
         }
 
         hit = record_rule_hit(
@@ -93,13 +96,14 @@ class RuleRegistryTests(unittest.TestCase):
         metadata["confidence"] = 0.10
         metadata["details"] = {"source": "candidate_2"}
         metadata["raw_text"] = "mutated"
+        metadata["span_message"] = "mutated"
 
-        self.assertEqual(
-            hit.metadata,
-            {
-                "confidence": 0.75,
-                "details": {"source": "candidate_1"},
-                "raw_text": "I initially used SQLite.",
-            },
-        )
+        self.assertEqual(hit.metadata["confidence"], 0.75)
+        self.assertEqual(hit.metadata["details"], {"source": "candidate_1"})
+        self.assertEqual(hit.metadata["decision"], "suppress")
+        self.assertEqual(hit.metadata["label"], "history-marker")
+        self.assertNotEqual(hit.metadata["raw_text"], "I initially used SQLite.")
+        self.assertNotEqual(hit.metadata["span_message"], "I initially used SQLite.")
+        self.assertRegex(str(hit.metadata["raw_text"]), r"^[0-9a-f]{12}$")
+        self.assertRegex(str(hit.metadata["span_message"]), r"^[0-9a-f]{12}$")
         self.assertNotIn("I initially used SQLite.", hit.text_hash)
