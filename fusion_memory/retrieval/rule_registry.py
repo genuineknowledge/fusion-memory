@@ -35,6 +35,11 @@ _SENSITIVE_METADATA_KEY_PARTS = (
     "query",
     "prompt",
 )
+_SENSITIVE_METADATA_KEYS = {
+    "phrases",
+    "conditions",
+    "taxonomy_hits",
+}
 
 
 def register_rule(rule: RuleDefinition) -> RuleDefinition:
@@ -84,6 +89,8 @@ def _sanitize_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
 
 def _metadata_key_contains_raw_text(key: str) -> bool:
     normalized = key.lower()
+    if normalized in _SENSITIVE_METADATA_KEYS:
+        return True
     return any(part in normalized for part in _SENSITIVE_METADATA_KEY_PARTS)
 
 
