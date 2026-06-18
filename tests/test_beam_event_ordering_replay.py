@@ -13,6 +13,7 @@ from tools.beam_event_ordering_replay import (
     evaluate_gate,
     main,
     preflight_replay_environment_from_store,
+    run_replay,
     score_ordering_candidates,
 )
 
@@ -221,6 +222,107 @@ class BeamReplayBucketTests(unittest.TestCase):
         self.assertEqual(summary["explicit_order"]["count"], 2)
         self.assertAlmostEqual(summary["explicit_order"]["f1"], 0.5)
         self.assertEqual(summary["long_mixed_topic"]["count"], 1)
+
+
+class BeamReplayModeTests(unittest.TestCase):
+    def test_run_replay_graph_only_excludes_inactive_paths_from_summaries(self) -> None:
+        query = SimpleNamespace(
+            id="q1",
+            query="rank the work",
+            category="event_ordering",
+            metadata={"ordering_tested": ["first step", "second step"]},
+        )
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=3,
+            query_ids=None,
+            max_queries=None,
+            gate=False,
+            mode="graph_only",
+            hybrid_source="source_spans",
+        )
+        service = SimpleNamespace(close=MagicMock())
+
+        with patch.object(replay, "_load_official_beam_dataset", return_value=(None, [query])), patch.object(
+            replay, "memory_service_from_env", return_value=service
+        ), patch.object(
+            replay, "BeamAdapter", return_value=SimpleNamespace(_beam_scope=MagicMock(return_value=SimpleNamespace()))
+        ), patch.object(
+            replay,
+            "preflight_replay_environment_from_store",
+            return_value={"status": "ok", "error": None, "chronology_tables_ready": True, "chronology_error": None},
+        ), patch.object(
+            replay,
+            "_graph_items",
+            return_value=(["first step", "second step"], ["event_ordering_persisted_graph"], False),
+        ), patch.object(
+            replay, "_legacy_items", side_effect=AssertionError("legacy path should not run in graph_only mode")
+        ), patch.object(
+            replay, "_hybrid_items", side_effect=AssertionError("hybrid path should not run in graph_only mode")
+        ):
+            report = run_replay(args)
+
+        self.assertAlmostEqual(report["summary"]["graph"]["f1"], 1.0)
+        self.assertEqual(report["summary"]["legacy"]["count"], 0)
+        self.assertEqual(report["summary"]["hybrid"]["count"], 0)
+        self.assertEqual(report["bucket_summary"]["legacy"], {})
+        self.assertEqual(report["bucket_summary"]["hybrid"], {})
+        self.assertEqual(report["summary"]["path_wins"]["f1"], {"graph": 1})
+        self.assertEqual(report["summary"]["path_wins"]["kendall_tau_norm"], {"graph": 1})
+        self.assertEqual(report["route_summary"], {})
+        self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
+        self.assertFalse(report["records"][0]["paths"]["legacy"]["active"])
+        self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
+
+    def test_run_replay_graph_only_gate_fails_with_insufficient_active_paths(self) -> None:
+        query = SimpleNamespace(
+            id="q1",
+            query="rank the work",
+            category="event_ordering",
+            metadata={"ordering_tested": ["first step"]},
+        )
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=3,
+            query_ids=None,
+            max_queries=None,
+            gate=True,
+            mode="graph_only",
+            hybrid_source="source_spans",
+        )
+        service = SimpleNamespace(close=MagicMock())
+
+        with patch.object(replay, "_load_official_beam_dataset", return_value=(None, [query])), patch.object(
+            replay, "memory_service_from_env", return_value=service
+        ), patch.object(
+            replay, "BeamAdapter", return_value=SimpleNamespace(_beam_scope=MagicMock(return_value=SimpleNamespace()))
+        ), patch.object(
+            replay,
+            "preflight_replay_environment_from_store",
+            return_value={"status": "ok", "error": None, "chronology_tables_ready": True, "chronology_error": None},
+        ), patch.object(
+            replay,
+            "_graph_items",
+            return_value=(["first step"], ["event_ordering_persisted_graph"], False),
+        ):
+            report = run_replay(args)
+
+        self.assertFalse(report["gate"]["passed"])
+        self.assertIn("insufficient_active_paths", report["gate"]["failures"])
 
 
 class BeamEventOrderingGateTests(unittest.TestCase):

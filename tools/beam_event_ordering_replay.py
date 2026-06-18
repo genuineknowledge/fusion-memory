@@ -128,6 +128,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     started = perf_counter()
     try:
         preflight = preflight_replay_environment_from_store(service)
+        active_paths = _active_paths(args.mode)
         for query in event_queries:
             query_scope = adapter._beam_scope(query.id)
             reference = _event_order_reference(query)
@@ -162,24 +163,17 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                         "bucket": _event_ordering_bucket(query.query, reference),
                         "graph_fallback": graph_fallback,
                         "coverage": hybrid_coverage,
-                        "paths": {
-                            "graph": {
-                                "items": graph_items,
-                                "sources": graph_sources,
-                                "metrics": score_ordering_candidates(reference, graph_items),
-                            },
-                            "legacy": {
-                                "items": legacy_items,
-                                "sources": legacy_sources,
-                                "metrics": score_ordering_candidates(reference, legacy_items),
-                            },
-                            "hybrid": {
-                                "items": hybrid_items,
-                                "sources": hybrid_sources,
-                                "coverage": hybrid_coverage,
-                                "metrics": score_ordering_candidates(reference, hybrid_items),
-                            },
-                        },
+                        "paths": _build_record_paths(
+                            reference,
+                            active_paths,
+                            graph_items=graph_items,
+                            graph_sources=graph_sources,
+                            legacy_items=legacy_items,
+                            legacy_sources=legacy_sources,
+                            hybrid_items=hybrid_items,
+                            hybrid_sources=hybrid_sources,
+                            hybrid_coverage=hybrid_coverage,
+                        ),
                     },
                 )
             )
@@ -365,8 +359,13 @@ def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
     diagnostics_records = [record if "graph_fallback" in record else _with_record_diagnostics(dict(record)) for record in records]
     out: dict[str, Any] = {}
     for path in ("graph", "legacy", "hybrid"):
-        metrics = [record["paths"][path]["metrics"] for record in diagnostics_records]
+        metrics = _active_metrics(diagnostics_records, path)
+        if not metrics:
+            out[path] = {"active": False, "count": 0}
+            continue
         out[path] = {
+            "active": True,
+            "count": len(metrics),
             "precision": _mean(metrics, "precision"),
             "recall": _mean(metrics, "recall"),
             "f1": _mean(metrics, "f1"),
@@ -411,8 +410,11 @@ def _event_ordering_bucket(query: str, reference: list[str]) -> str:
 def _bucket_summary(records: list[dict[str, Any]], path: str) -> dict[str, dict[str, float | int]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
+        path_info = record.get("paths", {}).get(path, {})
+        if not _path_is_active(path_info):
+            continue
         bucket = str(record.get("bucket") or "unknown")
-        grouped.setdefault(bucket, []).append(record.get("paths", {}).get(path, {}).get("metrics", {}))
+        grouped.setdefault(bucket, []).append(path_info.get("metrics", {}))
     summary: dict[str, dict[str, float | int]] = {}
     for bucket, metrics in grouped.items():
         summary[bucket] = {
@@ -428,6 +430,8 @@ def _bucket_summary(records: list[dict[str, Any]], path: str) -> dict[str, dict[
 def _route_summary(records: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
+        if not _path_is_active(record.get("paths", {}).get("hybrid", {})):
+            continue
         coverage = record.get("coverage", {})
         shadow = coverage.get("event_ordering_shadow", {}) if isinstance(coverage, dict) else {}
         route = str(shadow.get("selected_driver") or "unreported")
@@ -440,6 +444,8 @@ def evaluate_gate(summary: dict[str, dict[str, float]]) -> dict[str, object]:
     graph = summary.get("graph", {})
     legacy = summary.get("legacy", {})
     hybrid = summary.get("hybrid", {})
+    if not all(_summary_path_active(path_summary) for path_summary in (graph, legacy, hybrid)):
+        return {"passed": False, "failures": ["insufficient_active_paths"]}
     if float(graph.get("f1", 0.0)) < float(legacy.get("f1", 0.0)):
         failures.append("graph_f1_below_legacy")
     if float(graph.get("kendall_tau_norm", 0.0)) < float(legacy.get("kendall_tau_norm", 0.0)):
@@ -452,19 +458,110 @@ def evaluate_gate(summary: dict[str, dict[str, float]]) -> dict[str, object]:
 
 
 def _path_wins(records: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    paths = ("graph", "legacy", "hybrid")
+    active_paths = sorted(
+        {
+            path
+            for record in records
+            for path in ("graph", "legacy", "hybrid")
+            if _path_is_active(record.get("paths", {}).get(path, {}))
+        }
+    )
     out = {
-        "f1": {path: 0 for path in paths},
-        "kendall_tau_norm": {path: 0 for path in paths},
+        "f1": {path: 0 for path in active_paths},
+        "kendall_tau_norm": {path: 0 for path in active_paths},
     }
     for record in records:
         for metric in out:
-            scores = {path: float(record["paths"][path]["metrics"].get(metric) or 0.0) for path in paths}
+            scores = {
+                path: float(record["paths"][path]["metrics"].get(metric) or 0.0)
+                for path in active_paths
+                if _path_is_active(record.get("paths", {}).get(path, {}))
+            }
+            if not scores:
+                continue
             best = max(scores.values())
             for path, score in scores.items():
                 if score == best:
                     out[metric][path] += 1
     return out
+
+
+def _active_paths(mode: str) -> set[str]:
+    if mode == "all":
+        return {"graph", "legacy", "hybrid"}
+    mapping = {
+        "graph_only": {"graph"},
+        "legacy_only": {"legacy"},
+        "hybrid": {"hybrid"},
+    }
+    return mapping.get(mode, {"graph", "legacy", "hybrid"})
+
+
+def _build_record_paths(
+    reference: list[str],
+    active_paths: set[str],
+    *,
+    graph_items: list[str],
+    graph_sources: list[str],
+    legacy_items: list[str],
+    legacy_sources: list[str],
+    hybrid_items: list[str],
+    hybrid_sources: list[str],
+    hybrid_coverage: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    paths: dict[str, dict[str, Any]] = {
+        "graph": _inactive_path(),
+        "legacy": _inactive_path(),
+        "hybrid": _inactive_path(),
+    }
+    if "graph" in active_paths:
+        paths["graph"] = {
+            "active": True,
+            "items": graph_items,
+            "sources": graph_sources,
+            "metrics": score_ordering_candidates(reference, graph_items),
+        }
+    if "legacy" in active_paths:
+        paths["legacy"] = {
+            "active": True,
+            "items": legacy_items,
+            "sources": legacy_sources,
+            "metrics": score_ordering_candidates(reference, legacy_items),
+        }
+    if "hybrid" in active_paths:
+        paths["hybrid"] = {
+            "active": True,
+            "items": hybrid_items,
+            "sources": hybrid_sources,
+            "coverage": hybrid_coverage,
+            "metrics": score_ordering_candidates(reference, hybrid_items),
+        }
+    return paths
+
+
+def _inactive_path() -> dict[str, Any]:
+    return {"active": False, "items": [], "sources": [], "inactive": True}
+
+
+def _path_is_active(path_info: dict[str, Any]) -> bool:
+    if not isinstance(path_info, dict):
+        return False
+    return bool(path_info.get("active", "metrics" in path_info))
+
+
+def _active_metrics(records: list[dict[str, Any]], path: str) -> list[dict[str, Any]]:
+    return [
+        record["paths"][path]["metrics"]
+        for record in records
+        if _path_is_active(record.get("paths", {}).get(path, {})) and "metrics" in record["paths"][path]
+    ]
+
+
+def _summary_path_active(path_summary: dict[str, Any]) -> bool:
+    if bool(path_summary.get("active")) and int(path_summary.get("count") or 0) > 0:
+        return True
+    metric_keys = {"f1", "kendall_tau_norm", "precision", "recall", "empty_rate", "mean_system_count", "mean_matched"}
+    return any(key in path_summary for key in metric_keys)
 
 
 def _with_record_diagnostics(record: dict[str, Any]) -> dict[str, Any]:
