@@ -57,6 +57,16 @@ class BeamReplayPreflightTests(unittest.TestCase):
         self.assertFalse(report["chronology_tables_ready"])
         self.assertEqual(report["chronology_error"], "missing_chronology_tables")
 
+    def test_preflight_accepts_memory_service_wrapper(self) -> None:
+        class Store:
+            def list_chronology_topics(self, scope, include_session=False):
+                return []
+
+        report = preflight_replay_environment_from_store(SimpleNamespace(store=Store()))
+
+        self.assertEqual(report["status"], "ok")
+        self.assertTrue(report["chronology_tables_ready"])
+
     def test_hybrid_source_spans_skips_pack_for_model(self) -> None:
         pack = SimpleNamespace(
             source_spans=[

@@ -57,8 +57,9 @@ def main() -> None:
 
 
 def preflight_replay_environment_from_store(store: Any) -> dict[str, object]:
+    chronology_store = getattr(store, "store", store)
     try:
-        store.list_chronology_topics(
+        chronology_store.list_chronology_topics(
             Scope(workspace_id="preflight", user_id="preflight", agent_id="preflight"),
             include_session=True,
         )
