@@ -51,6 +51,8 @@ class BeamReplayPreflightTests(unittest.TestCase):
 
         report = preflight_replay_environment_from_store(Store())
 
+        self.assertEqual(report["status"], "failure")
+        self.assertEqual(report["error"], "missing_chronology_tables")
         self.assertFalse(report["chronology_tables_ready"])
         self.assertEqual(report["chronology_error"], "missing_chronology_tables")
 
@@ -99,7 +101,14 @@ class BeamReplayPreflightTests(unittest.TestCase):
         )
 
         with patch.object(replay.argparse.ArgumentParser, "parse_args", return_value=args), patch.object(
-            replay, "preflight_replay_environment", return_value={"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}
+            replay,
+            "preflight_replay_environment",
+            return_value={
+                "status": "failure",
+                "error": "missing_chronology_tables",
+                "chronology_tables_ready": False,
+                "chronology_error": "missing_chronology_tables",
+            },
         ), patch.object(replay, "run_replay", side_effect=AssertionError("run_replay should not be called in preflight-only mode")), patch.object(
             replay, "print"
         ) as print_mock, patch.object(
@@ -116,12 +125,87 @@ class BeamReplayPreflightTests(unittest.TestCase):
             replay.json.loads(written),
             {
                 "preflight": {
+                    "status": "failure",
+                    "error": "missing_chronology_tables",
                     "chronology_tables_ready": False,
                     "chronology_error": "missing_chronology_tables",
                 }
             },
         )
-        print_mock.assert_called_once_with(replay.json.dumps({"preflight": {"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}, "output": "written"}, ensure_ascii=False))
+        print_mock.assert_called_once_with(
+            replay.json.dumps(
+                {
+                    "preflight": {
+                        "status": "failure",
+                        "error": "missing_chronology_tables",
+                        "chronology_tables_ready": False,
+                        "chronology_error": "missing_chronology_tables",
+                    },
+                    "output": "written",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def test_main_preflight_only_writes_json_when_initialization_fails(self) -> None:
+        output_path = "/tmp/beam-replay-preflight-init-failure.json"
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=8,
+            query_ids=None,
+            max_queries=None,
+            gate=False,
+            output=output_path,
+            preflight_only=True,
+            hybrid_source="model_pack",
+        )
+
+        with patch.object(replay.argparse.ArgumentParser, "parse_args", return_value=args), patch.object(
+            replay, "memory_service_from_env", side_effect=RuntimeError("connect failed")
+        ), patch.object(replay, "run_replay", side_effect=AssertionError("run_replay should not be called in preflight-only mode")), patch.object(
+            replay, "print"
+        ) as print_mock, patch.object(
+            replay.Path, "write_text"
+        ) as write_text_mock, patch.object(
+            replay.Path, "mkdir"
+        ) as mkdir_mock:
+            main()
+
+        mkdir_mock.assert_called_once()
+        write_text_mock.assert_called_once()
+        written = write_text_mock.call_args.args[0]
+        self.assertEqual(
+            replay.json.loads(written),
+            {
+                "preflight": {
+                    "status": "failure",
+                    "error": "RuntimeError",
+                    "chronology_tables_ready": False,
+                    "chronology_error": "RuntimeError",
+                }
+            },
+        )
+        print_mock.assert_called_once_with(
+            replay.json.dumps(
+                {
+                    "preflight": {
+                        "status": "failure",
+                        "error": "RuntimeError",
+                        "chronology_tables_ready": False,
+                        "chronology_error": "RuntimeError",
+                    },
+                    "output": "written",
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 class BeamEventOrderingGateTests(unittest.TestCase):

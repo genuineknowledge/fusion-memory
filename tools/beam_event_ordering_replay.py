@@ -64,14 +64,37 @@ def preflight_replay_environment_from_store(store: Any) -> dict[str, object]:
     except Exception as exc:
         message = str(exc).lower()
         if "chronology_" in message and ("does not exist" in message or "no such table" in message):
-            return {"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}
-        return {"chronology_tables_ready": False, "chronology_error": type(exc).__name__}
-    return {"chronology_tables_ready": True, "chronology_error": None}
+            return {
+                "status": "failure",
+                "error": "missing_chronology_tables",
+                "chronology_tables_ready": False,
+                "chronology_error": "missing_chronology_tables",
+            }
+        return {
+            "status": "failure",
+            "error": type(exc).__name__,
+            "chronology_tables_ready": False,
+            "chronology_error": type(exc).__name__,
+        }
+    return {
+        "status": "ok",
+        "error": None,
+        "chronology_tables_ready": True,
+        "chronology_error": None,
+    }
 
 
 def preflight_replay_environment(args: argparse.Namespace) -> dict[str, object]:
     backend = "postgres" if str(args.db).startswith(("postgresql://", "postgres://")) else None
-    service = memory_service_from_env(args.db, storage_backend=backend)
+    try:
+        service = memory_service_from_env(args.db, storage_backend=backend)
+    except Exception as exc:
+        return {
+            "status": "failure",
+            "error": type(exc).__name__,
+            "chronology_tables_ready": False,
+            "chronology_error": type(exc).__name__,
+        }
     try:
         return preflight_replay_environment_from_store(service)
     finally:
