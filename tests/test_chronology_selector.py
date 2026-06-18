@@ -32,9 +32,10 @@ class ChronologySelectorTests(unittest.TestCase):
             include_session=True,
         )
 
-        self.assertGreaterEqual(len(candidates), 1)
+        self.assertGreaterEqual(len(candidates), 2)
         self.assertEqual(candidates[0].source, "event_ordering_persisted_graph")
         self.assertIn("schema", candidates[0].text.lower())
+        self.assertIn("crud", candidates[1].text.lower())
         self.assertTrue(all("lunch" not in candidate.text.lower() for candidate in candidates))
         self.assertEqual(telemetry["selected_driver"], "persisted_graph")
 

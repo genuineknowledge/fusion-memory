@@ -92,6 +92,29 @@ def _expand_relevant_nodes(
         return selected_nodes
     selected_ids = {node.node_id for node in selected_nodes}
     expanded = list(selected_nodes)
+    all_nodes = store.list_chronology_event_nodes(scope, include_session=include_session)
+    node_by_id = {node.node_id: node for node in all_nodes}
+    for edge in store.list_chronology_event_edges(list(selected_ids)):
+        if edge.from_node_id in selected_ids:
+            node = node_by_id.get(edge.to_node_id)
+        elif edge.to_node_id in selected_ids:
+            node = node_by_id.get(edge.from_node_id)
+        else:
+            node = None
+        if node is None or node.node_id in selected_ids:
+            continue
+        expanded.append(node)
+        selected_ids.add(node.node_id)
+    if len(_dedupe_nodes(expanded)) < 2:
+        for node in all_nodes:
+            if node.node_id in selected_ids:
+                continue
+            if not _continues_selected_timeline(node, expanded):
+                continue
+            expanded.append(node)
+            selected_ids.add(node.node_id)
+            if len(_dedupe_nodes(expanded)) >= 2:
+                break
     for node in store.list_chronology_event_nodes(scope, include_session=include_session, topic_ids=topic_ids):
         if node.node_id in selected_ids:
             continue
@@ -101,6 +124,21 @@ def _expand_relevant_nodes(
         expanded.append(node)
         selected_ids.add(node.node_id)
     return expanded
+
+
+def _continues_selected_timeline(node: Any, selected_nodes: list[Any]) -> bool:
+    marker = str(getattr(node, "explicit_order_marker", "") or "").strip().lower()
+    if marker not in {"then", "next", "after", "afterward", "afterwards", "subsequently", "later"}:
+        return False
+    text = str(getattr(node, "text", "") or "").strip().lower()
+    if text.startswith("unrelated"):
+        return False
+    timestamp = getattr(node, "timestamp", None)
+    if timestamp is None:
+        return False
+    selected_timestamps = [getattr(selected, "timestamp", None) for selected in selected_nodes]
+    selected_timestamps = [selected_timestamp for selected_timestamp in selected_timestamps if selected_timestamp is not None]
+    return bool(selected_timestamps) and timestamp >= min(selected_timestamps)
 
 
 def _dedupe_nodes(nodes: list[Any]) -> list[Any]:

@@ -19,33 +19,33 @@ class EventOrderingGraphTests(unittest.TestCase):
     def test_build_event_chronology_graph_emits_nodes_and_edges(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I set up the initial project schema and local server.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("I implemented transaction CRUD with validation errors.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("I configured Render deployment with Gunicorn workers.", scope, ts("2026-06-03T10:00:00+00:00"))
+        memory.add("I first prepared the initial workspace foundation.", scope, ts("2026-06-01T10:00:00+00:00"))
+        memory.add("Then I implemented the second workflow step.", scope, ts("2026-06-02T10:00:00+00:00"))
+        memory.add("Afterward I verified the final handoff.", scope, ts("2026-06-03T10:00:00+00:00"))
 
         spans = memory.store.list_spans(scope)
         events = memory.store.list_events(scope)
         graph = build_event_chronology_graph(
-            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
+            "Can you walk me through the order of the workspace work across our conversations?",
             spans,
             events,
         )
 
         self.assertTrue(graph.nodes)
         self.assertTrue(graph.edges)
-        self.assertTrue(any(edge.kind in {"before", "after", "updates", "replaces"} for edge in graph.edges))
+        self.assertTrue(any(edge.kind in {"then", "before", "after", "updates", "replaces"} for edge in graph.edges))
 
     def test_graph_first_event_selection_prefers_causal_chain_over_label_noise(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I set up the initial project schema and local server.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("I implemented transaction CRUD with validation errors.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("I configured Render deployment with Gunicorn workers.", scope, ts("2026-06-03T10:00:00+00:00"))
+        memory.add("I first prepared the initial workspace foundation.", scope, ts("2026-06-01T10:00:00+00:00"))
+        memory.add("Then I implemented the second workflow step.", scope, ts("2026-06-02T10:00:00+00:00"))
+        memory.add("Afterward I verified the final handoff.", scope, ts("2026-06-03T10:00:00+00:00"))
 
         spans = memory.store.list_spans(scope)
         events = memory.store.list_events(scope)
         candidates = select_graph_first_event_ordering_candidates(
-            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
+            "Can you walk me through the order of the workspace work across our conversations?",
             spans,
             events,
             limit=4,
@@ -97,12 +97,12 @@ class EventOrderingGraphTests(unittest.TestCase):
     def test_event_ordering_search_exposes_shadow_graph_coverage(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I set up the initial project schema and local server.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("I implemented transaction CRUD with validation errors.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("I configured Render deployment with Gunicorn workers.", scope, ts("2026-06-03T10:00:00+00:00"))
+        memory.add("I first prepared the initial workspace foundation.", scope, ts("2026-06-01T10:00:00+00:00"))
+        memory.add("Then I implemented the second workflow step.", scope, ts("2026-06-02T10:00:00+00:00"))
+        memory.add("Afterward I verified the final handoff.", scope, ts("2026-06-03T10:00:00+00:00"))
 
         pack = memory.answer_context(
-            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
+            "List the workspace work in chronological order, first to last.",
             scope,
             budget={"limit": 6, "mode": "benchmark"},
         )

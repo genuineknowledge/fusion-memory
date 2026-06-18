@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from collections import Counter
 from typing import Any
 
 from fusion_memory.core.models import Candidate, MemoryEvent
@@ -37,7 +38,7 @@ class ChronologyGraph:
 
 
 _PHASE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("setup", ("setup", "set up", "initialize", "initial", "schema", "bootstrap", "foundation")),
+    ("setup", ("setup", "set up", "initialize", "initial", "bootstrap", "foundation")),
     ("decision", ("decide", "decided", "choose", "chose", "picked", "opted", "settled on")),
     ("implementation", ("implement", "implemented", "build", "built", "add", "added", "configure", "configured")),
     ("debug", ("debug", "debugged", "fix", "fixed", "issue", "problem", "error", "troubleshoot")),
@@ -258,36 +259,19 @@ def _best_span_timestamp(event: MemoryEvent, span_by_id: dict[str, Any]) -> date
 
 
 def _topic_for_event(query: str, event: MemoryEvent, span: Any | None) -> str | None:
-    text = " ".join(
-        value
-        for value in [
-            event.description,
-            " ".join(getattr(span, "topics", []) or []),
-            query,
-        ]
-        if value
-    ).lower()
-    tokens = [token for token in tokenize(text) if len(token) > 3]
-    if not tokens:
+    topic_tokens = [token for token in tokenize(" ".join(getattr(span, "topics", []) or [])) if len(token) > 3]
+    if topic_tokens:
+        return Counter(topic_tokens).most_common(1)[0][0]
+
+    event_tokens = [token for token in tokenize(event.description or "") if len(token) > 3]
+    if not event_tokens:
         return None
-    priority = [
-        "setup",
-        "schema",
-        "decision",
-        "implementation",
-        "debug",
-        "validation",
-        "release",
-        "deployment",
-        "transaction",
-        "validation",
-        "server",
-        "render",
-    ]
-    for token in priority:
-        if token in tokens:
+
+    query_tokens = {token for token in tokenize(query) if len(token) > 3}
+    for token in event_tokens:
+        if token in query_tokens:
             return token
-    return tokens[0]
+    return Counter(event_tokens).most_common(1)[0][0]
 
 
 def _phase_for_text(text: str) -> str:
