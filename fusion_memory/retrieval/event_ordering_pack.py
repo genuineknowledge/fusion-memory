@@ -39,7 +39,6 @@ def build_event_ordering_model_pack(
     conflicts: list[dict[str, Any]],
     contract_version: str,
     query_intent: dict[str, Any] | None = None,
-    **_legacy_graph_kwargs: Any,
 ) -> dict[str, Any]:
     compact_source_spans = _compact_event_ordering_records(source_spans, preferred_text_key="content")
     compact_events = _compact_event_ordering_records(events, preferred_text_key="description")
