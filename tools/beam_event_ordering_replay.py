@@ -42,6 +42,7 @@ def main() -> None:
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--gate", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--mode", choices=("graph_only", "legacy_only", "hybrid", "all"), default="all")
     parser.add_argument("--hybrid-source", choices=("model_pack", "source_spans"), default="model_pack")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -130,22 +131,35 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
         for query in event_queries:
             query_scope = adapter._beam_scope(query.id)
             reference = _event_order_reference(query)
-            graph_items, graph_sources, graph_fallback = _graph_items(service, query.query, query_scope, args.limit)
-            legacy_items, legacy_sources = _legacy_items(service, query.query, query_scope, args.limit)
-            hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(
-                service,
-                query.query,
-                query_scope,
-                args.limit,
-                query.category,
-                hybrid_source=args.hybrid_source,
-            )
+            graph_items: list[str] = []
+            graph_sources: list[str] = []
+            graph_fallback = False
+            legacy_items: list[str] = []
+            legacy_sources: list[str] = []
+            hybrid_items: list[str] = []
+            hybrid_sources: list[str] = []
+            hybrid_coverage: dict[str, Any] = {}
+
+            if args.mode in {"graph_only", "all"}:
+                graph_items, graph_sources, graph_fallback = _graph_items(service, query.query, query_scope, args.limit)
+            if args.mode in {"legacy_only", "all"}:
+                legacy_items, legacy_sources = _legacy_items(service, query.query, query_scope, args.limit)
+            if args.mode in {"hybrid", "all"}:
+                hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(
+                    service,
+                    query.query,
+                    query_scope,
+                    args.limit,
+                    query.category,
+                    hybrid_source=args.hybrid_source,
+                )
             records.append(
                 _with_record_diagnostics(
                     {
                         "query_id": query.id,
                         "query": query.query,
                         "reference": reference,
+                        "bucket": _event_ordering_bucket(query.query, reference),
                         "graph_fallback": graph_fallback,
                         "coverage": hybrid_coverage,
                         "paths": {
@@ -177,6 +191,17 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
             "elapsed_seconds": perf_counter() - started,
             "preflight": preflight,
             "summary": _aggregate(records),
+            "bucket_summary": {
+                "graph": _bucket_summary(records, "graph"),
+                "legacy": _bucket_summary(records, "legacy"),
+                "hybrid": _bucket_summary(records, "hybrid"),
+            },
+            "route_summary": _route_summary(records),
+            "replay_config": {
+                "mode": args.mode,
+                "hybrid_source": args.hybrid_source,
+                "limit": args.limit,
+            },
             "records": records,
         }
         if getattr(args, "gate", False):
@@ -367,6 +392,47 @@ def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         int(record.get("over_abstract_label_count") or 0) for record in diagnostics_records
     )
     return out
+
+
+def _event_ordering_bucket(query: str, reference: list[str]) -> str:
+    lower = query.lower()
+    joined = " ".join(reference).lower()
+    if re.search(r"\b(?:first|then|after|before|next|later)\b|首先|然后|之后|之前", joined):
+        return "explicit_order"
+    if re.search(r"\b20\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|月\s*\d+\s*日", joined):
+        return "dated"
+    if len(reference) >= 5 or re.search(r"\b(?:across|throughout|different aspects|long timeline)\b", lower):
+        return "long_mixed_topic"
+    if re.search(r"[\u4e00-\u9fff]", query):
+        return "chinese"
+    return "implicit_order"
+
+
+def _bucket_summary(records: list[dict[str, Any]], path: str) -> dict[str, dict[str, float | int]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        bucket = str(record.get("bucket") or "unknown")
+        grouped.setdefault(bucket, []).append(record.get("paths", {}).get(path, {}).get("metrics", {}))
+    summary: dict[str, dict[str, float | int]] = {}
+    for bucket, metrics in grouped.items():
+        summary[bucket] = {
+            "count": len(metrics),
+            "precision": _mean(metrics, "precision"),
+            "recall": _mean(metrics, "recall"),
+            "f1": _mean(metrics, "f1"),
+            "kendall_tau_norm": _mean(metrics, "kendall_tau_norm"),
+        }
+    return summary
+
+
+def _route_summary(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        coverage = record.get("coverage", {})
+        shadow = coverage.get("event_ordering_shadow", {}) if isinstance(coverage, dict) else {}
+        route = str(shadow.get("selected_driver") or "unreported")
+        counts[route] = counts.get(route, 0) + 1
+    return counts
 
 
 def evaluate_gate(summary: dict[str, dict[str, float]]) -> dict[str, object]:

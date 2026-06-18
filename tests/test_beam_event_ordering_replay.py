@@ -208,6 +208,21 @@ class BeamReplayPreflightTests(unittest.TestCase):
         )
 
 
+class BeamReplayBucketTests(unittest.TestCase):
+    def test_bucket_summary_groups_event_ordering_cases(self) -> None:
+        records = [
+            {"bucket": "explicit_order", "paths": {"graph": {"metrics": {"f1": 1.0, "kendall_tau_norm": 1.0}}}},
+            {"bucket": "explicit_order", "paths": {"graph": {"metrics": {"f1": 0.0, "kendall_tau_norm": 0.5}}}},
+            {"bucket": "long_mixed_topic", "paths": {"graph": {"metrics": {"f1": 0.5, "kendall_tau_norm": 0.75}}}},
+        ]
+
+        summary = replay._bucket_summary(records, path="graph")
+
+        self.assertEqual(summary["explicit_order"]["count"], 2)
+        self.assertAlmostEqual(summary["explicit_order"]["f1"], 0.5)
+        self.assertEqual(summary["long_mixed_topic"]["count"], 1)
+
+
 class BeamEventOrderingGateTests(unittest.TestCase):
     def test_evaluate_gate_requires_graph_to_match_legacy_f1_and_tau(self) -> None:
         summary = {
