@@ -615,6 +615,7 @@ def _compact_coverage(coverage: dict[str, Any]) -> dict[str, Any]:
         "event_ordering_shadow",
         "coverage_insufficient",
         "dropped_high_signal_candidates",
+        "rule_hits",
     ]
     return {key: coverage.get(key) for key in keys if key in coverage}
 

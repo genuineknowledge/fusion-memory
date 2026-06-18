@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import tools.beam_event_ordering_replay as replay
 from tools.beam_event_ordering_replay import (
     _aggregate,
+    _compact_coverage,
     _hybrid_items,
     _graph_items,
     _record_diagnostics,
@@ -90,6 +91,21 @@ class BeamReplayPreflightTests(unittest.TestCase):
         self.assertEqual(items, ["first source span", "second source span"])
         self.assertEqual(sources, ["source_a", "source_b"])
         self.assertEqual(coverage, {"event_ordering_shadow": {"selected_driver": "graph"}})
+
+    def test_compact_coverage_preserves_rule_hits_for_audit(self) -> None:
+        coverage = _compact_coverage(
+            {
+                "query_type": "event_ordering",
+                "rule_hits": [{"rule_id": "event_ordering.legacy_rescue", "text_hash": "abc123"}],
+                "unrelated": "drop",
+            }
+        )
+
+        self.assertEqual(
+            coverage["rule_hits"],
+            [{"rule_id": "event_ordering.legacy_rescue", "text_hash": "abc123"}],
+        )
+        self.assertNotIn("unrelated", coverage)
 
     def test_main_preflight_only_writes_preflight_report(self) -> None:
         output_path = "/tmp/beam-replay-preflight-only.json"
