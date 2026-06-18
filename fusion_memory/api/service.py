@@ -54,7 +54,7 @@ from fusion_memory.retrieval.query_planner import QueryPlanner
 from fusion_memory.retrieval.raw_evidence_quota import RawEvidenceQuota
 from fusion_memory.retrieval.preservation import annotate_runtime_preservation_candidates, preserve_required_candidates
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker, rerank_candidates
-from fusion_memory.retrieval.rule_registry import RuleDefinition, drain_rule_hits, record_rule_hit, register_rule
+from fusion_memory.retrieval.rule_registry import RuleDefinition, collect_rule_hits, record_rule_hit, register_rule
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.scoring import score_candidate
 from fusion_memory.retrieval.structured_annotations import select_event_ordering_timeline
@@ -210,6 +210,10 @@ class MemoryService:
             pass
 
     def add(self, input: Any, scope: Scope, session_time: datetime | None = None, metadata: dict[str, Any] | None = None) -> AddResult:
+        with collect_rule_hits() as rule_hits:
+            return self._add_with_rule_hits(input, scope, session_time, metadata, rule_hits)
+
+    def _add_with_rule_hits(self, input: Any, scope: Scope, session_time: datetime | None, metadata: dict[str, Any] | None, rule_hits) -> AddResult:
         scope.validate_for_add()
         self._authorize("memory.add", scope, {"metadata": metadata or {}})
         model_call_marks = self._model_call_marks()
@@ -299,7 +303,7 @@ class MemoryService:
         )
         model_calls = self._model_calls_since(model_call_marks)
         trace["model_calls"] = model_calls
-        trace["rule_hits"] = [hit.__dict__ for hit in drain_rule_hits()]
+        trace["rule_hits"] = [hit.__dict__ for hit in rule_hits.drain()]
         self.store.save_trace(trace_id, trace, scope)
         self.store.insert_audit_event(
             scope,
@@ -327,6 +331,10 @@ class MemoryService:
         )
 
     def search(self, query: str, scope: Scope, options: dict[str, Any] | None = None) -> SearchResult:
+        with collect_rule_hits() as rule_hits:
+            return self._search_with_rule_hits(query, scope, options, rule_hits)
+
+    def _search_with_rule_hits(self, query: str, scope: Scope, options: dict[str, Any] | None, rule_hits) -> SearchResult:
         options = options or {}
         scope.validate_for_read()
         allow_cross_session = bool(options.get("allow_cross_session", False))
@@ -488,7 +496,7 @@ class MemoryService:
                 )
         model_calls = self._model_calls_since(model_call_marks)
         trace["model_calls"] = model_calls
-        trace["rule_hits"] = [hit.__dict__ for hit in drain_rule_hits()]
+        trace["rule_hits"] = [hit.__dict__ for hit in rule_hits.drain()]
         self.store.save_trace(trace_id, trace, scope)
         self.store.insert_audit_event(
             scope,
@@ -509,6 +517,10 @@ class MemoryService:
         return SearchResult(candidates=selected, trace_id=trace_id, coverage=coverage)
 
     def answer_context(self, query: str, scope: Scope, budget: dict[str, Any] | None = None) -> EvidencePack:
+        with collect_rule_hits() as rule_hits:
+            return self._answer_context_with_rule_hits(query, scope, budget, rule_hits)
+
+    def _answer_context_with_rule_hits(self, query: str, scope: Scope, budget: dict[str, Any] | None, rule_hits) -> EvidencePack:
         budget = budget or {}
         mode = budget.get("mode", "fast")
         limit = budget.get("limit")
@@ -563,7 +575,7 @@ class MemoryService:
             trace.get("selected", []),
             token_budget=token_budget,
         )
-        pack_rule_hits = [hit.__dict__ for hit in drain_rule_hits()]
+        pack_rule_hits = [hit.__dict__ for hit in rule_hits.drain()]
         if pack_rule_hits:
             seen_hit_keys = {
                 (

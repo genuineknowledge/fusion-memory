@@ -232,6 +232,38 @@ class RuleInstrumentationTests(unittest.TestCase):
         self.assertIsInstance(rule_hits, list)
         self.assertFalse(any(hit.get("rule_id") == "multi_condition.query_token_match" for hit in rule_hits or []))
 
+    def test_search_exception_discards_unpersisted_rule_hits(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="exception-trace", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            "请记住：我的默认数据库是 PostgreSQL。",
+            scope,
+            datetime(2026, 6, 18, tzinfo=timezone.utc),
+            {"source_uri": "zh1"},
+        )
+
+        original_candidate_lists = memory._candidate_lists
+
+        def failing_candidate_lists(*args, **kwargs):
+            record_rule_hit(
+                "exact_match.cjk_phrase",
+                query="我的默认数据库是什么？",
+                text="请记住：我的默认数据库是 PostgreSQL。",
+                stage="exact_filter",
+                metadata={"decision": "test_exception_cleanup"},
+            )
+            raise RuntimeError("candidate generation failed")
+
+        memory._candidate_lists = failing_candidate_lists
+        with self.assertRaises(RuntimeError):
+            memory.search("我的默认数据库是什么？", scope, {"mode": "fast", "limit": 5})
+
+        memory._candidate_lists = original_candidate_lists
+        result = memory.search("plain unmatched query", scope, {"mode": "fast", "limit": 1})
+        trace = memory.debug_trace(result.trace_id, scope)
+
+        self.assertEqual(trace.get("rule_hits"), [])
+
     def test_answer_context_preserves_search_rule_hits_and_deduplicates_pack_hits(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="ws", user_id="u", agent_id="a", session_id="s")
