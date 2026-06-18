@@ -93,6 +93,7 @@ class BeamEventOrderingGateTests(unittest.TestCase):
             "paths": {
                 "graph": {
                     "items": ["Alpha build", "Alpha build", "Implementation summary", "Unrelated billing note"],
+                    "sources": ["event_ordering_graph_selector"],
                     "metrics": {"system_count": 3},
                 },
             },
@@ -119,22 +120,62 @@ class BeamEventOrderingGateTests(unittest.TestCase):
                     SimpleNamespace(
                         source="event_ordering_persisted_graph",
                         text="persisted graph candidate",
-                        metadata={},
+                        metadata={
+                            "graph_selector_telemetry": {"selected_driver": "graph"},
+                        },
                     ),
                 ]
             )
         )
 
-        items, sources = _graph_items(service, "rank the work", SimpleNamespace(), 5)
+        items, sources, graph_fallback = _graph_items(service, "rank the work", SimpleNamespace(), 5)
 
         self.assertEqual(items, ["persisted graph candidate"])
         self.assertEqual(sources, ["event_ordering_persisted_graph"])
+        self.assertTrue(graph_fallback)
         service._event_ordering_graph_selector_candidates.assert_called_once_with(
             "rank the work",
             unittest.mock.ANY,
             limit=5,
             include_session=True,
         )
+
+    def test_graph_items_marks_fallback_false_when_persisted_graph_telemetry_stays_on_graph(self) -> None:
+        service = SimpleNamespace(
+            _event_ordering_graph_selector_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        source="event_ordering_persisted_graph",
+                        text="persisted graph candidate",
+                        metadata={
+                            "persisted_graph_telemetry": {"selected_driver": "graph"},
+                        },
+                    )
+                ]
+            )
+        )
+
+        items, sources, graph_fallback = _graph_items(service, "rank the work", SimpleNamespace(), 5)
+
+        self.assertEqual(items, ["persisted graph candidate"])
+        self.assertEqual(sources, ["event_ordering_persisted_graph"])
+        self.assertFalse(graph_fallback)
+
+    def test_record_diagnostics_uses_graph_sources_when_present_for_fallback(self) -> None:
+        record = {
+            "coverage": {"event_ordering_shadow": {"selected_driver": "graph"}},
+            "paths": {
+                "graph": {
+                    "items": ["persisted graph candidate"],
+                    "sources": ["event_ordering_graph_selector"],
+                    "metrics": {"system_count": 1},
+                }
+            },
+        }
+
+        diagnostics = _record_diagnostics(record)
+
+        self.assertTrue(diagnostics["graph_fallback"])
 
 
 if __name__ == "__main__":

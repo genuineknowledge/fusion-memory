@@ -78,7 +78,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
         for query in event_queries:
             query_scope = adapter._beam_scope(query.id)
             reference = _event_order_reference(query)
-            graph_items, graph_sources = _graph_items(service, query.query, query_scope, args.limit)
+            graph_items, graph_sources, graph_fallback = _graph_items(service, query.query, query_scope, args.limit)
             legacy_items, legacy_sources = _legacy_items(service, query.query, query_scope, args.limit)
             hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(service, query.query, query_scope, args.limit, query.category)
             records.append(
@@ -87,6 +87,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                         "query_id": query.id,
                         "query": query.query,
                         "reference": reference,
+                        "graph_fallback": graph_fallback,
                         "coverage": hybrid_coverage,
                         "paths": {
                             "graph": {
@@ -162,13 +163,16 @@ def _kendall_tau(reference_norm: list[str], aligned_system_norm: list[str]) -> f
     return _kendall_tau_b(to_rank(reference_norm), to_rank(aligned_system_norm))
 
 
-def _graph_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[list[str], list[str]]:
-    candidates = [
+def _graph_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[list[str], list[str], bool]:
+    candidates = list(
+        service._event_ordering_graph_selector_candidates(query, scope, limit=limit, include_session=True)
+    )
+    graph_candidates = [
         candidate
-        for candidate in service._event_ordering_graph_selector_candidates(query, scope, limit=limit, include_session=True)
+        for candidate in candidates
         if candidate.source == "event_ordering_persisted_graph"
     ]
-    return _candidate_texts(candidates, limit), [candidate.source for candidate in candidates[:limit]]
+    return _candidate_texts(graph_candidates, limit), [candidate.source for candidate in graph_candidates[:limit]], _graph_fallback(candidates)
 
 
 def _legacy_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[list[str], list[str]]:
@@ -349,7 +353,7 @@ def _record_diagnostics(record: dict[str, Any]) -> dict[str, Any]:
         "topic_drift_count": topic_drift_count,
         "duplicate_label_count": len(normalized_items) - len(set(normalized_items)),
         "graph_empty": int(graph.get("metrics", {}).get("system_count") or 0) == 0,
-        "graph_fallback": bool(shadow) and str(shadow.get("selected_driver") or "none") != "graph",
+        "graph_fallback": _record_graph_fallback(record, graph, shadow),
         "dropped_high_signal_candidate_count": len(coverage.get("dropped_high_signal_candidates", []))
         if isinstance(coverage.get("dropped_high_signal_candidates"), list)
         else 0,
@@ -375,6 +379,32 @@ def _compact_coverage(coverage: dict[str, Any]) -> dict[str, Any]:
         "dropped_high_signal_candidates",
     ]
     return {key: coverage.get(key) for key in keys if key in coverage}
+
+
+def _record_graph_fallback(record: dict[str, Any], graph: dict[str, Any], shadow: dict[str, Any]) -> bool:
+    if "graph_fallback" in record:
+        return bool(record.get("graph_fallback"))
+    sources = [str(source) for source in graph.get("sources", []) if str(source).strip()]
+    if sources:
+        return any(source != "event_ordering_persisted_graph" for source in sources)
+    if shadow:
+        return str(shadow.get("selected_driver") or "none") != "graph"
+    return False
+
+
+def _graph_fallback(candidates: list[Candidate]) -> bool:
+    if not candidates:
+        return True
+    for candidate in candidates:
+        if candidate.source != "event_ordering_persisted_graph":
+            return True
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        telemetry = metadata.get("graph_selector_telemetry") or metadata.get("persisted_graph_telemetry")
+        if isinstance(telemetry, dict):
+            selected_driver = str(telemetry.get("selected_driver") or "none")
+            if selected_driver != "graph":
+                return True
+    return False
 
 
 def _summary_for_stdout(report: dict[str, Any]) -> dict[str, Any]:
