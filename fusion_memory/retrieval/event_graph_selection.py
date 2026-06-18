@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from fusion_memory.core.models import MemoryEvent
 from fusion_memory.core.text import keyword_score
+from fusion_memory.retrieval.event_chronology_graph import build_event_chronology_graph, select_graph_first_event_ordering_candidates
 
 
 SOFTWARE_ASPECT_TERMS = {

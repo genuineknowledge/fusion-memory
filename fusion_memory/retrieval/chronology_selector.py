@@ -26,7 +26,7 @@ def select_persisted_graph_event_ordering_candidates(
         return [], {"selected_driver": "none", "fallback_reason": "no_topic"}
     phases = {phase.phase_id: phase for phase in store.list_chronology_phases(topic_ids)}
     nodes = store.list_chronology_event_nodes(scope, include_session=include_session, topic_ids=topic_ids)
-    nodes = _expand_relevant_nodes(query, scope, store, nodes, include_session=include_session)
+    nodes = _expand_relevant_nodes(query, scope, store, nodes, topic_ids=topic_ids, include_session=include_session)
     if not nodes:
         return [], {"selected_driver": "none", "fallback_reason": "no_nodes", "topic_ids": topic_ids}
     node_ids = [node.node_id for node in nodes]
@@ -84,6 +84,7 @@ def _expand_relevant_nodes(
     scope: Scope,
     store: Any,
     selected_nodes: list[Any],
+    topic_ids: list[str],
     *,
     include_session: bool,
 ) -> list[Any]:
@@ -91,7 +92,7 @@ def _expand_relevant_nodes(
         return selected_nodes
     selected_ids = {node.node_id for node in selected_nodes}
     expanded = list(selected_nodes)
-    for node in store.list_chronology_event_nodes(scope, include_session=include_session):
+    for node in store.list_chronology_event_nodes(scope, include_session=include_session, topic_ids=topic_ids):
         if node.node_id in selected_ids:
             continue
         relevance = keyword_score(query, f"{node.text} {node.action} {node.object}")
