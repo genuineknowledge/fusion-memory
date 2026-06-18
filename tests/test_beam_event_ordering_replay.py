@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-from tools.beam_event_ordering_replay import _aggregate, _record_diagnostics, evaluate_gate, score_ordering_candidates
+from tools.beam_event_ordering_replay import _aggregate, _graph_items, _record_diagnostics, evaluate_gate, score_ordering_candidates
 
 
 class BeamEventOrderingReplayTests(unittest.TestCase):
@@ -86,6 +88,35 @@ class BeamEventOrderingGateTests(unittest.TestCase):
         self.assertEqual(diagnostics["topic_drift_count"], 1)
         self.assertEqual(diagnostics["duplicate_label_count"], 1)
         self.assertFalse(diagnostics["graph_empty"])
+
+    def test_graph_items_only_count_persisted_graph_candidates(self) -> None:
+        service = SimpleNamespace(
+            _event_ordering_graph_selector_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        source="event_ordering_graph_selector",
+                        text="query-time fallback graph candidate",
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        source="event_ordering_persisted_graph",
+                        text="persisted graph candidate",
+                        metadata={},
+                    ),
+                ]
+            )
+        )
+
+        items, sources = _graph_items(service, "rank the work", SimpleNamespace(), 5)
+
+        self.assertEqual(items, ["persisted graph candidate"])
+        self.assertEqual(sources, ["event_ordering_persisted_graph"])
+        service._event_ordering_graph_selector_candidates.assert_called_once_with(
+            "rank the work",
+            unittest.mock.ANY,
+            limit=5,
+            include_session=True,
+        )
 
 
 if __name__ == "__main__":

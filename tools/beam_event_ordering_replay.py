@@ -165,7 +165,7 @@ def _graph_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[li
     candidates = [
         candidate
         for candidate in service._event_ordering_graph_selector_candidates(query, scope, limit=limit, include_session=True)
-        if not candidate.metadata.get("graph_fallback")
+        if candidate.source == "event_ordering_persisted_graph"
     ]
     return _candidate_texts(candidates, limit), [candidate.source for candidate in candidates[:limit]]
 
