@@ -30,6 +30,7 @@ from fusion_memory.ingestion.normalizer import normalize_input
 from fusion_memory.ingestion.views import ViewBuilder
 from fusion_memory.ingestion.window_builder import build_session_summary_span
 from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
+from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
@@ -55,6 +56,11 @@ from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Rerank
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.scoring import score_candidate
 from fusion_memory.retrieval.structured_annotations import select_event_ordering_timeline
+
+try:
+    from fusion_memory.retrieval.event_graph_selection import select_graph_first_event_ordering_candidates
+except ImportError:
+    select_graph_first_event_ordering_candidates = None
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer, UtilityTrainingReport
 from fusion_memory.retrieval.utility_scorer import utility_example
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
@@ -1311,6 +1317,18 @@ class MemoryService:
         *,
         include_session: bool = False,
     ) -> list[Candidate]:
+        persisted_candidates, persisted_telemetry = select_persisted_graph_event_ordering_candidates(
+            query,
+            scope,
+            self.store,
+            limit=limit,
+            include_session=include_session,
+        )
+        if persisted_candidates:
+            for candidate in persisted_candidates:
+                candidate.metadata["graph_selector_telemetry"] = persisted_telemetry
+            return persisted_candidates
+
         spans = [
             span
             for span in self.store.list_spans(scope, include_session=include_session)
@@ -1318,7 +1336,13 @@ class MemoryService:
             and span.speaker in {"user", "assistant", "agent", "document"}
         ]
         events = self.store.list_events(scope, include_session=include_session)
-        return select_event_ordering_timeline(query, spans, events, limit=limit)
+        if select_graph_first_event_ordering_candidates is None:
+            fallback_candidates = select_event_ordering_timeline(query, spans, events, limit=limit)
+        else:
+            fallback_candidates = select_graph_first_event_ordering_candidates(query, spans, events, limit=limit)
+        for candidate in fallback_candidates:
+            candidate.metadata["persisted_graph_telemetry"] = persisted_telemetry
+        return fallback_candidates
 
     def _event_ordering_timeline_candidates(
         self,
