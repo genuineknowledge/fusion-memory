@@ -270,6 +270,7 @@ class ChronologySelectorTests(unittest.TestCase):
         self.assertEqual(candidates, [])
         self.assertEqual(telemetry["fallback_reason"], "too_few_nodes")
 
+
     def test_service_uses_query_time_graph_selector_when_persisted_graph_is_unavailable(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="graph-fallback-query-time", user_id="u", agent_id="a", session_id="s")
@@ -572,3 +573,13 @@ class TaxonomyTests(unittest.TestCase):
         self.assertIn("flask", hits)
         self.assertIn("render", hits)
         self.assertIn("crud", hits)
+
+
+class TaxonomyMigrationTests(unittest.TestCase):
+    def test_taxonomy_covers_domain_labels_used_by_event_ordering_rules(self) -> None:
+        entries = load_default_taxonomy()
+        hits = taxonomy_alias_hits("Gunicorn worker ports and SQLite schema migrations", entries)
+
+        self.assertIn("gunicorn", hits)
+        self.assertIn("sqlite", hits)
+        self.assertIn("schema migration", hits)
