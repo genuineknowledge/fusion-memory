@@ -1,0 +1,8 @@
+[
+  {"label": "flask", "aliases": ["Flask", "Flask app"], "tags": ["framework"], "language": "en"},
+  {"label": "render", "aliases": ["Render", "Render.com"], "tags": ["deployment"], "language": "en"},
+  {"label": "crud", "aliases": ["CRUD", "create read update delete"], "tags": ["software"], "language": "en"},
+  {"label": "postgresql", "aliases": ["PostgreSQL", "Postgres"], "tags": ["database"], "language": "en"},
+  {"label": "qwen", "aliases": ["qwen", "qwen0.6B", "Qwen3"], "tags": ["model"], "language": "mixed"},
+  {"label": "memory system", "aliases": ["记忆系统", "memory system"], "tags": ["memory"], "language": "mixed"}
+]

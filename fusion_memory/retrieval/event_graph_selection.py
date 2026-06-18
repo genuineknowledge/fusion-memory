@@ -6,6 +6,7 @@ from typing import Any, Callable
 from fusion_memory.core.models import MemoryEvent
 from fusion_memory.core.text import keyword_score
 from fusion_memory.retrieval.event_chronology_graph import build_event_chronology_graph, select_graph_first_event_ordering_candidates
+from fusion_memory.retrieval.taxonomy import taxonomy_alias_hits
 
 
 SOFTWARE_ASPECT_TERMS = {
@@ -49,6 +50,8 @@ SOFTWARE_ASPECT_TERMS = {
     "validation",
     "worker",
 }
+
+TAXONOMY_SALIENT_LABELS = {"crud", "flask", "postgresql", "render"}
 
 EVENT_ACTION_TERMS = {
     "add",
@@ -113,6 +116,7 @@ EVENT_ORDERING_STOPWORDS = {
 
 
 def _event_ordering_milestone_score(text: str) -> float:
+    # Legacy fallback: domain-specific event ordering rescue. Do not extend; migrate to taxonomy after graph parity.
     lower = text.lower()
     group_scores = [
         _event_group_score(
@@ -405,7 +409,9 @@ def _event_group_query_fit(query_lower: str, group: str | None, description: str
     if not event_tokens and not group_tokens:
         return 0.0
     overlap = len(query_tokens.intersection(event_tokens.union(group_tokens))) / max(1, len(query_tokens))
+    taxonomy_hits = taxonomy_alias_hits(description)
     salient_hits = sum(1 for token in event_tokens.union(group_tokens) if token in SOFTWARE_ASPECT_TERMS)
+    salient_hits += sum(1 for label in taxonomy_hits if label in TAXONOMY_SALIENT_LABELS)
     action_hits = sum(1 for token in event_tokens if token in EVENT_ACTION_TERMS)
     compound_bonus = 0.10 if len(group_tokens) >= 2 else 0.0
     return min(1.0, (0.55 * overlap) + (0.06 * min(salient_hits, 5)) + (0.04 * min(action_hits, 3)) + compound_bonus)

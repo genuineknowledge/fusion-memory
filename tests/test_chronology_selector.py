@@ -9,6 +9,7 @@ from fusion_memory.core.chronology import ChronologyEventNode, ChronologyPhase, 
 from fusion_memory.core.models import Candidate
 from fusion_memory.core.models import Scope
 from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
+from fusion_memory.retrieval.taxonomy import load_default_taxonomy, taxonomy_alias_hits
 
 
 def ts(value: str) -> datetime:
@@ -293,3 +294,13 @@ class ChronologySelectorTests(unittest.TestCase):
         self.assertTrue(all(candidate.source != "event_ordering_graph_selector" for candidate in candidates))
         self.assertTrue(any(candidate.source.startswith("event_ordering_coverage") for candidate in candidates))
         self.assertEqual(candidates[0].metadata["persisted_graph_telemetry"]["fallback_reason"], "no_topic")
+
+
+class TaxonomyTests(unittest.TestCase):
+    def test_default_taxonomy_matches_aliases_without_private_regex_branches(self) -> None:
+        entries = load_default_taxonomy()
+        hits = taxonomy_alias_hits("I deployed the Flask app on Render with CRUD endpoints.", entries)
+
+        self.assertIn("flask", hits)
+        self.assertIn("render", hits)
+        self.assertIn("crud", hits)

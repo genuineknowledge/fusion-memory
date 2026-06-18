@@ -7,6 +7,9 @@ previously embedded in the eval adapter. Keep new product semantics upstream in
 event extraction, event edges, or timeline graph selection. This module should
 primarily serialize a topic-scoped timeline graph and use text heuristics only
 as fallback while graph coverage is incomplete.
+
+Legacy fallback: domain-specific event ordering rescue. Do not extend; migrate
+to taxonomy after graph parity.
 """
 
 from typing import Any
