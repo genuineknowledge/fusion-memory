@@ -1326,6 +1326,12 @@ class SQLiteMemoryStore:
         event_ids = [row["event_id"] for row in self.conn.execute(f"select event_id from events where {where}", params).fetchall()]
         span_ids = [row["span_id"] for row in self.conn.execute(f"select span_id from evidence_spans where {where}", params).fetchall()]
         profile_ids = [row["profile_id"] for row in self.conn.execute(f"select profile_id from entity_profiles where {where}", params).fetchall()]
+        chronology_topic_ids = [
+            row["topic_id"] for row in self.conn.execute(f"select topic_id from chronology_topics where {where}", params).fetchall()
+        ]
+        chronology_node_ids = [
+            row["node_id"] for row in self.conn.execute(f"select node_id from chronology_event_nodes where {where}", params).fetchall()
+        ]
 
         try:
             if self.fts_enabled:
@@ -1344,6 +1350,20 @@ class SQLiteMemoryStore:
                 ("from_event_id", "to_event_id"),
                 event_ids,
             )
+            counts["chronology_event_edges"] = self._delete_by_related_ids(
+                "chronology_event_edges",
+                ("from_node_id", "to_node_id"),
+                chronology_node_ids,
+            )
+            counts["chronology_phases"] = self._delete_by_ids(
+                "chronology_phases",
+                "topic_id",
+                chronology_topic_ids,
+            )
+            cur = self.conn.execute(f"delete from chronology_event_nodes where {where}", params)
+            counts["chronology_event_nodes"] = cur.rowcount if cur.rowcount >= 0 else 0
+            cur = self.conn.execute(f"delete from chronology_topics where {where}", params)
+            counts["chronology_topics"] = cur.rowcount if cur.rowcount >= 0 else 0
             for table in scoped_tables:
                 cur = self.conn.execute(f"delete from {table} where {where}", params)
                 counts[table] = cur.rowcount if cur.rowcount >= 0 else 0
@@ -1560,6 +1580,13 @@ class SQLiteMemoryStore:
             return
         placeholders = ", ".join(["?"] * len(object_ids))
         self.conn.execute(f"delete from {table} where {id_column} in ({placeholders})", object_ids)
+
+    def _delete_by_ids(self, table: str, id_column: str, object_ids: list[str]) -> int:
+        if not object_ids:
+            return 0
+        placeholders = ", ".join(["?"] * len(object_ids))
+        cur = self.conn.execute(f"delete from {table} where {id_column} in ({placeholders})", object_ids)
+        return cur.rowcount if cur.rowcount >= 0 else 0
 
     def _delete_by_related_ids(self, table: str, id_columns: tuple[str, str], object_ids: list[str]) -> int:
         if not object_ids:

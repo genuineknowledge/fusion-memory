@@ -1702,6 +1702,8 @@ class PostgresMemoryStore:
         try:
             fact_ids = self._select_ids(cursor, "memory_facts", "fact_id", where, params)
             event_ids = self._select_ids(cursor, "events", "event_id", where, params)
+            chronology_topic_ids = self._select_ids(cursor, "chronology_topics", "topic_id", where, params)
+            chronology_node_ids = self._select_ids(cursor, "chronology_event_nodes", "node_id", where, params)
             counts["fact_relations"] = self._delete_related_ids(
                 cursor,
                 "fact_relations",
@@ -1714,6 +1716,22 @@ class PostgresMemoryStore:
                 ("from_event_id", "to_event_id"),
                 event_ids,
             )
+            counts["chronology_event_edges"] = self._delete_related_ids(
+                cursor,
+                "chronology_event_edges",
+                ("from_node_id", "to_node_id"),
+                chronology_node_ids,
+            )
+            counts["chronology_phases"] = self._delete_ids(
+                cursor,
+                "chronology_phases",
+                "topic_id",
+                chronology_topic_ids,
+            )
+            cursor.execute(f"delete from chronology_event_nodes where {where}", params)
+            counts["chronology_event_nodes"] = cursor.rowcount if cursor.rowcount >= 0 else 0
+            cursor.execute(f"delete from chronology_topics where {where}", params)
+            counts["chronology_topics"] = cursor.rowcount if cursor.rowcount >= 0 else 0
             for table in scoped_tables:
                 cursor.execute(f"delete from {table} where {where}", params)
                 counts[table] = cursor.rowcount if cursor.rowcount >= 0 else 0
@@ -1735,6 +1753,19 @@ class PostgresMemoryStore:
     ) -> list[str]:
         cursor.execute(f"select {id_column} from {table} where {where}", params)
         return [row[0] for row in cursor.fetchall()]
+
+    def _delete_ids(
+        self,
+        cursor: Any,
+        table: str,
+        id_column: str,
+        object_ids: list[str],
+    ) -> int:
+        if not object_ids:
+            return 0
+        placeholders = ", ".join(["%s"] * len(object_ids))
+        cursor.execute(f"delete from {table} where {id_column} in ({placeholders})", object_ids)
+        return cursor.rowcount if cursor.rowcount >= 0 else 0
 
     def _delete_related_ids(
         self,
