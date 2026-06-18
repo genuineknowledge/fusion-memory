@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from fusion_memory import MemoryService
 from fusion_memory.core.models import EvidenceSpan, MemoryEvent, Scope
 from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
@@ -187,3 +188,22 @@ class ChronologyNormalizerTests(unittest.TestCase):
         second_batch = build_chronology_write_batch(scope, spans, events)
 
         self.assertEqual(first_batch.nodes[0].created_at, second_batch.nodes[0].created_at)
+
+
+class ChronologyServiceIntegrationTests(unittest.TestCase):
+    def test_add_writes_chronology_graph_without_changing_add_contract(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="graph-write", user_id="u", agent_id="a", session_id="s")
+        timestamp = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)
+
+        result = memory.add(
+            "I first set up the graph schema. Then I implemented the selector.",
+            scope,
+            timestamp,
+            {"source_uri": "test:graph-write"},
+        )
+
+        self.assertTrue(result.span_ids)
+        nodes = memory.store.list_chronology_event_nodes(scope, include_session=True)
+        self.assertGreaterEqual(len(nodes), 1)
+        self.assertTrue(any(node.source_span_id in result.span_ids for node in nodes))

@@ -29,6 +29,7 @@ from fusion_memory.ingestion.extractors import RuleBasedExtractor
 from fusion_memory.ingestion.normalizer import normalize_input
 from fusion_memory.ingestion.views import ViewBuilder
 from fusion_memory.ingestion.window_builder import build_session_summary_span
+from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
@@ -246,6 +247,7 @@ class MemoryService:
 
         self._create_session_event_edges(scope)
         self._create_explicit_event_edges(scope, accepted_event_ids)
+        chronology_graph = self._write_chronology_graph(scope, extraction_spans, accepted_event_ids)
         updated_views, updated_profiles = self._refresh_views_and_profiles(scope)
         summary_task = self._maybe_enqueue_session_summary_task(scope)
         trace["steps"].append(
@@ -271,6 +273,7 @@ class MemoryService:
                 "events": accepted_event_ids,
                 "views": [view.view_id for view in updated_views],
                 "profiles": [profile.profile_id for profile in updated_profiles],
+                "chronology_graph": chronology_graph,
                 "background_task_ids": [summary_task["task_id"]] if summary_task else [],
             }
         )
@@ -1230,6 +1233,44 @@ class MemoryService:
                 confidence=confidence,
             )
         )
+
+    def _write_chronology_graph(
+        self,
+        scope: Scope,
+        spans: list[EvidenceSpan],
+        accepted_event_ids: list[str],
+    ) -> dict[str, Any]:
+        empty_counts = {"enabled": True, "node_count": 0, "edge_count": 0, "topic_count": 0, "phase_count": 0}
+        if not spans:
+            return empty_counts
+
+        accepted_event_id_set = set(accepted_event_ids)
+        events = [
+            event
+            for event in self.store.list_events(scope, include_session=True)
+            if event.event_id in accepted_event_id_set
+        ]
+        try:
+            batch = build_chronology_write_batch(scope, spans, events)
+            for topic in batch.topics:
+                self.store.upsert_chronology_topic(topic)
+            for phase in batch.phases:
+                self.store.upsert_chronology_phase(phase)
+            for node in batch.nodes:
+                self.store.upsert_chronology_event_node(node)
+            inserted_edges = 0
+            for edge in batch.edges:
+                inserted_edges += int(self.store.insert_chronology_event_edge(edge))
+            return {
+                "enabled": True,
+                "topic_count": len(batch.topics),
+                "phase_count": len(batch.phases),
+                "node_count": len(batch.nodes),
+                "edge_count": inserted_edges,
+                "telemetry": batch.telemetry,
+            }
+        except Exception as exc:
+            return {**empty_counts, "error": exc.__class__.__name__}
 
     def _refresh_views_and_profiles(self, scope: Scope) -> tuple[list[CurrentView], list[EntityProfile]]:
         facts = self.store.list_facts(scope)
