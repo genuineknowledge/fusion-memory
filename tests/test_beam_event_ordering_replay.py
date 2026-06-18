@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from tools.beam_event_ordering_replay import _aggregate, _graph_items, _record_diagnostics, evaluate_gate, score_ordering_candidates
+import tools.beam_event_ordering_replay as replay
+from tools.beam_event_ordering_replay import (
+    _aggregate,
+    _hybrid_items,
+    _graph_items,
+    _record_diagnostics,
+    evaluate_gate,
+    main,
+    preflight_replay_environment_from_store,
+    score_ordering_candidates,
+)
 
 
 class BeamEventOrderingReplayTests(unittest.TestCase):
@@ -31,6 +41,87 @@ class BeamEventOrderingReplayTests(unittest.TestCase):
         self.assertAlmostEqual(score["precision"], 0.5)
         self.assertAlmostEqual(score["recall"], 1 / 3)
         self.assertAlmostEqual(score["f1"], 0.4)
+
+
+class BeamReplayPreflightTests(unittest.TestCase):
+    def test_preflight_reports_postgres_chronology_migration_status(self) -> None:
+        class Store:
+            def list_chronology_topics(self, scope, include_session=False):
+                raise RuntimeError('relation "chronology_topics" does not exist')
+
+        report = preflight_replay_environment_from_store(Store())
+
+        self.assertFalse(report["chronology_tables_ready"])
+        self.assertEqual(report["chronology_error"], "missing_chronology_tables")
+
+    def test_hybrid_source_spans_skips_pack_for_model(self) -> None:
+        pack = SimpleNamespace(
+            source_spans=[
+                {"content": "first source span", "candidate_source": "source_a"},
+                {"conversation_content": "second source span", "selector": "source_b"},
+            ],
+            coverage={"event_ordering_shadow": {"selected_driver": "graph"}},
+        )
+        service = SimpleNamespace(answer_context=MagicMock(return_value=pack))
+
+        with patch.object(replay, "_pack_for_model", side_effect=AssertionError("_pack_for_model should not be called")):
+            items, sources, coverage = _hybrid_items(
+                service,
+                "rank the work",
+                SimpleNamespace(),
+                5,
+                "event_ordering",
+                hybrid_source="source_spans",
+            )
+
+        self.assertEqual(items, ["first source span", "second source span"])
+        self.assertEqual(sources, ["source_a", "source_b"])
+        self.assertEqual(coverage, {"event_ordering_shadow": {"selected_driver": "graph"}})
+
+    def test_main_preflight_only_writes_preflight_report(self) -> None:
+        output_path = "/tmp/beam-replay-preflight-only.json"
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=8,
+            query_ids=None,
+            max_queries=None,
+            gate=False,
+            output=output_path,
+            preflight_only=True,
+            hybrid_source="model_pack",
+        )
+
+        with patch.object(replay.argparse.ArgumentParser, "parse_args", return_value=args), patch.object(
+            replay, "preflight_replay_environment", return_value={"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}
+        ), patch.object(replay, "run_replay", side_effect=AssertionError("run_replay should not be called in preflight-only mode")), patch.object(
+            replay, "print"
+        ) as print_mock, patch.object(
+            replay.Path, "write_text"
+        ) as write_text_mock, patch.object(
+            replay.Path, "mkdir"
+        ) as mkdir_mock:
+            main()
+
+        mkdir_mock.assert_called_once()
+        write_text_mock.assert_called_once()
+        written = write_text_mock.call_args.args[0]
+        self.assertEqual(
+            replay.json.loads(written),
+            {
+                "preflight": {
+                    "chronology_tables_ready": False,
+                    "chronology_error": "missing_chronology_tables",
+                }
+            },
+        )
+        print_mock.assert_called_once_with(replay.json.dumps({"preflight": {"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}, "output": "written"}, ensure_ascii=False))
 
 
 class BeamEventOrderingGateTests(unittest.TestCase):

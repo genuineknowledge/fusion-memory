@@ -41,13 +41,41 @@ def main() -> None:
     parser.add_argument("--query-ids", default=None)
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--gate", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--hybrid-source", choices=("model_pack", "source_spans"), default="model_pack")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    report = run_replay(args)
+    if args.preflight_only:
+        report = {"preflight": preflight_replay_environment(args)}
+    else:
+        report = run_replay(args)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(_summary_for_stdout(report), ensure_ascii=False))
+
+
+def preflight_replay_environment_from_store(store: Any) -> dict[str, object]:
+    try:
+        store.list_chronology_topics(
+            Scope(workspace_id="preflight", user_id="preflight", agent_id="preflight"),
+            include_session=True,
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if "chronology_" in message and ("does not exist" in message or "no such table" in message):
+            return {"chronology_tables_ready": False, "chronology_error": "missing_chronology_tables"}
+        return {"chronology_tables_ready": False, "chronology_error": type(exc).__name__}
+    return {"chronology_tables_ready": True, "chronology_error": None}
+
+
+def preflight_replay_environment(args: argparse.Namespace) -> dict[str, object]:
+    backend = "postgres" if str(args.db).startswith(("postgresql://", "postgres://")) else None
+    service = memory_service_from_env(args.db, storage_backend=backend)
+    try:
+        return preflight_replay_environment_from_store(service)
+    finally:
+        service.close()
 
 
 def run_replay(args: argparse.Namespace) -> dict[str, Any]:
@@ -75,12 +103,20 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     started = perf_counter()
     try:
+        preflight = preflight_replay_environment_from_store(service)
         for query in event_queries:
             query_scope = adapter._beam_scope(query.id)
             reference = _event_order_reference(query)
             graph_items, graph_sources, graph_fallback = _graph_items(service, query.query, query_scope, args.limit)
             legacy_items, legacy_sources = _legacy_items(service, query.query, query_scope, args.limit)
-            hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(service, query.query, query_scope, args.limit, query.category)
+            hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(
+                service,
+                query.query,
+                query_scope,
+                args.limit,
+                query.category,
+                hybrid_source=args.hybrid_source,
+            )
             records.append(
                 _with_record_diagnostics(
                     {
@@ -116,6 +152,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
             "query_count": len(records),
             "limit": args.limit,
             "elapsed_seconds": perf_counter() - started,
+            "preflight": preflight,
             "summary": _aggregate(records),
             "records": records,
         }
@@ -219,18 +256,32 @@ def _legacy_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[l
     return _candidate_texts(ordered, limit), [candidate.source for candidate in ordered[:limit]]
 
 
-def _hybrid_items(service: Any, query: str, scope: Scope, limit: int, category: str) -> tuple[list[str], list[str], dict[str, Any]]:
+def _hybrid_items(
+    service: Any,
+    query: str,
+    scope: Scope,
+    limit: int,
+    category: str,
+    hybrid_source: str = "model_pack",
+) -> tuple[list[str], list[str], dict[str, Any]]:
     pack = service.answer_context(query, scope, budget={"mode": "benchmark", "query_type_hint": category})
-    model_pack = _pack_for_model(pack)
-    sequence_items = model_pack.get("sequence_items")
-    if isinstance(sequence_items, list) and sequence_items:
-        items = [_sequence_item_text(item) for item in sequence_items if _sequence_item_text(item)]
-    else:
+    if hybrid_source == "source_spans":
         items = [
-            str(span.get("content") or span.get("conversation_content") or "")
+            str(span.get("content") or span.get("conversation_content") or "").strip()
             for span in pack.source_spans
-            if isinstance(span, dict) and span.get("content")
+            if isinstance(span, dict) and str(span.get("content") or span.get("conversation_content") or "").strip()
         ]
+    else:
+        model_pack = _pack_for_model(pack)
+        sequence_items = model_pack.get("sequence_items")
+        if isinstance(sequence_items, list) and sequence_items:
+            items = [_sequence_item_text(item) for item in sequence_items if _sequence_item_text(item)]
+        else:
+            items = [
+                str(span.get("content") or span.get("conversation_content") or "").strip()
+                for span in pack.source_spans
+                if isinstance(span, dict) and str(span.get("content") or span.get("conversation_content") or "").strip()
+            ]
     sources = [str(span.get("candidate_source") or span.get("selector") or "") for span in pack.source_spans if isinstance(span, dict)]
     return items[:limit], sources[:limit], _compact_coverage(pack.coverage)
 
@@ -408,6 +459,11 @@ def _graph_fallback(candidates: list[Candidate]) -> bool:
 
 
 def _summary_for_stdout(report: dict[str, Any]) -> dict[str, Any]:
+    if "preflight" in report and "summary" not in report:
+        return {
+            "preflight": report.get("preflight"),
+            "output": "written",
+        }
     return {
         "workspace": report.get("workspace"),
         "split": report.get("split"),
