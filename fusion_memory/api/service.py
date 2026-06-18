@@ -99,6 +99,8 @@ from fusion_memory.api.service_helpers import (
     _scent_trail_score,
     _quality_fallback_terms,
     _fallback_salience_score,
+    _cjk_exact_match_phrases,
+    _matched_query_conditions,
     _aggregation_signal,
     _adjacent_assistant_recommendation_spans,
     _aggregation_recommendation_request_signal,
@@ -2017,6 +2019,17 @@ class MemoryService:
                         "broad_raw_recall": True,
                     },
                 )
+                matched_conditions = _matched_query_conditions(query, span.content)
+                if matched_conditions:
+                    candidate = Candidate(
+                        id=candidate.id,
+                        type=candidate.type,
+                        text=candidate.text,
+                        source=candidate.source,
+                        scores=candidate.scores,
+                        source_span_ids=candidate.source_span_ids,
+                        metadata={**candidate.metadata, "matched_conditions": matched_conditions},
+                    )
                 previous = best.get(span.span_id)
                 if previous is None or candidate.scores.get("score", 0.0) > previous.scores.get("score", 0.0):
                     best[span.span_id] = candidate
@@ -2242,6 +2255,28 @@ class MemoryService:
                 continue
             score = min(1.0, exact_signal)
             aggregation_keys = _aggregation_keys(query, span.content, speaker=span.speaker) if query_is_aggregation else []
+            metadata = {
+                "speaker": span.speaker,
+                "span_type": span.span_type,
+                "summary": compact_summary(span.content),
+                "exact_signal": score,
+                "value_exact_signal": value_exact_signal,
+                "value_query": query_has_value_intent,
+                "exact_hit_ratio": hit_ratio,
+                "value_signal": value_signal,
+                "current_signal": current_signal,
+                "source_uri": span.source_uri,
+                "turn_id": span.turn_id,
+                **({"aggregation_keys": aggregation_keys} if aggregation_keys else {}),
+            }
+            cjk_matches = _cjk_exact_match_phrases(query, span.content)
+            if cjk_matches:
+                reasons = list(metadata.get("must_preserve_reason") or [])
+                if "language_exact_match" not in reasons:
+                    reasons.append("language_exact_match")
+                metadata["must_preserve_reason"] = reasons
+                metadata["language_match"] = "exact"
+                metadata["language_exact_phrases"] = cjk_matches
             out.append(
                 Candidate(
                     id=span.span_id,
@@ -2259,20 +2294,7 @@ class MemoryService:
                         "current_signal": current_signal,
                     },
                     source_span_ids=[span.span_id],
-                    metadata={
-                        "speaker": span.speaker,
-                        "span_type": span.span_type,
-                        "summary": compact_summary(span.content),
-                        "exact_signal": score,
-                        "value_exact_signal": value_exact_signal,
-                        "value_query": query_has_value_intent,
-                        "exact_hit_ratio": hit_ratio,
-                        "value_signal": value_signal,
-                        "current_signal": current_signal,
-                        "source_uri": span.source_uri,
-                        "turn_id": span.turn_id,
-                        **({"aggregation_keys": aggregation_keys} if aggregation_keys else {}),
-                    },
+                    metadata=metadata,
                 )
             )
         out.sort(
@@ -2327,6 +2349,13 @@ class MemoryService:
             metadata = dict(candidate.metadata)
             if candidate.type == "span" and candidate.id in selected:
                 metadata["quota_selected"] = True
+            if candidate.type == "view" and candidate.source == "l3_current_view":
+                reasons = list(metadata.get("must_preserve_reason") or [])
+                if "current_value" not in reasons:
+                    reasons.append("current_value")
+                metadata["must_preserve_reason"] = reasons
+                metadata["evidence_role"] = "answer"
+                metadata["current_value"] = True
             out.append(
                 Candidate(
                     id=candidate.id,
@@ -2482,6 +2511,44 @@ class MemoryService:
             if len(out) >= limit:
                 break
         return out
+
+    def _filter_stale_current_value_candidates(self, query: str, plan: Any, selected: list[Candidate]) -> list[Candidate]:
+        if not selected:
+            return selected
+        query_lower = query.lower()
+        if re.search(r"\b(?:average|mean|median|trend|history|historical|over time)\b", query_lower) or re.search(r"平均|趋势|历史|变化", query_lower):
+            return selected
+        intent = getattr(plan, "intent", {}) if isinstance(getattr(plan, "intent", {}), dict) else {}
+        if not (
+            getattr(plan, "needs_current_state", False)
+            or getattr(plan, "query_type", "") == "knowledge_update"
+            or bool(intent.get("needs_current_state"))
+            or "currently" in query_lower
+            or "current" in query_lower
+            or "现在" in query_lower
+            or "当前" in query_lower
+        ):
+            return selected
+        scored_candidates: list[tuple[Candidate, float]] = []
+        for candidate in selected:
+            current_score = float(candidate.metadata.get("current_signal", 0.0) or 0.0)
+            if candidate.text:
+                current_score = max(current_score, _current_state_signal(candidate.text.lower()))
+            if candidate.type == "view" and candidate.metadata.get("current_value"):
+                current_score = max(current_score, 1.0)
+            scored_candidates.append((candidate, current_score))
+        best_current = max((score for _candidate, score in scored_candidates), default=0.0)
+        if best_current <= 0.0:
+            return selected
+        stale = [
+            candidate
+            for candidate, current_score in scored_candidates
+            if _stale_current_value_candidate_text(candidate.text) or current_score + 0.05 < best_current
+        ]
+        if not stale:
+            return selected
+        kept = [candidate for candidate in selected if candidate not in stale]
+        return kept if kept else selected
 
     def _preserve_scent_trail(self, candidates: list[Candidate], selected: list[Candidate], limit: int) -> list[Candidate]:
         required = [
@@ -3534,3 +3601,16 @@ def _event_ordering_low_value_raw_facet_text(text: str) -> bool:
     if re.fullmatch(r"\s*(?:yes|yeah|no|maybe|okay|ok)[,.! ]{0,8}\s*", lower):
         return True
     return False
+
+
+def _stale_current_value_candidate_text(text: str) -> bool:
+    lower = (text or "").lower()
+    if re.search(r"\b(?:no longer|not anymore|instead|keep it only as historical|historical context)\b", lower):
+        return False
+    if re.search(r"\b(?:but|while|although)\b.{0,80}\b(?:current|currently|default|latest|now)\b", lower):
+        return False
+    if re.search(r"(?:不是|不再是|替代|改成|更新为).{0,40}(?:以前|之前|原来|曾经|早期)", lower):
+        return False
+    if re.search(r"\b(?:switched|changed|updated|moved)\s+(?:from|to)\b", lower):
+        return False
+    return bool(re.search(r"\b(?:initially|previously|formerly|originally|used to|before the switch|at first)\b", lower) or re.search(r"最初|以前|之前|原来|曾经", lower))

@@ -400,9 +400,14 @@ def _topic_anchor_score_for_service(query: str, text: str, *, anchor_phrases: li
 
 
 def _topic_scope_tokens(text: str) -> set[str]:
-    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]*|\d+(?:\.\d+)?", text.lower())
+    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+", text.lower())
     tokens: set[str] = set()
     for token in raw:
+        if re.search(r"[\u4e00-\u9fff]", token):
+            tokens.add(token)
+            for size in (2, 3, 4):
+                tokens.update(token[index : index + size] for index in range(0, max(0, len(token) - size + 1)))
+            continue
         token = token.strip("_+-")
         if len(token) < 3 or token in TOPIC_SCOPE_STOPWORDS:
             continue
@@ -753,10 +758,20 @@ def _scent_trail_queries(query: str, seed_texts: list[str], *, limit: int = 4) -
 
 
 def _ordered_topic_scope_tokens(text: str) -> list[str]:
-    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]*|\d+(?:\.\d+)?", text.lower())
+    raw = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+", text.lower())
     tokens: list[str] = []
     seen: set[str] = set()
     for token in raw:
+        if re.search(r"[\u4e00-\u9fff]", token):
+            for size in (len(token), 4, 3, 2):
+                if size <= 1 or len(token) < size:
+                    continue
+                for index in range(0, len(token) - size + 1):
+                    variant = token[index : index + size]
+                    if variant not in seen:
+                        tokens.append(variant)
+                        seen.add(variant)
+            continue
         token = token.strip("_+-")
         if len(token) < 3 or token in TOPIC_SCOPE_STOPWORDS:
             continue
@@ -772,6 +787,23 @@ def _ordered_topic_scope_tokens(text: str) -> list[str]:
                 tokens.append(variant)
                 seen.add(variant)
     return tokens
+
+
+def _cjk_exact_match_phrases(query: str, text: str, *, min_len: int = 2) -> list[str]:
+    query_tokens = [token for token in _ordered_topic_scope_tokens(query) if re.search(r"[\u4e00-\u9fff]", token) and len(token) >= min_len]
+    if not query_tokens:
+        return []
+    matches = [token for token in query_tokens if token in text]
+    return list(dict.fromkeys(matches))
+
+
+def _matched_query_conditions(query: str, text: str, *, min_len: int = 3) -> list[str]:
+    query_tokens = [token for token in _ordered_topic_scope_tokens(query) if len(token) >= min_len]
+    if not query_tokens:
+        return []
+    text_tokens = _expand_topic_tokens(_topic_scope_tokens(text))
+    matched = [token for token in query_tokens if token in text_tokens]
+    return list(dict.fromkeys(matched))
 
 
 def _scent_trail_score(query: str, text: str) -> float:
@@ -1221,6 +1253,7 @@ def _is_non_title_quote(title: str) -> bool:
 def _has_value_intent(query_lower: str) -> bool:
     return bool(
         re.search(r"\b(?:how many|how much|average|count|number|version|date|deadline|duration|weeks?|days?|time|response time)\b", query_lower)
+        or re.search(r"(?:日期|时间|截止|发布目标|目标日|目标时间|什么时候)", query_lower)
     )
 
 
@@ -1236,11 +1269,16 @@ def _compatible_value_mention(query_lower: str, lower: str) -> bool:
         return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?)\b", lower) or "response time" in lower)
     if "version" in query_lower:
         return bool(re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", lower))
-    if re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower):
+    asks_date = bool(
+        re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower)
+        or re.search(r"(?:日期|时间|截止|发布目标|目标日|目标时间|什么时候)", query_lower)
+    )
+    if asks_date:
         return bool(
             re.search(r"\b\d+(?:\.\d+)?\s*(?:days?|weeks?)\b", lower)
             or re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", lower)
             or re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b", lower)
+            or re.search(r"(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)", lower)
         )
     if re.search(r"\b(?:how many|count|number)\b", query_lower):
         return bool(re.search(r"\b\d+\b", lower))
@@ -1249,18 +1287,24 @@ def _compatible_value_mention(query_lower: str, lower: str) -> bool:
 
 def _value_signal(query_lower: str, lower: str) -> float:
     signal = 0.0
+    asks_date = bool(
+        re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower)
+        or re.search(r"(?:日期|时间|截止|发布目标|目标日|目标时间|什么时候)", query_lower)
+    )
     if re.search(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?|minutes?|hours?)\b", lower):
         signal += 0.45 if re.search(r"\b(?:response time|latency|average.*time|time.*average)\b", query_lower) else 0.30
-    if re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower) and re.search(r"\b\d+(?:\.\d+)?\s*(?:days?|weeks?)\b", lower):
+    if asks_date and re.search(r"\b\d+(?:\.\d+)?\s*(?:days?|weeks?)\b", lower):
         signal += 0.35
     if re.search(r"\b(?:how many|count|number)\b", query_lower) and re.search(r"\b\d+(?:\.\d+)?\s*(?:%|commits?)\b", lower):
         signal += 0.35
     if "version" in query_lower and re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", lower):
         signal += 0.35
-    if re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower) and re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b", lower):
+    if asks_date and re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b", lower):
         signal += 0.25
-    if re.search(r"\b(?:date|deadline|weeks?|days?|duration|between)\b", query_lower) and re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", lower):
+    if asks_date and re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", lower):
         signal += 0.25
+    if asks_date and re.search(r"(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)", lower):
+        signal += 0.35
     return min(0.60, signal)
 
 

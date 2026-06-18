@@ -4,6 +4,7 @@ import unittest
 
 from datetime import datetime, timezone
 
+from fusion_memory import MemoryService, Scope
 from fusion_memory.core.models import Candidate, EvidenceSpan, QueryPlan, Scope
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.preservation import (
@@ -116,6 +117,56 @@ class RetrievalPreservationTests(unittest.TestCase):
         )
 
         self.assertEqual(pack.coverage["dropped_high_signal_candidates"], dropped)
+
+
+class RetrievalRegressionFixtureTests(unittest.TestCase):
+    def test_chinese_exact_phrase_survives_search(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="zh-recall", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            "请记住：我的默认数据库是 PostgreSQL，嵌入模型是 qwen0.6B。",
+            scope,
+            datetime(2026, 6, 18, tzinfo=timezone.utc),
+            {"source_uri": "zh1"},
+        )
+
+        result = memory.search("我的默认数据库是什么？", scope, {"mode": "fast", "limit": 5})
+
+        self.assertTrue(any("PostgreSQL" in candidate.text for candidate in result.candidates))
+
+    def test_current_value_preserves_latest_view_over_stale_history(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="current-value", user_id="u", agent_id="a", session_id="s")
+        memory.add("My preferred database is SQLite.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc), {"source_uri": "old"})
+        memory.add(
+            "Update: my preferred database is PostgreSQL now.",
+            scope,
+            datetime(2026, 6, 2, tzinfo=timezone.utc),
+            {"source_uri": "new"},
+        )
+
+        pack = memory.answer_context("What is my current preferred database?", scope, budget={"mode": "benchmark"})
+
+        joined = " ".join(span.get("content", "") for span in pack.source_spans)
+        self.assertIn("PostgreSQL", joined)
+        self.assertNotIn("SQLite", joined[:200])
+
+    def test_multi_condition_recall_preserves_distributed_evidence(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="multi-condition", user_id="u", agent_id="a", session_id="s")
+        ts = datetime(2026, 6, 18, tzinfo=timezone.utc)
+        memory.add("For the OpenClaw adapter, install must be one command.", scope, ts, {"source_uri": "m1"})
+        memory.add("For the same adapter, errors must be beginner friendly.", scope, ts, {"source_uri": "m2"})
+
+        result = memory.search(
+            "What OpenClaw adapter requirements mention install and beginner friendly errors?",
+            scope,
+            {"mode": "fast", "limit": 5},
+        )
+
+        text = " ".join(candidate.text for candidate in result.candidates)
+        self.assertIn("one command", text)
+        self.assertIn("beginner friendly", text)
 
 
 if __name__ == "__main__":

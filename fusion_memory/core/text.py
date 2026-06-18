@@ -49,7 +49,15 @@ def stable_hash(text: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    return [t.lower() for t in TOKEN_RE.findall(text)]
+    tokens: list[str] = []
+    for raw in TOKEN_RE.findall(text):
+        token = raw.lower()
+        tokens.append(token)
+        if re.search(r"[\u4e00-\u9fff]", token):
+            chars = re.findall(r"[\u4e00-\u9fff]", token)
+            tokens.extend(chars)
+            tokens.extend("".join(chars[index : index + 2]) for index in range(0, max(0, len(chars) - 1)))
+    return tokens
 
 
 def extract_entities(text: str) -> list[str]:
