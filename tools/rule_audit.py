@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +17,21 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _rule_hits_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
     direct_hits = _as_list(record.get("rule_hits"))
-    if direct_hits:
-        return [item for item in direct_hits if isinstance(item, dict)]
     coverage = _as_dict(record.get("coverage"))
     nested_hits = _as_list(coverage.get("rule_hits"))
-    return [item for item in nested_hits if isinstance(item, dict)]
+    combined_hits: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+
+    for item in [*direct_hits, *nested_hits]:
+        if not isinstance(item, dict):
+            continue
+        signature = json.dumps(item, sort_keys=True, default=str)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        combined_hits.append(item)
+
+    return combined_hits
 
 
 def _candidate_sources_for_record(record: dict[str, object]) -> list[str]:
