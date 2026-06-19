@@ -974,6 +974,92 @@ class FusionMemoryTests(unittest.TestCase):
         finally:
             service.close()
 
+    def test_event_ordering_dual_shadow_reports_fallback_graph_candidates(self) -> None:
+        class Flags:
+            dual_event_ordering_shadow = True
+            production_selector = "legacy"
+
+        service = MemoryService(retrieval_flags=Flags())
+        scope = Scope(workspace_id="ws-dual-shadow-graph", user_id="u", agent_id="a")
+        fallback_graph_candidate = Candidate(
+            id="graph-fallback-span",
+            type="event",
+            text="Fallback graph candidate",
+            source="event_ordering_graph_selector_event",
+            scores={"score": 1.0},
+            source_span_ids=["span-1"],
+            metadata={"graph_fallback": True},
+        )
+        legacy_candidate = Candidate(
+            id="legacy-span",
+            type="event",
+            text="Legacy candidate",
+            source="event_timeline_graph",
+            scores={"score": 1.0},
+            source_span_ids=["span-2"],
+            metadata={},
+        )
+        try:
+            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
+            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [fallback_graph_candidate]
+            service._event_ordering_legacy_recall_for_shadow = lambda query, scope, plan, limit, include_session: ([legacy_candidate], [legacy_candidate.source])
+
+            result = service.search(
+                "What order did I discuss the budget tracker work?",
+                scope,
+                {"query_type_hint": "event_ordering", "limit": 5},
+            )
+
+            shadow = result.coverage["event_ordering_dual_shadow"]
+            self.assertEqual(shadow["graph_candidate_count"], 1)
+            self.assertIn("event_ordering_graph_selector_event", shadow["sources"])
+            self.assertIn("event_timeline_graph", shadow["sources"])
+        finally:
+            service.close()
+
+    def test_event_ordering_dual_shadow_candidate_count_dedupes_overlapping_graph_and_legacy_candidates(self) -> None:
+        class Flags:
+            dual_event_ordering_shadow = True
+            production_selector = "legacy"
+
+        service = MemoryService(retrieval_flags=Flags())
+        scope = Scope(workspace_id="ws-dual-shadow-dedupe", user_id="u", agent_id="a")
+        shared_graph_candidate = Candidate(
+            id="shared-span",
+            type="event",
+            text="I set up the schema and then implemented transaction CRUD.",
+            source="event_ordering_persisted_graph",
+            scores={"score": 1.0},
+            source_span_ids=["span-shared"],
+            metadata={},
+        )
+        shared_legacy_candidate = Candidate(
+            id="legacy-shared-span",
+            type="event",
+            text="I set up the schema and then implemented transaction CRUD.",
+            source="event_timeline_graph",
+            scores={"score": 1.0},
+            source_span_ids=["span-shared"],
+            metadata={},
+        )
+        try:
+            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
+            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [shared_graph_candidate]
+            service._event_ordering_legacy_recall_for_shadow = lambda query, scope, plan, limit, include_session: ([shared_legacy_candidate], [shared_legacy_candidate.source])
+
+            result = service.search(
+                "What order did I discuss the budget tracker work?",
+                scope,
+                {"query_type_hint": "event_ordering", "limit": 5},
+            )
+
+            shadow = result.coverage["event_ordering_dual_shadow"]
+            self.assertEqual(shadow["graph_candidate_count"], 1)
+            self.assertEqual(shadow["legacy_candidate_count"], 1)
+            self.assertEqual(shadow["candidate_count"], 1)
+        finally:
+            service.close()
+
     def test_event_ordering_shadow_replay_keeps_graph_and_legacy_paths_comparable(self) -> None:
         cases = [
             (

@@ -1588,17 +1588,36 @@ class MemoryService:
         limit: int,
         include_session: bool,
     ) -> dict[str, Any]:
-        graph_candidates = [
-            candidate
-            for candidate in self._event_ordering_graph_selector_candidates(query, scope, limit=limit, include_session=include_session)
-            if candidate.source == "event_ordering_persisted_graph"
-        ]
-        legacy_items, legacy_sources = self._event_ordering_legacy_recall_for_shadow(query, scope, plan, limit, include_session)
+        graph_candidates = self._event_ordering_graph_selector_candidates(
+            query,
+            scope,
+            limit=limit,
+            include_session=include_session,
+        )
+        legacy_candidates, legacy_sources = self._event_ordering_legacy_recall_for_shadow(
+            query,
+            scope,
+            plan,
+            limit,
+            include_session,
+        )
         return {
             "selected_driver": "dual_shadow",
             "graph_candidate_count": len(graph_candidates),
-            "legacy_candidate_count": len(legacy_items),
-            "candidate_count": min(limit, len(legacy_items) + len(graph_candidates)),
+            "legacy_candidate_count": len(legacy_candidates),
+            "candidate_count": min(
+                limit,
+                len(
+                    {
+                        _event_ordering_dual_shadow_candidate_key(candidate)
+                        for candidate in graph_candidates
+                    }
+                    | {
+                        _event_ordering_dual_shadow_candidate_key(candidate)
+                        for candidate in legacy_candidates
+                    }
+                ),
+            ),
             "sources": list(dict.fromkeys([candidate.source for candidate in graph_candidates] + legacy_sources)),
             "production_selector": getattr(self.retrieval_flags, "production_selector", "legacy"),
         }
@@ -1610,7 +1629,7 @@ class MemoryService:
         plan: Any,
         limit: int,
         include_session: bool,
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[Candidate], list[str]]:
         candidates: list[Candidate] = []
         candidates.extend(
             self._event_ordering_episode_recall_candidates(
@@ -1631,7 +1650,7 @@ class MemoryService:
             )
         )
         ordered = _dedupe_event_ordering_candidates_for_shadow(candidates)
-        return [candidate.text for candidate in ordered[:limit] if candidate.text], [candidate.source for candidate in ordered[:limit]]
+        return ordered[:limit], [candidate.source for candidate in ordered[:limit]]
 
     def _event_ordering_timeline_candidates(
         self,
@@ -3933,11 +3952,21 @@ def _event_ordering_candidate_path_key(candidate: Candidate) -> tuple[str, str, 
     )
 
 
+def _event_ordering_dual_shadow_candidate_key(candidate: Candidate) -> tuple[tuple[str, ...], str, str, str]:
+    span_ids = tuple(dict.fromkeys(str(span_id) for span_id in candidate.source_span_ids if span_id))
+    if not span_ids:
+        normalized_text = " ".join(re.findall(r"[a-zA-Z0-9]+", candidate.text.lower()))
+        source = str(candidate.source or "")
+        candidate_id = str(candidate.id or "")
+        return ((), normalized_text, source, candidate_id)
+    return (span_ids, "", "", "")
+
+
 def _dedupe_event_ordering_candidates_for_shadow(candidates: list[Candidate]) -> list[Candidate]:
     out: list[Candidate] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, tuple[str, ...]]] = set()
     for candidate in candidates:
-        key = (str(candidate.id), " ".join(re.findall(r"[a-zA-Z0-9]+", candidate.text.lower())))
+        key = _event_ordering_dual_shadow_candidate_key(candidate)
         if key in seen:
             continue
         seen.add(key)
