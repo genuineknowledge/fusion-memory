@@ -29,6 +29,13 @@ from fusion_memory.product import (
 
 
 class ProductCliTests(unittest.TestCase):
+    def test_render_human_uses_safe_fallback_for_failed_payloads_without_checks(self) -> None:
+        rendered = render_human({"ok": False, "message": "Could not connect", "next_step": "Run fusion-memory doctor"})
+
+        self.assertIn("Could not connect", rendered)
+        self.assertIn("Run fusion-memory doctor", rendered)
+        self.assertNotIn("Traceback", rendered)
+
     def test_install_agent_dry_run_cli_json(self) -> None:
         from fusion_memory.cli import main
         import sys
@@ -63,11 +70,36 @@ class ProductCliTests(unittest.TestCase):
             sys.argv = old_argv
 
         self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "unexpected_error")
         self.assertIn("Choose one of", payload["message"])
+        self.assertIn("Run fusion-memory doctor", payload["next_step"])
         combined = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn("usage:", combined)
         self.assertNotIn("invalid choice", combined)
         self.assertNotIn("Traceback", combined)
+
+    def test_parser_error_json_includes_normalized_failure_keys(self) -> None:
+        from fusion_memory.cli import FusionMemoryArgumentParser
+        import sys
+
+        parser = FusionMemoryArgumentParser(prog="fusion-memory")
+        stdout = StringIO()
+        old_argv = sys.argv
+        try:
+            sys.argv = ["fusion-memory", "--json"]
+            with redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    parser.error("invalid choice: 'bad-agent'")
+        finally:
+            sys.argv = old_argv
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "invalid_command")
+        self.assertIn("Fusion Memory", payload["message"])
+        self.assertIn("next_step", payload)
+        self.assertIn("doctor", payload["next_step"])
 
     def test_cli_routes_command_errors_through_safe_product_error(self) -> None:
         from fusion_memory.cli import main
@@ -88,6 +120,25 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(payload["error"], "unexpected_error")
         self.assertNotIn("Traceback", payload["message"])
         self.assertNotIn("secret stack", payload["message"])
+
+    def test_install_agent_invalid_target_cli_json_includes_failure_schema(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+
+        old_argv = sys.argv
+        stdout = StringIO()
+        try:
+            sys.argv = ["fusion-memory", "install-agent", "--target", "bad-agent", "--json"]
+            with redirect_stdout(stdout):
+                main()
+            payload = json.loads(stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("error", payload)
+        self.assertIn("next_step", payload)
+        self.assertIn("Choose one of", payload["message"])
 
     def test_init_doctor_backup_and_upgrade_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

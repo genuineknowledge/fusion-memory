@@ -469,7 +469,12 @@ def render_human(result: dict[str, Any]) -> str:
         if result.get("files") is not None:
             return f"{APP_NAME}: backup OK ({len(result['files'])} file(s))"
         return f"{APP_NAME}: OK"
-        return f"{APP_NAME}: {result.get('message') or result.get('error') or 'failed'}"
+    message = result.get("message") or result.get("error") or "failed"
+    next_step = result.get("next_step")
+    lines = [f"{APP_NAME}: {message}"]
+    if next_step:
+        lines.append(f"Next: {next_step}")
+    return "\n".join(lines)
 
 
 def safe_product_error(exc: BaseException) -> dict[str, str]:

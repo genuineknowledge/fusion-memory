@@ -41,6 +41,7 @@ class FusionMemoryArgumentParser(argparse.ArgumentParser):
                         "ok": False,
                         "error": "invalid_command",
                         "message": _friendly_argparse_message(message),
+                        "next_step": "Run fusion-memory doctor or check the help text.",
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -336,10 +337,21 @@ def _jsonable(value):
 
 
 def _print_product_result(result: dict, *, json_output: bool = False) -> None:
+    result = _normalize_product_result(result)
     if json_output:
         print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
     else:
         print(render_human(result))
+
+
+def _normalize_product_result(result: dict[str, object]) -> dict[str, object]:
+    if result.get("ok", True):
+        return result
+    normalized = dict(result)
+    normalized.setdefault("error", "unexpected_error")
+    normalized.setdefault("message", "Fusion Memory could not complete the request.")
+    normalized.setdefault("next_step", "Run fusion-memory doctor and check the help text or local log file.")
+    return normalized
 
 
 def _friendly_argparse_message(message: str) -> str:
