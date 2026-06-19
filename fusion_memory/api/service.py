@@ -58,11 +58,6 @@ from fusion_memory.retrieval.rule_registry import RuleDefinition, collect_rule_h
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.scoring import score_candidate
 from fusion_memory.retrieval.structured_annotations import select_event_ordering_timeline
-
-try:
-    from fusion_memory.retrieval.event_graph_selection import select_graph_first_event_ordering_candidates
-except ImportError:
-    select_graph_first_event_ordering_candidates = None
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer, UtilityTrainingReport
 from fusion_memory.retrieval.utility_scorer import utility_example
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
@@ -143,6 +138,12 @@ from fusion_memory.api.service_helpers import (
     _explicit_order_mentions,
 )
 
+try:
+    from fusion_memory.retrieval.event_graph_selection import select_graph_first_event_ordering_candidates
+except ImportError:
+    select_graph_first_event_ordering_candidates = None
+
+
 register_rule(
     RuleDefinition(
         rule_id="event_ordering.legacy_rescue",
@@ -166,9 +167,11 @@ class MemoryService:
         storage_backend: str = "sqlite",
         store: Any | None = None,
         store_connect: Any | None = None,
+        async_extractor: Any | None = None,
         query_intent_refiner: Any | None = None,
         query_intent_refiner_min_confidence: float = 0.70,
         query_intent_refiner_mode: str = "auto",
+        retrieval_flags: Any | None = None,
     ) -> None:
         self.config = config or DEFAULT_CONFIG
         if store is not None:
@@ -182,6 +185,8 @@ class MemoryService:
         self.storage_backend = storage_backend
         self.authorizer = authorizer or AllowAllAuthorizer()
         self.extractor = extractor or RuleBasedExtractor()
+        self.async_extractor = async_extractor
+        self.retrieval_flags = retrieval_flags
         self.gate = EncodingGate(self.config)
         self.views = ViewBuilder()
         self.planner = QueryPlanner(
@@ -274,6 +279,7 @@ class MemoryService:
         chronology_graph = self._write_chronology_graph(scope, extraction_spans, accepted_event_ids)
         updated_views, updated_profiles = self._refresh_views_and_profiles(scope)
         summary_task = self._maybe_enqueue_session_summary_task(scope)
+        extraction_task = self._maybe_enqueue_llm_extraction_task(scope, extraction_spans, session_time)
         trace["steps"].append(
             {
                 "step": "encoding",
@@ -298,7 +304,7 @@ class MemoryService:
                 "views": [view.view_id for view in updated_views],
                 "profiles": [profile.profile_id for profile in updated_profiles],
                 "chronology_graph": chronology_graph,
-                "background_task_ids": [summary_task["task_id"]] if summary_task else [],
+                "background_task_ids": [task["task_id"] for task in (summary_task, extraction_task) if task],
             }
         )
         model_calls = self._model_calls_since(model_call_marks)
@@ -317,6 +323,7 @@ class MemoryService:
                 "accepted_event_count": len(accepted_event_ids),
                 "quarantined_candidate_count": len(quarantined_candidate_ids),
                 "background_task_id": summary_task["task_id"] if summary_task else None,
+                "llm_extraction_task_id": extraction_task["task_id"] if extraction_task else None,
                 "model_calls": _model_call_summary(model_calls),
             },
         )
@@ -428,6 +435,7 @@ class MemoryService:
             selected = self._preserve_event_ordering_events(query, scored_again, selected, limit)
             selected = self._preserve_event_ordering_raw_facets(query, scored_again, selected, limit)
         selected = self._apply_topic_scope_filter(query, plan, scored_again, selected, limit)
+        selected = self._preserve_scent_trail(scored_again, selected, limit)
         selected = self._preserve_broad_raw_recall(query, plan, scored_again, selected, limit)
         selected = self._filter_stale_current_value_candidates(query, plan, selected)
         annotated_candidates = annotate_runtime_preservation_candidates(scored_again)
@@ -447,6 +455,8 @@ class MemoryService:
             "raw_quota_backfilled": quota_result.backfilled,
             "dropped_high_signal_candidates": dropped_high_signal,
         }
+        if plan.query_type == "event_ordering":
+            coverage.update(self._event_ordering_shadow_coverage(candidate_lists, selected))
         if intent_telemetry:
             coverage["query_intent_telemetry"] = intent_telemetry
         trace = {
@@ -802,6 +812,8 @@ class MemoryService:
             try:
                 if task["task_type"] == "refresh_session_summary":
                     updated = self._process_refresh_session_summary_task(task)
+                elif task["task_type"] == "llm_extract":
+                    updated = self._process_llm_extraction_task(task)
                 else:
                     updated = self.store.update_background_task(
                         task["task_id"],
@@ -1120,6 +1132,39 @@ class MemoryService:
             dedupe_key=dedupe_key,
         )
 
+    def _maybe_enqueue_llm_extraction_task(
+        self,
+        scope: Scope,
+        spans: list[EvidenceSpan],
+        session_time: datetime,
+    ) -> dict[str, Any] | None:
+        if self.async_extractor is None or not spans:
+            return None
+        source_span_ids = [span.span_id for span in spans]
+        dedupe_key = "llm_extract:" + stable_hash(
+            "|".join(
+                [
+                    scope.workspace_id or "",
+                    scope.user_id or "",
+                    scope.agent_id or "",
+                    scope.run_id or "",
+                    scope.session_id or "",
+                    scope.app_id or "",
+                    *source_span_ids,
+                ]
+            )
+        )
+        return self.store.enqueue_background_task(
+            scope,
+            "llm_extract",
+            payload={
+                "source_span_ids": source_span_ids,
+                "session_time": session_time.isoformat(),
+                "mode": "quality_evaluation",
+            },
+            dedupe_key=dedupe_key,
+        )
+
     def _process_refresh_session_summary_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
         task_scope = Scope(**task["scope"])
         source_spans, current_hash = self._session_summary_sources_and_hash(task_scope)
@@ -1148,6 +1193,61 @@ class MemoryService:
             },
         )
 
+    def _process_llm_extraction_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        if self.async_extractor is None:
+            return self.store.update_background_task(
+                task["task_id"],
+                status="skipped",
+                result={"reason": "async_extractor_disabled"},
+            )
+        task_scope = Scope(**task["scope"])
+        payload = task.get("payload") or {}
+        source_span_ids = [span_id for span_id in payload.get("source_span_ids", []) if isinstance(span_id, str)]
+        if not source_span_ids:
+            return self.store.update_background_task(
+                task["task_id"],
+                status="skipped",
+                result={"reason": "missing_source_spans"},
+            )
+        source_span_id_set = set(source_span_ids)
+        spans = [
+            span
+            for span in self.store.list_spans(task_scope, include_session=True)
+            if span.span_id in source_span_id_set
+        ]
+        spans.sort(key=lambda span: source_span_ids.index(span.span_id))
+        if not spans:
+            return self.store.update_background_task(
+                task["task_id"],
+                status="skipped",
+                result={"reason": "source_spans_not_found"},
+            )
+        session_time = dt_from_str(str(payload.get("session_time"))) if payload.get("session_time") else max(span.timestamp for span in spans)
+        existing_facts = self.store.list_facts(task_scope)
+        candidates = self.async_extractor.extract(spans, existing_facts, session_time)
+        decisions = self.gate.decide(candidates, existing_facts)
+        decision_counts: dict[str, int] = {}
+        extractor_counts: dict[str, int] = {}
+        for decision in decisions:
+            self.store.insert_encoding_decision(task_scope, decision)
+            decision_counts[decision.decision] = decision_counts.get(decision.decision, 0) + 1
+            extractor = decision.candidate.extractor_name
+            extractor_counts[extractor] = extractor_counts.get(extractor, 0) + 1
+        telemetry = getattr(self.async_extractor, "last_telemetry", None)
+        return self.store.update_background_task(
+            task["task_id"],
+            status="succeeded",
+            result={
+                "mode": "quality_evaluation",
+                "source_span_count": len(spans),
+                "candidate_count": len(candidates),
+                "gate_decision_counts": decision_counts,
+                "extractor_counts": extractor_counts,
+                "accepted_candidate_count": decision_counts.get("accept", 0),
+                "telemetry": telemetry if isinstance(telemetry, dict) else {},
+            },
+        )
+
     def _session_summary_sources_and_hash(self, scope: Scope) -> tuple[list[EvidenceSpan], str]:
         source_spans = [
             span
@@ -1163,6 +1263,8 @@ class MemoryService:
             ("embedder", getattr(self.store, "embedder", None)),
             ("extractor", self.extractor),
             ("extractor_client", getattr(self.extractor, "client", None)),
+            ("async_extractor", self.async_extractor),
+            ("async_extractor_client", getattr(self.async_extractor, "client", None)),
             ("reranker", self.reranker),
         ]
         out: list[tuple[str, Any]] = []
@@ -1402,6 +1504,73 @@ class MemoryService:
         for candidate in fallback_candidates:
             candidate.metadata["persisted_graph_telemetry"] = persisted_telemetry
         return fallback_candidates
+
+    def _event_ordering_shadow_coverage(
+        self,
+        candidate_lists: list[list[Candidate]],
+        selected: list[Candidate],
+    ) -> dict[str, Any]:
+        all_candidates = [candidate for items in candidate_lists for candidate in items]
+        graph_candidates = [
+            candidate
+            for candidate in all_candidates
+            if _event_ordering_graph_candidate(candidate)
+        ]
+        legacy_candidates = [
+            candidate
+            for candidate in all_candidates
+            if _event_ordering_legacy_candidate(candidate)
+        ]
+        selected_graph = [
+            candidate
+            for candidate in selected
+            if _event_ordering_graph_candidate(candidate)
+        ]
+        selected_legacy = [
+            candidate
+            for candidate in selected
+            if _event_ordering_legacy_candidate(candidate)
+        ]
+        selected_keys = {_event_ordering_candidate_path_key(candidate) for candidate in selected}
+        dropped_graph = [
+            candidate
+            for candidate in graph_candidates
+            if _event_ordering_candidate_path_key(candidate) not in selected_keys
+        ]
+        selected_driver = "none"
+        selected_span_source = "none"
+        if selected_graph:
+            selected_driver = "graph"
+            selected_span_source = "graph"
+        elif selected_legacy:
+            selected_driver = "legacy_fallback"
+            selected_span_source = "legacy"
+        graph_payload = {
+            "graph_candidate_count": len(graph_candidates),
+            "legacy_candidate_count": len(legacy_candidates),
+            "selected_count": len(selected_graph),
+            "selected_sources": list(dict.fromkeys(candidate.source for candidate in selected_graph)),
+            "selected_driver": selected_driver,
+            "selected_span_source": selected_span_source,
+            "graph_candidates_dropped_by_filters": bool(graph_candidates and dropped_graph),
+            "dropped_count": len(dropped_graph),
+        }
+        if graph_candidates:
+            graph_payload["available_sources"] = list(dict.fromkeys(candidate.source for candidate in graph_candidates))
+        shadow_payload = {
+            "graph_candidate_count": len(graph_candidates),
+            "legacy_candidate_count": len(legacy_candidates),
+            "selected_graph_count": len(selected_graph),
+            "selected_legacy_count": len(selected_legacy),
+            "selected_driver": selected_driver,
+            "selected_span_source": selected_span_source,
+            "graph_candidates_dropped_by_filters": bool(graph_candidates and dropped_graph),
+            "dropped_graph_count": len(dropped_graph),
+        }
+        out: dict[str, Any] = {"event_ordering_shadow": shadow_payload}
+        if graph_candidates:
+            out["event_ordering_graph"] = graph_payload
+        return out
 
     def _event_ordering_timeline_candidates(
         self,
@@ -2616,7 +2785,7 @@ class MemoryService:
             candidate
             for candidate in candidates
             if candidate.type == "span"
-            and candidate.source == "raw_scent_trail"
+            and _candidate_has_source(candidate, "raw_scent_trail")
             and candidate.scores.get("trail_score", 0.0) >= 0.20
         ]
         required.sort(
@@ -3664,6 +3833,45 @@ def _event_ordering_low_value_raw_facet_text(text: str) -> bool:
     return False
 
 
+def _event_ordering_legacy_candidate(candidate: Candidate) -> bool:
+    source = str(candidate.source or "")
+    legacy_markers = (
+        "event_ordering_coverage",
+        "event_ordering_timeline",
+        "event_ordering_episode_recall",
+        "event_ordering_graph_selector_event",
+        "event_timeline_graph",
+    )
+    is_legacy = bool(candidate.metadata.get("graph_fallback")) or (
+        any(marker in source for marker in legacy_markers) and not source.startswith("event_ordering_graph")
+    )
+    if is_legacy:
+        record_rule_hit(
+            "event_ordering.legacy_rescue",
+            query="",
+            text=candidate.text,
+            stage="event_ordering_selection",
+            contributed_candidate_id=candidate.id,
+            metadata={"decision": "legacy_candidate_path", "source": source},
+        )
+    return is_legacy
+
+
+def _event_ordering_graph_candidate(candidate: Candidate) -> bool:
+    source = str(candidate.source or "")
+    return source in {"event_ordering_persisted_graph"} or (
+        source.startswith("event_ordering_graph") and not bool(candidate.metadata.get("graph_fallback"))
+    )
+
+
+def _event_ordering_candidate_path_key(candidate: Candidate) -> tuple[str, str, bool]:
+    return (
+        str(candidate.id),
+        str(candidate.source or ""),
+        bool(candidate.metadata.get("graph_fallback")),
+    )
+
+
 def _stale_current_value_candidate_text(text: str) -> bool:
     lower = (text or "").lower()
     if re.search(r"\b(?:no longer|not anymore|instead|keep it only as historical|historical context)\b", lower):
@@ -3674,4 +3882,11 @@ def _stale_current_value_candidate_text(text: str) -> bool:
         return False
     if re.search(r"\b(?:switched|changed|updated|moved)\s+(?:from|to)\b", lower):
         return False
-    return bool(re.search(r"\b(?:initially|previously|formerly|originally|used to|before the switch|at first)\b", lower) or re.search(r"最初|以前|之前|原来|曾经", lower))
+    return bool(
+        re.search(r"\b(?:initially|previously|formerly|originally|used to|before the switch|at first)\b", lower)
+        or re.search(r"最初|以前|之前|原来|曾经", lower)
+    )
+
+
+def _candidate_has_source(candidate: Candidate, source: str) -> bool:
+    return source in {part.strip() for part in str(candidate.source or "").split("+") if part.strip()}

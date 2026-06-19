@@ -12,8 +12,10 @@ from fusion_memory.api.service import (
     _event_ordering_milestone_score,
     _key_diverse_aggregation_candidates,
 )
+from fusion_memory.core.llm import StaticLLMClient
 from fusion_memory.core.models import Candidate, QueryPlan
 from fusion_memory.ingestion.extractors import classify_milestone, classify_milestones, extract_generic_event_facets, extract_milestone_mentions
+from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
 from fusion_memory.retrieval.evidence_pack import _exact_answer_candidates, _value_context_is_target_goal, _value_mentions
 from fusion_memory.retrieval.mmr import mmr
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
@@ -24,6 +26,14 @@ def ts(value: str) -> datetime:
 
 
 class FusionMemoryTests(unittest.TestCase):
+    def test_event_ordering_dual_shadow_is_disabled_by_default(self) -> None:
+        service = MemoryService()
+        try:
+            self.assertFalse(getattr(service.retrieval_flags, "dual_event_ordering_shadow", False))
+            self.assertEqual(getattr(service.retrieval_flags, "production_selector", "legacy"), "legacy")
+        finally:
+            service.close()
+
     def test_exact_answer_candidates_rank_user_distance_location_fact(self) -> None:
         plan = QueryPlan(
             query="How far away did I say my parents live from me, and in which town?",
@@ -271,6 +281,13 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn(("count", "7 series"), values)
         self.assertIn(("count", "4,200 pages"), values)
         self.assertIn(("count", "1,350 words"), values)
+
+    def test_value_mentions_extracts_chinese_month_day_dates(self) -> None:
+        mentions = _value_mentions("现在星桥的当前发布目标是 6 月 30 日完成 alpha，不是之前说的 6 月 20 日。")
+        values = {(item["type"], item["text"]) for item in mentions}
+
+        self.assertIn(("date", "6 月 30 日"), values)
+        self.assertIn(("date", "6 月 20 日"), values)
 
     def test_value_context_distinguishes_goal_from_current_value(self) -> None:
         self.assertTrue(_value_context_is_target_goal("I am trying to achieve 100% coverage and currently reached 65%.", "100%"))
@@ -877,6 +894,121 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("integration_test_coverage", groups)
         self.assertEqual([event["timeline_index"] for event in pack.events], list(range(1, len(pack.events) + 1)))
         self.assertTrue(any(item["type"] == "event" and "event_timeline_graph" in item["source"] for item in pack.debug_trace))
+        graph_coverage = pack.coverage.get("event_ordering_graph")
+        self.assertIsInstance(graph_coverage, dict)
+        self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
+        self.assertGreaterEqual(graph_coverage.get("legacy_candidate_count", 0), 0)
+        self.assertEqual(graph_coverage.get("selected_span_source"), "graph")
+        self.assertIn("graph_candidates_dropped_by_filters", graph_coverage)
+
+    def test_event_ordering_pack_tracks_graph_shadow_metrics_when_legacy_fallback_wins(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        memory.add("I set up the initial project schema and local server for the app.", scope, ts("2026-06-01T10:00:00+00:00"))
+        memory.add("I configured deployment on Render with Gunicorn workers and port 10000.", scope, ts("2026-06-02T10:00:00+00:00"))
+
+        pack = memory.answer_context(
+            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
+            scope,
+            budget={"limit": 1},
+        )
+
+        graph_coverage = pack.coverage.get("event_ordering_graph")
+        self.assertIsInstance(graph_coverage, dict)
+        self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
+        self.assertGreaterEqual(graph_coverage.get("legacy_candidate_count", 0), 0)
+        self.assertEqual(graph_coverage.get("selected_span_source"), "legacy")
+        self.assertTrue(graph_coverage.get("graph_candidates_dropped_by_filters"))
+
+    def test_event_ordering_shadow_metrics_track_dropped_graph_by_path_not_id(self) -> None:
+        memory = MemoryService()
+        graph_candidate = Candidate(
+            id="shared-event",
+            type="event",
+            text="Graph event",
+            source="event_ordering_graph_selector",
+            scores={"score": 1.0},
+            source_span_ids=["s1"],
+            metadata={},
+        )
+        legacy_candidate = Candidate(
+            id="shared-event",
+            type="event",
+            text="Legacy event",
+            source="event_timeline_graph",
+            scores={"score": 1.0},
+            source_span_ids=["s1"],
+            metadata={},
+        )
+
+        coverage = memory._event_ordering_shadow_coverage([[graph_candidate, legacy_candidate]], [legacy_candidate])
+
+        graph_coverage = coverage["event_ordering_graph"]
+        self.assertEqual(graph_coverage["graph_candidate_count"], 1)
+        self.assertEqual(graph_coverage["legacy_candidate_count"], 1)
+        self.assertEqual(graph_coverage["selected_span_source"], "legacy")
+        self.assertTrue(graph_coverage["graph_candidates_dropped_by_filters"])
+        self.assertEqual(graph_coverage["dropped_count"], 1)
+
+    def test_event_ordering_shadow_replay_keeps_graph_and_legacy_paths_comparable(self) -> None:
+        cases = [
+            (
+                [
+                    ("I first set up the schema and local server for the project.", "2026-06-01T10:00:00+00:00"),
+                    ("Then I implemented transaction CRUD and validation error handling.", "2026-06-02T10:00:00+00:00"),
+                    ("After that I configured Render deployment with Gunicorn workers.", "2026-06-03T10:00:00+00:00"),
+                    ("Finally I expanded integration tests for endpoint coverage.", "2026-06-04T10:00:00+00:00"),
+                ],
+                ["schema", "transaction CRUD", "Render deployment"],
+            ),
+            (
+                [
+                    ("For the weather app, I started with friendly 404 and invalid city errors.", "2026-07-01T10:00:00+00:00"),
+                    ("Next I added a try-catch wrapper around the OpenWeather API call.", "2026-07-02T10:00:00+00:00"),
+                    ("Later I debugged an Unhandled Promise Rejection in fetchWeatherData().", "2026-07-03T10:00:00+00:00"),
+                    ("Then I refined the UX copy and promise chaining for the error flow.", "2026-07-04T10:00:00+00:00"),
+                ],
+                ["friendly 404", "try-catch", "Unhandled Promise Rejection"],
+            ),
+        ]
+        for index, (turns, expected_terms) in enumerate(cases, start=1):
+            memory = MemoryService()
+            scope = Scope(workspace_id=f"beam-shadow-{index}", user_id="u", agent_id="a", session_id="s")
+            for content, timestamp in turns:
+                memory.add(content, scope, ts(timestamp))
+
+            pack = memory.answer_context(
+                "Can you walk me through the order in which I brought up these implementation topics across our conversations?",
+                scope,
+                budget={"limit": 8, "mode": "benchmark"},
+            )
+
+            graph_coverage = pack.coverage.get("event_ordering_graph")
+            shadow_coverage = pack.coverage.get("event_ordering_shadow")
+            self.assertIsInstance(graph_coverage, dict)
+            self.assertIsInstance(shadow_coverage, dict)
+            self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
+            self.assertGreater(graph_coverage.get("legacy_candidate_count", 0), 0)
+            self.assertIn(graph_coverage.get("selected_span_source"), {"graph", "legacy"})
+            evidence = "\n".join(
+                [event.get("description", "") for event in pack.events]
+                + [span.get("content", "") for span in pack.source_spans]
+            )
+            for term in expected_terms:
+                self.assertIn(term, evidence)
+
+        memory = MemoryService()
+        scope = Scope(workspace_id="beam-shadow-current", user_id="u", agent_id="a", session_id="s")
+        memory.add("For Project Atlas, I initially preferred Qdrant for retrieval experiments.", scope, ts("2026-01-01T10:00:00+00:00"))
+        memory.add("I switched Project Atlas retrieval from Qdrant to Postgres pgvector for production.", scope, ts("2026-01-08T10:00:00+00:00"))
+        current_pack = memory.answer_context(
+            "What retrieval backend does Project Atlas currently use?",
+            scope,
+            budget={"allow_cross_session": True, "limit": 4},
+        )
+        current_evidence = "\n".join(span["content"] for span in current_pack.source_spans)
+        self.assertIn("Postgres pgvector", current_evidence)
+        self.assertNotEqual(current_pack.coverage.get("query_type"), "event_ordering")
 
     def test_event_ordering_short_timeline_covers_broad_project_phases(self) -> None:
         memory = MemoryService()
@@ -1414,6 +1546,28 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertTrue(any(span.get("recency_rank") == 1 and "250ms" in span["content"] for span in pack.source_spans))
         self.assertTrue(any(span.get("value_mentions") for span in pack.source_spans))
         self.assertTrue(any(row.get("subject_key") and "response" in row["subject_key"] for row in pack.coverage["value_history"]))
+
+    def test_current_chinese_target_date_recall_includes_latest_update(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w-zh", user_id="u", agent_id="a", session_id="s2")
+        memory.add(
+            "现在星桥的当前发布目标是 6 月 30 日完成 alpha，不是之前说的 6 月 20 日。",
+            scope,
+            ts("2026-06-09T10:00:00+00:00"),
+            {"source_uri": "sim:zh:date", "speaker": "user"},
+        )
+        memory.add(
+            "预算更新：星桥每月预算现在是 600 元，不再是早期估算的 300 元。",
+            scope,
+            ts("2026-06-08T10:00:00+00:00"),
+            {"source_uri": "sim:zh:budget", "speaker": "user"},
+        )
+
+        pack = memory.answer_context("星桥当前发布目标日期是什么？", scope, budget={"limit": 6})
+        content = "\n".join(span["content"] for span in pack.source_spans)
+
+        self.assertIn("6 月 30 日", content)
+        self.assertTrue(any(row.get("value") == "6 月 30 日" for row in pack.coverage.get("value_history", [])))
 
     def test_multi_session_pack_marks_history_order_for_aggregation(self) -> None:
         memory = MemoryService()
@@ -2432,6 +2586,58 @@ class FusionMemoryTests(unittest.TestCase):
 
         self.assertEqual(memory.list_background_tasks(scope), [])
 
+    def test_async_llm_extractor_does_not_block_add_and_runs_in_background(self) -> None:
+        class AttributedClient(StaticLLMClient):
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def structured(self, prompt: str, schema: dict[str, object], input: dict[str, object]) -> dict[str, object]:
+                self.calls.append({"prompt": prompt, "schema": schema, "input": input})
+                span_id = input["spans"][0]["span_id"]  # type: ignore[index]
+                return {
+                    "facts": [
+                        {
+                            "text": "Atlas production retrieval uses Postgres pgvector.",
+                            "subject": "Atlas production retrieval",
+                            "predicate": "uses",
+                            "object": "Postgres pgvector",
+                            "category": "project_state",
+                            "confidence": 0.91,
+                            "salience": 0.8,
+                            "source_span_ids": [span_id],
+                        }
+                    ],
+                    "events": [],
+                    "relations": [],
+                }
+
+        client = AttributedClient()
+        extractor = StructuredLLMExtractor(client)
+        memory = MemoryService(async_extractor=extractor)
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+
+        result = memory.add(
+            {"role": "user", "content": "For Atlas production retrieval, use Postgres pgvector."},
+            scope,
+            ts("2026-01-01T10:00:00+00:00"),
+        )
+
+        self.assertTrue(result.span_ids)
+        self.assertEqual(client.calls, [])
+        pending = memory.list_background_tasks(scope, status="pending")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["task_type"], "llm_extract")
+        self.assertEqual(pending[0]["payload"]["source_span_ids"], result.span_ids)
+
+        processed = memory.process_background_tasks(scope, limit=5)
+
+        self.assertEqual(processed["status_counts"], {"succeeded": 1})
+        self.assertEqual(len(client.calls), 1)
+        task_result = processed["tasks"][0]["payload"]["result"]
+        self.assertEqual(task_result["candidate_count"], 1)
+        self.assertEqual(task_result["gate_decision_counts"].get("accept"), 1)
+        self.assertEqual(len(memory.store.list_facts(scope)), 0)
+
     def test_entities_are_persisted_and_used_as_retrieval_source(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
@@ -2472,6 +2678,78 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("Notion", candidates[0].text)
         self.assertGreaterEqual(candidates[0].scores["intent_recall_signal"], 0.16)
         self.assertFalse(any("oranges" in candidate.text for candidate in candidates[:3]))
+
+    def test_current_value_query_prioritizes_latest_correction_over_historical_value(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            {"role": "user", "content": "For Project Atlas, I initially prefer Qdrant for retrieval experiments."},
+            scope,
+            ts("2026-01-01T10:00:00+00:00"),
+        )
+        memory.add(
+            {"role": "user", "content": "I switched Project Atlas retrieval from Qdrant to Postgres pgvector for production."},
+            scope,
+            ts("2026-01-08T10:00:00+00:00"),
+        )
+        memory.add(
+            {"role": "user", "content": "I no longer want Qdrant for Atlas production; keep it only as historical context."},
+            scope,
+            ts("2026-03-01T10:00:00+00:00"),
+        )
+
+        pack = memory.answer_context(
+            "What retrieval backend does Project Atlas currently use?",
+            scope,
+            budget={"allow_cross_session": True, "limit": 4},
+        )
+
+        evidence = "\n".join(span["content"] for span in pack.source_spans)
+        self.assertIn("Postgres pgvector", evidence)
+        self.assertNotIn("initially prefer Qdrant", evidence)
+
+    def test_chinese_error_query_recalls_traceback_guidance(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            {"role": "user", "content": "中文备注：新手错误提示必须说明下一步，不要暴露 traceback。"},
+            scope,
+            ts("2026-01-01T10:00:00+00:00"),
+        )
+        memory.add(
+            {"role": "user", "content": "Security note: API keys must be referenced by environment variable or file path only."},
+            scope,
+            ts("2026-01-02T10:00:00+00:00"),
+        )
+        memory.add(
+            {"role": "user", "content": "写入测试失败的原因是数据库没启动。给用户的提示应该是“数据库还没启动，请点击启动或重试”，不要说 psycopg 连接异常。"},
+            scope,
+            ts("2026-01-03T10:00:00+00:00"),
+        )
+        memory.add(
+            {"role": "user", "content": "如果端口被占用，产品提示要说“端口被占用，请关闭旧服务或换一个端口”，不能暴露 socket bind failed。"},
+            scope,
+            ts("2026-01-04T10:00:00+00:00"),
+        )
+
+        pack = memory.answer_context(
+            "新手错误提示不能暴露什么？",
+            scope,
+            budget={"allow_cross_session": True, "limit": 4},
+        )
+
+        evidence = "\n".join(span["content"] for span in pack.source_spans)
+        self.assertIn("traceback", evidence)
+
+        pack = memory.answer_context(
+            "如果数据库没启动或端口被占用，应该怎样提示小白用户？",
+            scope,
+            budget={"allow_cross_session": True, "limit": 6, "mode": "benchmark"},
+        )
+
+        evidence = "\n".join(span["content"] for span in pack.source_spans)
+        self.assertIn("数据库还没启动", evidence)
+        self.assertIn("端口被占用", evidence)
 
     def test_event_ordering_compaction_preserves_broad_raw_provenance(self) -> None:
         memory = MemoryService()
