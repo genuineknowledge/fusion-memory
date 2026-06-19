@@ -174,6 +174,31 @@ class ProductCliTests(unittest.TestCase):
             self.assertTrue(plan["dry_run"])
             self.assertIn("command", plan)
 
+    def test_init_home_defaults_to_postgres_and_qwen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            result = init_home(home)
+            config = load_config(home)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(config["storage_backend"], "postgres")
+        self.assertEqual(config["embedding"]["provider"], "qwen")
+        self.assertEqual(config["reranker"]["provider"], "qwen")
+        self.assertEqual(config["extractor"]["provider"], "rule")
+        self.assertEqual(config["query_intent"]["provider"], "off")
+
+    def test_init_home_local_test_fallback_uses_dependency_free_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            result = init_home(home, local_test=True)
+            config = load_config(home)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(config["mode"], "local_test")
+        self.assertEqual(config["storage_backend"], "sqlite")
+        self.assertEqual(config["embedding"]["provider"], "deterministic")
+        self.assertEqual(config["reranker"]["provider"], "lexical")
+
     def test_local_test_init_is_explicit_fallback_not_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -266,7 +291,7 @@ class ProductCliTests(unittest.TestCase):
                 "",  # query router off
             ]
         )
-        with tempfile.TemporaryDirectory() as tmp, patch("builtins.input", lambda _prompt="": next(answers)):
+        with tempfile.TemporaryDirectory() as tmp, patch("builtins.input", lambda _prompt="": next(answers)), redirect_stdout(StringIO()):
             home = Path(tmp)
             result = configure_interactive(home)
             self.assertTrue(result["ok"])

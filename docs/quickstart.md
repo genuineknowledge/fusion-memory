@@ -35,6 +35,28 @@ API key 不会写入配置文件。向导只保存环境变量名，例如
 FUSION_MEMORY_SKIP_WIZARD=1 sh install.sh
 ```
 
+### Recommended first run
+
+Run:
+
+```bash
+fusion-memory init
+fusion-memory doctor --json
+```
+
+The default production setup uses PostgreSQL + pgvector and Qwen 0.6B
+embedding/reranker.
+
+If Postgres or model dependencies are not ready, use local test mode:
+
+```bash
+fusion-memory init --local-test
+fusion-memory start
+```
+
+Local test mode is dependency-free and is intended for trying the product. It
+is not the recommended production configuration.
+
 ## 2. 启动
 
 ```bash
@@ -87,5 +109,7 @@ set PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
 
 - 启动失败：先运行 `fusion-memory doctor`
 - 端口被占用：修改本地配置文件里的端口
+- Postgres 不可用：启动 Postgres，确认 pgvector 已安装，再运行 `fusion-memory doctor`
+- Qwen 模型不可用：安装 Qwen 依赖或确认本地模型缓存/路径，再运行 `fusion-memory doctor`
 - API 模型不可用：确认向导里填写的 API key 环境变量已经设置
 - 想备份：运行 `fusion-memory backup`
