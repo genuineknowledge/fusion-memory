@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -252,13 +253,31 @@ def main() -> int:
     records: list[dict[str, object]] = []
     for raw_input in args.input:
         input_path = Path(raw_input)
-        for record in _load_records(input_path):
+        try:
+            loaded_records = _load_records(input_path)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            print(
+                f"Error: failed to load input {input_path}: {exc}. "
+                "Fix the JSON syntax or provide a readable replay JSON file.",
+                file=sys.stderr,
+            )
+            return 1
+        for record in loaded_records:
             record["_audit_input"] = str(input_path)
             records.append(record)
-    audit_rows = build_rule_audit(records)
-    _write_json(Path(args.output), audit_rows)
-    if args.csv:
-        _write_csv(Path(args.csv), audit_rows)
+
+    try:
+        audit_rows = build_rule_audit(records)
+        _write_json(Path(args.output), audit_rows)
+        if args.csv:
+            _write_csv(Path(args.csv), audit_rows)
+    except (OSError, ValueError) as exc:
+        print(
+            f"Error: failed to write audit output: {exc}. "
+            "Check that the output path is writable and its parent directory exists.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

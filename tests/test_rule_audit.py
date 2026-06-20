@@ -321,6 +321,37 @@ class RuleAuditTests(unittest.TestCase):
             audit = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual([row["rule_id"] for row in audit], ["rule.alpha"])
 
+    def test_cli_reports_safe_error_for_malformed_json_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_path = tmp_path / "malformed.json"
+            output_path = tmp_path / "audit.json"
+            input_path.write_text('{"records": [', encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("Error: failed to load input", result.stderr)
+            self.assertIn("Fix the JSON syntax or provide a readable replay JSON file.", result.stderr)
+            combined_output = result.stdout + result.stderr
+            self.assertNotIn("Traceback", combined_output)
+            self.assertNotIn("json.decoder", combined_output)
+            self.assertNotIn('File "', combined_output)
+
     def test_cli_writes_deterministic_json_and_csv_for_top_level_list_input(self) -> None:
         payload = [
             {
