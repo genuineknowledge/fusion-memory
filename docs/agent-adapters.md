@@ -28,6 +28,26 @@ python3 tools/agent_runtime_smoke.py --target fusion-agent --memory-url http://1
 The smoke report contains `target`, `host_available`, `plugin_available`,
 `write_smoke`, `retrieve_smoke`, `ok`, and `message`. Missing host binaries or
 checkouts return `ok=false` with recovery guidance instead of raw runtime logs.
+`plugin_available` means the adapter is visible to the target runtime where the
+runtime exposes that information. Repository source files are not enough to make
+the runtime smoke pass.
+
+OpenClaw and Hermes need an adapter-level smoke command because Fusion Memory
+cannot safely prove that their runtime used the installed adapter by talking to
+the Fusion Memory HTTP API directly. Configure one of these environment
+variables with a command that exercises the target adapter and prints JSON with
+explicit `write_smoke` and `retrieve_smoke` boolean fields:
+
+```bash
+export FUSION_MEMORY_OPENCLAW_SMOKE_COMMAND="openclaw fusion-memory-smoke"
+export FUSION_MEMORY_HERMES_SMOKE_COMMAND="hermes fusion-memory-smoke"
+export FUSION_MEMORY_FUSION_AGENT_SMOKE_COMMAND="python3 path/to/fusion-agent-smoke.py"
+```
+
+The smoke harness passes the selected service URL to the command as
+`FUSION_MEMORY_SMOKE_MEMORY_URL`. If OpenClaw or Hermes has no configured smoke
+command, the report returns `ok=false`, `write_smoke=false`, and
+`retrieve_smoke=false` with a safe unverified message.
 
 OpenClaw and Hermes are installed as external plugins. Their source checkouts
 are not modified in stage one.
