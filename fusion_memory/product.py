@@ -237,10 +237,10 @@ def doctor(home: str | Path | None = None) -> dict[str, Any]:
     checks.extend(_model_checks(config))
 
     health = service_health(config["host"], int(config["port"]))
+    available = _port_available(config["host"], int(config["port"]))
     if health["ok"]:
         checks.append(_check("service", True, f"http://{config['host']}:{config['port']}"))
     else:
-        available = _port_available(config["host"], int(config["port"]))
         checks.append(
             _check(
                 "service",
@@ -248,6 +248,13 @@ def doctor(home: str | Path | None = None) -> dict[str, Any]:
                 "ready to start" if available else f"port {config['port']} is already in use",
             )
         )
+    checks.append(
+        _check(
+            "port",
+            available or bool(health["ok"]),
+            "service responding" if health["ok"] else ("available" if available else "already in use"),
+        )
+    )
 
     ok = all(item["ok"] for item in checks)
     return {
@@ -407,15 +414,18 @@ def service_status(home: str | Path | None = None) -> dict[str, Any]:
 def upgrade(home: str | Path | None = None, *, package: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     paths = product_paths(home)
     init_home(home)
-    backup = backup_data(home)
     target = package or _local_project_root() or "fusion-memory"
     command = [sys.executable, "-m", "pip", "install", "--upgrade", str(target)]
+    backup_plan = {"required": True, "directory": str(paths.backup_dir)}
+    rollback = {"available": True, "step": "Restore the latest backup from the backups directory."}
     if dry_run:
-        return {"ok": True, "dry_run": True, "backup": backup, "command": command}
+        return {"ok": True, "dry_run": True, "backup": backup_plan, "rollback": rollback, "command": command}
+    backup = backup_data(home)
     completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
     return {
         "ok": completed.returncode == 0,
         "backup": backup,
+        "rollback": rollback,
         "command": command,
         "returncode": completed.returncode,
         "output": completed.stdout[-4000:],
@@ -720,6 +730,7 @@ def _model_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
             dependency = _qwen_dependency_check(label)
             readiness = _qwen_model_readiness_check(label, model, dependency["ok"])
             checks.append(dependency)
+            checks.append({**readiness, "name": f"{label}_readiness"})
             checks.append(readiness)
             continue
         if provider in {"http", "api"}:

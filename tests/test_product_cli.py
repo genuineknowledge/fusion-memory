@@ -232,6 +232,32 @@ class ProductCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", serialized)
         self.assertNotIn("fusion:fusion", serialized)
 
+    def test_doctor_reports_port_and_model_readiness_with_next_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            init_home(home, port=0)
+            report = doctor(home)
+
+        names = {item["name"] for item in report["checks"]}
+        self.assertIn("postgres_connection", names)
+        self.assertIn("pgvector", names)
+        self.assertIn("embedding_readiness", names)
+        self.assertIn("reranker_readiness", names)
+        self.assertIn("port", names)
+        self.assertIn("next_step", report)
+        self.assertNotIn("Traceback", json.dumps(report))
+
+    def test_upgrade_dry_run_reports_backup_and_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            init_home(home, local_test=True)
+            plan = upgrade(home, dry_run=True)
+
+        self.assertTrue(plan["ok"])
+        self.assertTrue(plan["dry_run"])
+        self.assertIn("backup", plan)
+        self.assertIn("rollback", plan)
+
     def test_start_failure_maps_qwen_traceback_to_friendly_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

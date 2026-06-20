@@ -40,7 +40,7 @@ FUSION_MEMORY_SKIP_WIZARD=1 sh install.sh
 Run:
 
 ```bash
-fusion-memory init
+fusion-memory init --json
 fusion-memory doctor --json
 ```
 
@@ -50,7 +50,7 @@ embedding/reranker.
 If Postgres or model dependencies are not ready, use local test mode:
 
 ```bash
-fusion-memory init --local-test
+fusion-memory init --local-test --json
 fusion-memory start
 ```
 
@@ -68,6 +68,16 @@ fusion-memory start
 ```bash
 fusion-memory status
 ```
+
+For machine-readable readiness, use:
+
+```bash
+fusion-memory doctor --json
+```
+
+The doctor report includes `postgres_connection`, `pgvector`,
+`embedding_dependency`, `embedding_readiness`, `reranker_dependency`,
+`reranker_readiness`, `service`, and `port` checks, plus a `next_step`.
 
 ## 4. 安装 Agent 适配
 
@@ -113,3 +123,4 @@ set PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
 - Qwen 模型不可用：安装 Qwen 依赖或确认本地模型缓存/路径，再运行 `fusion-memory doctor`
 - API 模型不可用：确认向导里填写的 API key 环境变量已经设置
 - 想备份：运行 `fusion-memory backup`
+- 升级前检查备份/回滚计划：运行 `fusion-memory upgrade --dry-run --json`

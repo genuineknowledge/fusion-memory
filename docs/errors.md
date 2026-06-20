@@ -16,20 +16,46 @@ The Agent should continue without memory.
 Run:
 
 ```bash
-fusion-memory doctor
+fusion-memory doctor --json
 ```
 
 Check that Postgres is running and that the configured database exists.
+The JSON report includes `postgres_connection` and `pgvector` checks.
 
 ## Model is not ready
 
 Run:
 
 ```bash
-fusion-memory doctor
+fusion-memory doctor --json
 ```
 
 The default models are Qwen3-Embedding-0.6B and Qwen3-Reranker-0.6B.
+The JSON report includes `embedding_dependency`, `embedding_readiness`,
+`reranker_dependency`, and `reranker_readiness` checks.
+
+## Port is not available
+
+Run:
+
+```bash
+fusion-memory doctor --json
+```
+
+Check the `port` and `service` entries. If the port is already in use, edit the
+configured port or stop the other process, then run `fusion-memory doctor`
+again.
+
+## Upgrade rollback
+
+Run:
+
+```bash
+fusion-memory upgrade --dry-run --json
+```
+
+The dry-run report shows the backup directory and rollback step before changing
+the installed package.
 
 ## Adapter is not enabled
 
