@@ -8,6 +8,11 @@ from fusion_memory.core.chronology import ChronologyEventEdge, ChronologyEventNo
 from fusion_memory.core.models import EvidenceSpan, MemoryEvent, Scope
 from fusion_memory.core.text import compact_summary, stable_hash, tokenize
 from fusion_memory.retrieval.taxonomy import TaxonomyEntry, taxonomy_entry_for_text
+from fusion_memory.retrieval.topic_clustering import (
+    TopicClusterDecision,
+    cluster_topic_label,
+    cluster_topic_telemetry,
+)
 
 
 @dataclass
@@ -94,6 +99,7 @@ def build_chronology_write_batch(
     nodes: list[ChronologyEventNode] = []
     last_topic_label: str | None = None
     session_topic_hint = _session_topic_hint(spans, events)
+    cluster_decisions: list[TopicClusterDecision] = []
 
     for index, event in enumerate(events):
         span = _first_source_span(event, span_by_id)
@@ -101,7 +107,12 @@ def build_chronology_write_batch(
         if _skip_chronology_node(event, span):
             continue
         language = _infer_language(text)
-        topic_label, topic_is_strong, taxonomy_entry = _infer_topic_label(text, session_topic_hint=session_topic_hint)
+        topic_label, topic_is_strong, taxonomy_entry, cluster_decision = _infer_topic_label(
+            text,
+            session_topic_hint=session_topic_hint,
+            previous_label=last_topic_label,
+        )
+        cluster_decisions.append(cluster_decision)
         if not topic_is_strong and last_topic_label is not None and _infer_order_marker(text) is not None:
             topic_label = last_topic_label
             taxonomy_entry = None
@@ -128,7 +139,16 @@ def build_chronology_write_batch(
             created_at=created_at,
         )
         nodes.append(node)
-    _append_user_span_nodes(scope, spans, topics_by_label, phases_by_key, nodes, created_at, session_topic_hint)
+    _append_user_span_nodes(
+        scope,
+        spans,
+        topics_by_label,
+        phases_by_key,
+        nodes,
+        created_at,
+        session_topic_hint,
+        cluster_decisions,
+    )
 
     recognized_phase_ids = {
         phase.phase_id for phase in phases_by_key.values() if phase.phase_type != "unknown"
@@ -141,6 +161,7 @@ def build_chronology_write_batch(
         "phase_count": len(phases_by_key),
         "node_count": len(nodes),
         "edge_count": len(edges),
+        "topic_cluster": cluster_topic_telemetry(cluster_decisions),
     }
     return ChronologyWriteBatch(
         topics=list(topics_by_label.values()),
@@ -165,6 +186,7 @@ def _append_user_span_nodes(
     nodes: list[ChronologyEventNode],
     created_at: datetime,
     session_topic_hint: str | None,
+    cluster_decisions: list[TopicClusterDecision],
 ) -> None:
     existing_span_ids = {node.source_span_id for node in nodes if node.source_span_id}
     last_topic_label = _last_node_topic_label(nodes, topics_by_label)
@@ -173,7 +195,12 @@ def _append_user_span_nodes(
             continue
         text = span.content
         language = _infer_language(text)
-        topic_label, topic_is_strong, taxonomy_entry = _infer_topic_label(text, session_topic_hint=session_topic_hint)
+        topic_label, topic_is_strong, taxonomy_entry, cluster_decision = _infer_topic_label(
+            text,
+            session_topic_hint=session_topic_hint,
+            previous_label=last_topic_label,
+        )
+        cluster_decisions.append(cluster_decision)
         if not topic_is_strong and last_topic_label is not None and _infer_order_marker(text) is not None:
             topic_label = last_topic_label
             taxonomy_entry = None
@@ -255,20 +282,18 @@ def _contains_phrase(lowered_text: str, phrase: str) -> bool:
     return re.search(rf"\b{re.escape(phrase)}\b", lowered_text) is not None
 
 
-def _infer_topic_label(text: str, *, session_topic_hint: str | None = None) -> tuple[str, bool, TaxonomyEntry | None]:
+def _infer_topic_label(
+    text: str,
+    *,
+    session_topic_hint: str | None = None,
+    previous_label: str | None = None,
+) -> tuple[str, bool, TaxonomyEntry | None, TopicClusterDecision]:
+    decision = cluster_topic_label(text, session_hint=session_topic_hint, previous_label=previous_label)
     taxonomy_entry = taxonomy_entry_for_text(text)
     if taxonomy_entry is not None:
-        return taxonomy_entry.label, _taxonomy_match_is_strong(taxonomy_entry), taxonomy_entry
-    if session_topic_hint and _text_matches_episode_topic(text, session_topic_hint):
-        return session_topic_hint, True, None
-    meaningful_tokens = [
-        token
-        for token in tokenize(text)
-        if token not in STOPWORDS and len(token) > 1 and not re.search(r"[\u4e00-\u9fff]", token)
-    ]
-    if meaningful_tokens:
-        return " ".join(meaningful_tokens[:4]), False, None
-    return compact_summary(text, limit=40).lower() or "unknown", False, None
+        return decision.label, _taxonomy_match_is_strong(taxonomy_entry), taxonomy_entry, decision
+    topic_is_strong = "taxonomy" in decision.reasons or "session_hint" in decision.reasons
+    return decision.label, topic_is_strong, None, decision
 
 
 def _session_topic_hint(spans: list[EvidenceSpan], events: list[MemoryEvent]) -> str | None:
