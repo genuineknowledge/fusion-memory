@@ -37,6 +37,179 @@ class FailingChronologyReadStore:
 
 
 class ChronologyNormalizerTests(unittest.TestCase):
+    def test_node_object_uses_short_aspect_label_instead_of_full_topic(self) -> None:
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        base = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)
+        span = EvidenceSpan(
+            span_id="s1",
+            scope=scope,
+            turn_id="t1",
+            speaker="user",
+            span_type="turn",
+            content=(
+                "I'm building a personal budget tracker and need help implementing the core functionality, "
+                "including user authentication, expense tracking, and data visualization."
+            ),
+            content_hash=stable_hash("aspect-label-core"),
+            timestamp=base,
+        )
+        event = MemoryEvent(
+            event_id="e1",
+            scope=scope,
+            event_type="user_action",
+            description=span.content,
+            participants=["user"],
+            source_span_ids=["s1"],
+            time_start=base,
+            confidence=0.8,
+        )
+
+        batch = build_chronology_write_batch(scope, [span], [event])
+
+        self.assertEqual(batch.nodes[0].object, "core functionality")
+        self.assertEqual(batch.topics[0].canonical_label, "budget tracker")
+
+    def test_build_chronology_batch_skips_assistant_answer_nodes(self) -> None:
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        base = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)
+        spans = [
+            EvidenceSpan(
+                span_id="s-user",
+                scope=scope,
+                turn_id="t1",
+                speaker="user",
+                span_type="turn",
+                content="First I asked about transaction CRUD implementation.",
+                content_hash=stable_hash("user-crud"),
+                timestamp=base,
+            ),
+            EvidenceSpan(
+                span_id="s-assistant",
+                scope=scope,
+                turn_id="t2",
+                speaker="assistant",
+                span_type="turn",
+                content="Certainly! Let's enhance your BudgetTracker class with validation and error handling.",
+                content_hash=stable_hash("assistant-answer"),
+                timestamp=base + timedelta(minutes=1),
+            ),
+        ]
+        events = [
+            MemoryEvent("e-user", scope, "user_action", spans[0].content, ["user"], ["s-user"], time_start=base, confidence=0.8),
+            MemoryEvent(
+                "e-assistant",
+                scope,
+                "assistant_action",
+                spans[1].content,
+                ["assistant"],
+                ["s-assistant"],
+                time_start=base + timedelta(minutes=1),
+                confidence=0.8,
+            ),
+        ]
+
+        batch = build_chronology_write_batch(scope, spans, events)
+
+        self.assertEqual(len(batch.nodes), 1)
+        self.assertEqual(batch.nodes[0].source_span_id, "s-user")
+
+    def test_build_chronology_batch_adds_user_span_nodes_when_events_are_assistant_only(self) -> None:
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        base = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)
+        spans = [
+            EvidenceSpan(
+                span_id="s-user-1",
+                scope=scope,
+                turn_id="t1",
+                speaker="user",
+                span_type="turn",
+                content="First I'm trying to master classifying triangles by sides and angles, starting with equilateral, isosceles, and scalene types.",
+                content_hash=stable_hash("user-triangle-classification"),
+                timestamp=base,
+            ),
+            EvidenceSpan(
+                span_id="s-user-2",
+                scope=scope,
+                turn_id="t2",
+                speaker="user",
+                span_type="turn",
+                content="Then I moved on to calculating triangle areas and comparing altitude and median formulas.",
+                content_hash=stable_hash("user-triangle-area"),
+                timestamp=base + timedelta(minutes=5),
+            ),
+            EvidenceSpan(
+                span_id="s-assistant",
+                scope=scope,
+                turn_id="t3",
+                speaker="assistant",
+                span_type="turn",
+                content="Certainly, let's go through the Pythagorean theorem step by step.",
+                content_hash=stable_hash("assistant-triangle-answer"),
+                timestamp=base + timedelta(minutes=6),
+            ),
+        ]
+        events = [
+            MemoryEvent(
+                "e-assistant",
+                scope,
+                "assistant_action",
+                spans[2].content,
+                ["assistant"],
+                ["s-assistant"],
+                time_start=base + timedelta(minutes=6),
+                confidence=0.8,
+            ),
+        ]
+
+        batch = build_chronology_write_batch(scope, spans, events)
+
+        self.assertEqual([node.source_span_id for node in batch.nodes], ["s-user-1", "s-user-2"])
+        self.assertEqual(batch.nodes[0].object, "triangle classification")
+        self.assertEqual(batch.nodes[1].object, "triangle area methods")
+        self.assertTrue(batch.edges)
+
+    def test_user_span_topic_clustering_merges_fragmented_session_topics(self) -> None:
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        base = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)
+        spans = [
+            EvidenceSpan(
+                span_id="tri-1",
+                scope=scope,
+                turn_id="t1",
+                speaker="user",
+                span_type="turn",
+                content="First I'm trying to master classifying triangles by sides and angles, starting with equilateral, isosceles, and scalene types.",
+                content_hash=stable_hash("tri-topic-1"),
+                timestamp=base,
+            ),
+            EvidenceSpan(
+                span_id="tri-2",
+                scope=scope,
+                turn_id="t2",
+                speaker="user",
+                span_type="turn",
+                content="I want to compare triangle area methods using altitude, medians, and Heron's formula.",
+                content_hash=stable_hash("tri-topic-2"),
+                timestamp=base + timedelta(minutes=5),
+            ),
+            EvidenceSpan(
+                span_id="tri-3",
+                scope=scope,
+                turn_id="t3",
+                speaker="user",
+                span_type="turn",
+                content="Then I applied triangle geometry to Law of Cosines examples for non-right triangles.",
+                content_hash=stable_hash("tri-topic-3"),
+                timestamp=base + timedelta(minutes=10),
+            ),
+        ]
+
+        batch = build_chronology_write_batch(scope, spans, [])
+
+        self.assertEqual({topic.canonical_label for topic in batch.topics}, {"triangle geometry"})
+        self.assertEqual({node.topic_id for node in batch.nodes}, {batch.topics[0].topic_id})
+        self.assertGreaterEqual(len(batch.edges), 2)
+
     def test_build_chronology_batch_extracts_action_object_phase_topic_and_order_edges(self) -> None:
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
         base = datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc)

@@ -50,11 +50,14 @@ def build_event_ordering_model_pack(
     conflicts: list[dict[str, Any]],
     contract_version: str,
     query_intent: dict[str, Any] | None = None,
+    graph_coverage: dict[str, Any] | None = None,
+    graph_shadow: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     compact_source_spans = _compact_event_ordering_records(source_spans, preferred_text_key="content")
     compact_events = _compact_event_ordering_records(events, preferred_text_key="description")
     timeline = _event_ordering_timeline(compact_events, compact_source_spans)
     anchor_timeline = [item for item in timeline if item.get("kind") == "user_introduced_aspect"]
+    graph_timeline = _event_ordering_graph_timeline(anchor_timeline)
     phase_clusters = _event_ordering_phase_clusters(query, anchor_timeline)
     raw_sequence_items = _event_ordering_raw_chronology_sequence_items(query, compact_source_spans, anchor_timeline)
     referenceable_episodes = event_ordering_referenceable_episodes(query, compact_source_spans, anchor_timeline)
@@ -78,6 +81,9 @@ def build_event_ordering_model_pack(
         **({"raw_chronology_items": raw_sequence_items} if raw_sequence_items else {}),
         **({"referenceable_episodes": referenceable_episodes} if referenceable_episodes else {}),
         **({"query_intent": query_intent} if query_intent else {}),
+        **({"graph_coverage": graph_coverage} if graph_coverage else {}),
+        **({"graph_shadow": graph_shadow} if graph_shadow else {}),
+        **({"graph_timeline": graph_timeline} if graph_timeline else {}),
         "timeline": timeline,
         "anchor_timeline": anchor_timeline,
         "phase_clusters": phase_clusters,
@@ -85,6 +91,15 @@ def build_event_ordering_model_pack(
         "event_hints": _event_ordering_event_hints(compact_events),
         "conflicts": conflicts[:10],
     }
+
+
+def _event_ordering_graph_timeline(anchor_timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in anchor_timeline:
+        copied = dict(item)
+        copied["kind"] = "graph_candidate"
+        out.append(copied)
+    return out
 
 
 

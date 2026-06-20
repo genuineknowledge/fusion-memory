@@ -213,6 +213,24 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertFalse(evidence_pack["aggregation_telemetry"]["fallback"])
         self.assertEqual(evidence_pack["aggregation_telemetry"]["accepted_count"], 1)
 
+    def test_event_ordering_pack_keeps_legacy_path_while_graph_shadow_is_missing(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        memory.add("I set up the initial project schema and local server.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
+        memory.add("I implemented transaction CRUD with validation errors.", scope, datetime(2026, 6, 2, tzinfo=timezone.utc))
+
+        pack = memory.answer_context(
+            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
+            scope,
+            budget={"limit": 6, "mode": "benchmark"},
+        )
+
+        model_pack = _pack_for_model(pack)
+
+        self.assertTrue(pack.coverage["query_type"] == "event_ordering")
+        self.assertTrue(model_pack.get("timeline"))
+        self.assertTrue(pack.coverage.get("event_ordering_graph") or pack.coverage.get("event_ordering_shadow"))
+
     def test_answer_model_falls_back_to_rule_aggregation_when_llm_fails(self) -> None:
         class FailingAggregationClient:
             def __init__(self) -> None:
@@ -320,6 +338,20 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertTrue(any(request["json"].get("model") == "env-rerank" for request in server.requests))
             self.assertTrue(any(request["json"].get("model") == "env-extractor" for request in server.requests))
 
+    def test_runtime_config_requires_explicit_extractor_mode(self) -> None:
+        with FakeModelServer() as server:
+            env = {
+                "FUSION_MEMORY_EXTRACTOR_BASE_URL": server.url(""),
+                "FUSION_MEMORY_EXTRACTOR_MODEL": "env-extractor",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                memory = memory_service_from_env(":memory:")
+                scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+                memory.add("Please remember reports should use PostgreSQL.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
+                memory.close()
+
+            self.assertFalse(any(request["path"] == "/chat/completions" for request in server.requests))
+
     def test_runtime_config_ignores_sync_extractor_mode(self) -> None:
         with FakeModelServer() as server:
             env = {
@@ -334,6 +366,35 @@ class ModelAdapterTests(unittest.TestCase):
                 memory.close()
 
             self.assertFalse(any(request["path"] == "/chat/completions" for request in server.requests))
+
+    def test_runtime_config_query_intent_refiner_is_off_by_default(self) -> None:
+        with FakeModelServer() as server:
+            env = {
+                "FUSION_MEMORY_QUERY_INTENT_BASE_URL": server.url(""),
+                "FUSION_MEMORY_QUERY_INTENT_MODEL": "env-router",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                memory = memory_service_from_env(":memory:")
+                scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+                memory.search("我之前提过哪些权限控制和登录保护能力？", scope)
+                memory.close()
+
+            self.assertFalse(any(request["path"] == "/chat/completions" for request in server.requests))
+
+    def test_runtime_config_query_intent_refiner_requires_explicit_mode(self) -> None:
+        with FakeModelServer() as server:
+            env = {
+                "FUSION_MEMORY_QUERY_INTENT_MODE": "always",
+                "FUSION_MEMORY_QUERY_INTENT_BASE_URL": server.url(""),
+                "FUSION_MEMORY_QUERY_INTENT_MODEL": "env-router",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                memory = memory_service_from_env(":memory:")
+                scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+                memory.search("我之前提过哪些权限控制和登录保护能力？", scope)
+                memory.close()
+
+            self.assertTrue(any(request["path"] == "/chat/completions" for request in server.requests))
 
     def test_eval_model_builder_wires_optional_llm_aggregation(self) -> None:
         args = SimpleNamespace(
@@ -783,6 +844,7 @@ class ModelAdapterTests(unittest.TestCase):
         model_pack = _pack_for_model(pack)
         episodes = model_pack["referenceable_episodes"]
         episode_text = json.dumps(episodes)
+        graph_timeline = model_pack.get("graph_timeline")
 
         self.assertEqual([item["timeline_index"] for item in episodes], [1, 2, 3])
         self.assertIn("5.3.0", episode_text)
@@ -790,6 +852,10 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertIn("btn-primary", episode_text)
         self.assertIn("custom CSS", episode_text)
         self.assertIn("modal accessibility", episode_text)
+        self.assertIsInstance(graph_timeline, list)
+        self.assertEqual([item["timeline_index"] for item in graph_timeline], [1, 2, 3])
+        self.assertTrue(all(item.get("kind") == "graph_candidate" for item in graph_timeline))
+        self.assertEqual([item["timeline_index"] for item in model_pack["timeline"]], [1, 2, 3])
 
     def test_event_ordering_referenceable_episodes_keep_support_option_details(self) -> None:
         pack = EvidencePack(
@@ -5942,6 +6008,46 @@ class FakeModelServer:
                         response = {
                             "choices": [{"message": {"content": json.dumps({"matched": "qdrant" in answer.lower()})}}],
                             "usage": {"total_tokens": 5},
+                        }
+                    elif "deterministic_intent" in request_input:
+                        response = {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json.dumps(
+                                            {
+                                                "intent": {
+                                                    "language": "zh",
+                                                    "answer_shape": "unordered_list",
+                                                    "evidence_scope": "multi_session",
+                                                    "speaker_scope": "user",
+                                                    "target_terms": ["权限控制", "登录保护"],
+                                                    "object_types": ["security_feature"],
+                                                    "temporal": {
+                                                        "requires_time": False,
+                                                        "requires_order": False,
+                                                        "requires_duration": False,
+                                                        "order_direction": "unknown",
+                                                        "endpoint_roles": [],
+                                                        "time_expressions": [],
+                                                    },
+                                                    "aggregation": {
+                                                        "operation": "count_distinct",
+                                                        "distinct": True,
+                                                        "target_terms": ["security_feature"],
+                                                        "unit_terms": [],
+                                                    },
+                                                    "needs_current_state": False,
+                                                    "needs_conflict_check": False,
+                                                    "confidence": 0.88,
+                                                    "route_reasons": ["fixture_router"],
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            ],
+                            "usage": {"total_tokens": 9},
                         }
                     else:
                         source_id = request_input["spans"][0]["span_id"]

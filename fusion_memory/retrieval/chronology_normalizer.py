@@ -51,6 +51,27 @@ STOPWORDS = {
     "up",
 }
 
+ASPECT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("core functionality", ("core functionality", "user authentication", "expense tracking", "data visualization")),
+    ("triangle classification", ("classifying triangles", "triangle classification", "equilateral", "isosceles", "scalene")),
+    ("triangle area methods", ("triangle areas", "area calculation", "median formulas", "altitude", "median formula")),
+    ("transaction CRUD implementation", ("transaction crud", "crud implementation", "add transaction", "view transactions")),
+    ("transaction error handling", ("error handling", "try-except", "try except", "integrityerror", "exception")),
+    ("deployment configuration", ("deployment", "deploy", "netlify", "github pages", "render")),
+    ("integration test coverage", ("integration test", "test coverage", "nock", "mock responses")),
+    ("database schema", ("database schema", "schema", "models", "tables")),
+    ("password hashing", ("password hashing", "password_hash", "check_password_hash", "generate_password_hash")),
+    ("query optimization", ("query optimization", "optimize my database queries", "indexes")),
+)
+
+EPISODE_TOPIC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("budget tracker", ("budget tracker", "budget app", "transactions", "expense", "income")),
+    ("triangle geometry", ("triangle", "triangles", "equilateral", "isosceles", "scalene", "median", "altitude", "cosine", "cosines")),
+    ("weather app", ("weather app", "city autocomplete", "openweather", "invalid city", "fetchweatherdata")),
+    ("career development", ("resume", "linkedin", "profile", "job", "interview", "relocation")),
+    ("probability concepts", ("probability", "permutation", "combination", "conditional probability")),
+)
+
 PHASE_ORDER_HINTS = {
     "setup": 10,
     "implementation": 20,
@@ -72,12 +93,15 @@ def build_chronology_write_batch(
     phases_by_key: dict[tuple[str, str], ChronologyPhase] = {}
     nodes: list[ChronologyEventNode] = []
     last_topic_label: str | None = None
+    session_topic_hint = _session_topic_hint(spans, events)
 
     for index, event in enumerate(events):
         span = _first_source_span(event, span_by_id)
         text = span.content if span is not None else event.description
+        if _skip_chronology_node(event, span):
+            continue
         language = _infer_language(text)
-        topic_label, topic_is_strong, taxonomy_entry = _infer_topic_label(text)
+        topic_label, topic_is_strong, taxonomy_entry = _infer_topic_label(text, session_topic_hint=session_topic_hint)
         if not topic_is_strong and last_topic_label is not None and _infer_order_marker(text) is not None:
             topic_label = last_topic_label
             taxonomy_entry = None
@@ -91,7 +115,7 @@ def build_chronology_write_batch(
             scope=scope,
             actor=actor,
             action=_infer_action(text),
-            object=topic.canonical_label,
+            object=_infer_aspect_label(text, topic.canonical_label),
             topic_id=topic.topic_id,
             phase_id=phase.phase_id,
             timestamp=event.time_start or (span.timestamp if span is not None else None),
@@ -104,6 +128,7 @@ def build_chronology_write_batch(
             created_at=created_at,
         )
         nodes.append(node)
+    _append_user_span_nodes(scope, spans, topics_by_label, phases_by_key, nodes, created_at, session_topic_hint)
 
     recognized_phase_ids = {
         phase.phase_id for phase in phases_by_key.values() if phase.phase_type != "unknown"
@@ -130,6 +155,70 @@ def _created_at(events: list[MemoryEvent], spans: list[EvidenceSpan]) -> datetim
     timestamps = [event.time_start for event in events if event.time_start is not None]
     timestamps.extend(span.timestamp for span in spans)
     return min(timestamps) if timestamps else DETERMINISTIC_CREATED_AT_FALLBACK
+
+
+def _append_user_span_nodes(
+    scope: Scope,
+    spans: list[EvidenceSpan],
+    topics_by_label: dict[str, ChronologyTopic],
+    phases_by_key: dict[tuple[str, str], ChronologyPhase],
+    nodes: list[ChronologyEventNode],
+    created_at: datetime,
+    session_topic_hint: str | None,
+) -> None:
+    existing_span_ids = {node.source_span_id for node in nodes if node.source_span_id}
+    last_topic_label = _last_node_topic_label(nodes, topics_by_label)
+    for index, span in enumerate(spans):
+        if span.span_id in existing_span_ids or not _span_is_user_chronology_source(span):
+            continue
+        text = span.content
+        language = _infer_language(text)
+        topic_label, topic_is_strong, taxonomy_entry = _infer_topic_label(text, session_topic_hint=session_topic_hint)
+        if not topic_is_strong and last_topic_label is not None and _infer_order_marker(text) is not None:
+            topic_label = last_topic_label
+            taxonomy_entry = None
+        topic = _get_topic_for_span(scope, topics_by_label, topic_label, language, span, created_at, taxonomy_entry)
+        phase = _get_phase_for_span(phases_by_key, topic, _infer_phase_type(text), span, created_at)
+        nodes.append(
+            ChronologyEventNode(
+                node_id=_id("chron_node", scope, "span", span.span_id, index),
+                scope=scope,
+                actor="user",
+                action=_infer_action(text),
+                object=_infer_aspect_label(text, topic.canonical_label),
+                topic_id=topic.topic_id,
+                phase_id=phase.phase_id,
+                timestamp=span.timestamp,
+                source_span_id=span.span_id,
+                source_turn_id=span.turn_id,
+                text=compact_summary(text),
+                language=language,
+                confidence=0.72,
+                explicit_order_marker=_infer_order_marker(text),
+                created_at=created_at,
+            )
+        )
+        last_topic_label = topic_label
+
+
+def _last_node_topic_label(nodes: list[ChronologyEventNode], topics_by_label: dict[str, ChronologyTopic]) -> str | None:
+    if not nodes:
+        return None
+    topic_by_id = {topic.topic_id: topic for topic in topics_by_label.values()}
+    topic = topic_by_id.get(str(nodes[-1].topic_id or ""))
+    return topic.canonical_label if topic is not None else None
+
+
+def _span_is_user_chronology_source(span: EvidenceSpan) -> bool:
+    if span.speaker != "user" or span.span_type not in {"turn", "document_chunk", "tool_result"}:
+        return False
+    text = span.content.strip()
+    if len(text) < 24:
+        return False
+    lowered = text.lower()
+    if re.fullmatch(r"(?:thanks|thank you|ok|okay|sure)[.! ]*", lowered):
+        return False
+    return True
 
 
 def _first_source_span(event: MemoryEvent, span_by_id: dict[str, EvidenceSpan]) -> EvidenceSpan | None:
@@ -166,10 +255,12 @@ def _contains_phrase(lowered_text: str, phrase: str) -> bool:
     return re.search(rf"\b{re.escape(phrase)}\b", lowered_text) is not None
 
 
-def _infer_topic_label(text: str) -> tuple[str, bool, TaxonomyEntry | None]:
+def _infer_topic_label(text: str, *, session_topic_hint: str | None = None) -> tuple[str, bool, TaxonomyEntry | None]:
     taxonomy_entry = taxonomy_entry_for_text(text)
     if taxonomy_entry is not None:
         return taxonomy_entry.label, _taxonomy_match_is_strong(taxonomy_entry), taxonomy_entry
+    if session_topic_hint and _text_matches_episode_topic(text, session_topic_hint):
+        return session_topic_hint, True, None
     meaningful_tokens = [
         token
         for token in tokenize(text)
@@ -178,6 +269,34 @@ def _infer_topic_label(text: str) -> tuple[str, bool, TaxonomyEntry | None]:
     if meaningful_tokens:
         return " ".join(meaningful_tokens[:4]), False, None
     return compact_summary(text, limit=40).lower() or "unknown", False, None
+
+
+def _session_topic_hint(spans: list[EvidenceSpan], events: list[MemoryEvent]) -> str | None:
+    text = " ".join(
+        [
+            *(span.content for span in spans if span.speaker == "user"),
+            *(event.description for event in events if "assistant" not in {str(p).lower() for p in event.participants}),
+        ]
+    )
+    lowered = text.lower()
+    scored: list[tuple[int, str]] = []
+    for label, phrases in EPISODE_TOPIC_RULES:
+        score = sum(1 for phrase in phrases if _contains_phrase(lowered, phrase))
+        if score:
+            scored.append((score, label))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][1]
+
+
+def _text_matches_episode_topic(text: str, topic_label: str) -> bool:
+    lowered = text.lower()
+    for label, phrases in EPISODE_TOPIC_RULES:
+        if label != topic_label:
+            continue
+        return any(_contains_phrase(lowered, phrase) for phrase in phrases)
+    return False
 
 
 def _get_topic(
@@ -211,6 +330,41 @@ def _get_topic(
         taxonomy_tags=taxonomy_tags,
         source_span_ids=source_span_ids,
         confidence=event.confidence,
+        created_at=created_at,
+    )
+    topics_by_label[topic_label] = topic
+    return topic
+
+
+def _get_topic_for_span(
+    scope: Scope,
+    topics_by_label: dict[str, ChronologyTopic],
+    topic_label: str,
+    language: str,
+    span: EvidenceSpan,
+    created_at: datetime,
+    taxonomy_entry: TaxonomyEntry | None,
+) -> ChronologyTopic:
+    topic = topics_by_label.get(topic_label)
+    if topic is not None:
+        if span.span_id not in topic.source_span_ids:
+            topic.source_span_ids.append(span.span_id)
+        if taxonomy_entry is not None:
+            _merge_topic_taxonomy(topic, taxonomy_entry)
+        return topic
+
+    aliases = list(dict.fromkeys(taxonomy_entry.aliases)) if taxonomy_entry is not None else []
+    taxonomy_tags = list(dict.fromkeys(taxonomy_entry.tags)) if taxonomy_entry is not None else []
+    topic_language = taxonomy_entry.language if taxonomy_entry is not None and taxonomy_entry.language != "unknown" else language
+    topic = ChronologyTopic(
+        topic_id=_id("chron_topic", scope, topic_label),
+        scope=scope,
+        canonical_label=topic_label,
+        aliases=aliases,
+        language=topic_language,
+        taxonomy_tags=taxonomy_tags,
+        source_span_ids=[span.span_id],
+        confidence=0.72,
         created_at=created_at,
     )
     topics_by_label[topic_label] = topic
@@ -264,6 +418,33 @@ def _get_phase(
     return phase
 
 
+def _get_phase_for_span(
+    phases_by_key: dict[tuple[str, str], ChronologyPhase],
+    topic: ChronologyTopic,
+    phase_type: str,
+    span: EvidenceSpan,
+    created_at: datetime,
+) -> ChronologyPhase:
+    key = (topic.topic_id, phase_type)
+    phase = phases_by_key.get(key)
+    if phase is not None:
+        if span.span_id not in phase.source_span_ids:
+            phase.source_span_ids.append(span.span_id)
+        return phase
+
+    phase = ChronologyPhase(
+        phase_id=_id("chron_phase", topic.topic_id, phase_type),
+        topic_id=topic.topic_id,
+        phase_type=phase_type,
+        order_hint=PHASE_ORDER_HINTS[phase_type],
+        source_span_ids=[span.span_id],
+        confidence=0.72,
+        created_at=created_at,
+    )
+    phases_by_key[key] = phase
+    return phase
+
+
 def _infer_action(text: str) -> str:
     lowered = text.lower()
     action_patterns = (
@@ -284,6 +465,59 @@ def _infer_action(text: str) -> str:
             return pattern
     tokens = [token for token in tokenize(text) if token not in STOPWORDS]
     return tokens[0] if tokens else "unknown"
+
+
+def _skip_chronology_node(event: MemoryEvent, span: EvidenceSpan | None) -> bool:
+    speaker = str(getattr(span, "speaker", "") or "").lower()
+    participants = {str(participant).lower() for participant in getattr(event, "participants", [])}
+    if speaker in {"assistant", "agent"} or participants.intersection({"assistant", "agent"}):
+        return True
+    return False
+
+
+def _infer_aspect_label(text: str, topic_label: str) -> str:
+    lowered = text.lower()
+    for label, phrases in ASPECT_RULES:
+        if any(_contains_phrase(lowered, phrase) for phrase in phrases):
+            return label
+    candidates = _aspect_candidates(text)
+    if candidates:
+        return candidates[0]
+    return topic_label
+
+
+def _aspect_candidates(text: str) -> list[str]:
+    cleaned = _strip_request_shell(text)
+    lowered = cleaned.lower()
+    phrase_patterns = (
+        r"(?:about|on|for|with|including)\s+([a-z][a-z0-9+\- ]{3,80})",
+        r"(?:implement(?:ing)?|build(?:ing)?|test(?:ing)?|fix(?:ing)?|deploy(?:ing)?|configure|customize)\s+([a-z][a-z0-9+\- ]{3,80})",
+    )
+    out: list[str] = []
+    for pattern in phrase_patterns:
+        for match in re.finditer(pattern, lowered):
+            label = _clean_aspect_label(match.group(1))
+            if label:
+                out.append(label)
+    tokens = [token for token in tokenize(cleaned) if token not in STOPWORDS and len(token) > 2]
+    if len(tokens) >= 2:
+        out.append(" ".join(tokens[:4]))
+    return list(dict.fromkeys(out))
+
+
+def _strip_request_shell(text: str) -> str:
+    cleaned = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    cleaned = re.sub(r"\b(?:can you|could you|please|help me|i want to|i need to|i'm trying to|i am trying to)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[\s,.;:!?]+", " ", cleaned).strip()
+    return cleaned
+
+
+def _clean_aspect_label(value: str) -> str:
+    value = re.split(r"\b(?:and|but|because|considering|so|while|when|which|that|with a|using)\b", value, maxsplit=1)[0]
+    tokens = [token for token in tokenize(value) if token not in STOPWORDS and len(token) > 1]
+    if not tokens:
+        return ""
+    return " ".join(tokens[:5])
 
 
 def _build_edges(

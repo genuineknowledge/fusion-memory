@@ -204,6 +204,12 @@ def _pack_for_model(
             conflicts=pack.conflicts,
             contract_version=contract_version,
             query_intent=query_intent,
+            graph_coverage=pack.coverage.get("event_ordering_graph")
+            if isinstance(pack.coverage.get("event_ordering_graph"), dict)
+            else None,
+            graph_shadow=pack.coverage.get("event_ordering_shadow")
+            if isinstance(pack.coverage.get("event_ordering_shadow"), dict)
+            else None,
         )
     source_span_limit = 64 if pack.coverage.get("query_type") == "summarization" else 20
     source_spans = _compact_records(pack.source_spans, preferred_text_key="content", limit=source_span_limit)

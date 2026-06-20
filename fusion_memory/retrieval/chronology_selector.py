@@ -23,6 +23,14 @@ def select_persisted_graph_event_ordering_candidates(
         scored_topics = [(score, topic) for score, topic in scored_topics if score > 0]
         scored_topics.sort(key=lambda item: (-item[0], item[1].canonical_label))
         topic_ids = [topic.topic_id for _score, topic in scored_topics[:3]]
+        if not topic_ids and topics:
+            topic_ids = _topic_ids_from_node_relevance(
+                query,
+                scope,
+                store,
+                [topic.topic_id for topic in topics],
+                include_session=include_session,
+            )
         if not topic_ids:
             return [], {"selected_driver": "none", "fallback_reason": "no_topic"}
         phases = {phase.phase_id: phase for phase in store.list_chronology_phases(topic_ids)}
@@ -73,6 +81,10 @@ def select_persisted_graph_event_ordering_candidates(
             "topic_ids": topic_ids,
             "node_count": len(deduped_nodes),
         }
+    edge_connected_ids = {node_id for node_id, count in edge_count_by_node.items() if count > 0}
+    edge_connected_nodes = [node for node in deduped_nodes if node.node_id in edge_connected_ids]
+    if len(edge_connected_nodes) >= 2:
+        deduped_nodes = edge_connected_nodes
 
     source_span_ids = {node.source_span_id for node in deduped_nodes if node.source_span_id}
     for edge in usable_edges:
@@ -131,6 +143,30 @@ def select_persisted_graph_event_ordering_candidates(
     }
 
 
+def _topic_ids_from_node_relevance(
+    query: str,
+    scope: Scope,
+    store: Any,
+    topic_ids: list[str],
+    *,
+    include_session: bool,
+) -> list[str]:
+    nodes = store.list_chronology_event_nodes(scope, include_session=include_session, topic_ids=topic_ids)
+    scored_by_topic: dict[str, float] = {}
+    for node in nodes:
+        topic_id = str(getattr(node, "topic_id", "") or "")
+        if not topic_id:
+            continue
+        score = keyword_score(query, f"{node.text} {node.action} {node.object}")
+        if score <= 0:
+            continue
+        scored_by_topic[topic_id] = max(scored_by_topic.get(topic_id, 0.0), score)
+    return [
+        topic_id
+        for topic_id, _score in sorted(scored_by_topic.items(), key=lambda item: (-item[1], item[0]))[:3]
+    ]
+
+
 def _expand_relevant_nodes(
     query: str,
     scope: Scope,
@@ -176,7 +212,48 @@ def _expand_relevant_nodes(
             continue
         expanded.append(node)
         selected_ids.add(node.node_id)
+    if len(_dedupe_nodes(expanded)) < 2:
+        _append_same_topic_timeline(expanded, selected_ids, eligible_nodes, topic_ids)
+    elif _has_order_edges(store, list(selected_ids)):
+        _append_same_topic_timeline(expanded, selected_ids, eligible_nodes, topic_ids)
     return expanded
+
+
+def _append_same_topic_timeline(
+    expanded: list[Any],
+    selected_ids: set[str],
+    eligible_nodes: list[Any],
+    topic_ids: list[str],
+) -> None:
+    if not expanded:
+        return
+    selected_topic_ids = {node.topic_id for node in expanded if node.topic_id in set(topic_ids)}
+    if not selected_topic_ids:
+        return
+    for node in eligible_nodes:
+        if node.node_id in selected_ids or node.topic_id not in selected_topic_ids:
+            continue
+        if not _same_topic_timeline_node(node):
+            continue
+        expanded.append(node)
+        selected_ids.add(node.node_id)
+
+
+def _same_topic_timeline_node(node: Any) -> bool:
+    return (
+        getattr(node, "timestamp", None) is not None
+        or bool(getattr(node, "explicit_order_marker", None))
+        or bool(getattr(node, "source_span_id", None))
+    )
+
+
+def _has_order_edges(store: Any, node_ids: list[str]) -> bool:
+    if not node_ids:
+        return False
+    try:
+        return bool(store.list_chronology_event_edges(node_ids))
+    except Exception:
+        return False
 
 
 def _continues_selected_timeline(node: Any, selected_nodes: list[Any]) -> bool:
@@ -224,14 +301,20 @@ def _phase_order(phase: Any | None) -> int:
 def _candidate_text(node: Any, phase: Any | None = None) -> str:
     action = str(getattr(node, "action", "") or "").strip()
     obj = str(getattr(node, "object", "") or "").strip()
-    phase_type = str(getattr(phase, "phase_type", "") or "").strip()
     text = str(getattr(node, "text", "") or "")
+    if _usable_object_label(obj):
+        return obj
     if action and obj and action != "unknown" and obj != "unknown":
-        if text and (action.lower() in text.lower() or obj.lower() in text.lower()):
-            return text
-        prefix = f"{phase_type}: " if phase_type and phase_type != "unknown" else ""
-        return f"{prefix}{action} {obj}"
+        return f"{action} {obj}"
     return text
+
+
+def _usable_object_label(value: str) -> bool:
+    if not value or value == "unknown":
+        return False
+    if len(value.split()) > 8:
+        return False
+    return True
 
 
 def _is_missing_chronology_table_error(exc: Exception) -> bool:

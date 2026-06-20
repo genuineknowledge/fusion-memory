@@ -1439,41 +1439,6 @@ def _aspect_phase_key(label: str, snippet: str) -> str:
     return "-".join(terms[:2]) if terms else ""
 
 
-def _diverse_user_timeline(query: str, spans: list[Any], desired: int, *, seen: set[str] | None = None) -> list[Any]:
-    seen = set(seen or set())
-    scored: list[tuple[float, Any]] = []
-    for span in spans:
-        span_id = str(getattr(span, "span_id", ""))
-        if span_id in seen:
-            continue
-        text = str(getattr(span, "content", "") or "")
-        score = keyword_score(query, text) + _timeline_signal(query, text)
-        if score <= 0:
-            continue
-        scored.append((score, span))
-    scored.sort(key=lambda item: (item[0], _reverse_key(span_sort_key(item[1]))), reverse=True)
-    selected: list[Any] = []
-    seen_labels: set[str] = set()
-    for _score, span in scored:
-        label = _event_label(str(getattr(span, "content", "") or ""))
-        family = _label_family(label)
-        if family in seen_labels and len(seen_labels) < desired:
-            continue
-        selected.append(span)
-        seen_labels.add(family)
-        if len(selected) >= desired:
-            break
-    if len(selected) < desired:
-        selected_ids = {str(getattr(span, "span_id", "")) for span in selected}
-        for _score, span in scored:
-            if str(getattr(span, "span_id", "")) in selected_ids:
-                continue
-            selected.append(span)
-            if len(selected) >= desired:
-                break
-    return selected
-
-
 def _supporting_event_candidates(
     query: str,
     events: list[MemoryEvent],

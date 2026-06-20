@@ -8,11 +8,13 @@ import tools.beam_event_ordering_replay as replay
 from tools.beam_event_ordering_replay import (
     _aggregate,
     _compact_coverage,
+    _dual_graph_legacy_items,
     _hybrid_items,
     _graph_items,
     _record_diagnostics,
     evaluate_gate,
     main,
+    preflight_replay_query_scopes_from_store,
     preflight_replay_environment_from_store,
     run_replay,
     score_ordering_candidates,
@@ -67,6 +69,83 @@ class BeamReplayPreflightTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ok")
         self.assertTrue(report["chronology_tables_ready"])
+
+    def test_preflight_reports_workspace_not_backfilled_when_graph_counts_are_empty(self) -> None:
+        class Store:
+            def list_chronology_topics(self, scope, include_session=False):
+                return []
+
+            def list_chronology_event_nodes(self, scope, include_session=False, topic_ids=None):
+                return []
+
+            def list_chronology_event_edges(self, node_ids):
+                return []
+
+        report = preflight_replay_environment_from_store(
+            Store(),
+            scope=SimpleNamespace(workspace_id="beam-ws"),
+            min_topics=1,
+            min_nodes=2,
+            min_edges=1,
+        )
+
+        self.assertEqual(report["status"], "failure")
+        self.assertEqual(report["error"], "persisted_graph_not_backfilled")
+        self.assertTrue(report["chronology_tables_ready"])
+        self.assertFalse(report["persisted_graph_ready"])
+        self.assertEqual(report["chronology_counts"], {"topics": 0, "nodes": 0, "edges": 0})
+
+    def test_preflight_reports_workspace_backfilled_when_counts_meet_threshold(self) -> None:
+        class Store:
+            def list_chronology_topics(self, scope, include_session=False):
+                return [SimpleNamespace(topic_id="topic-1")]
+
+            def list_chronology_event_nodes(self, scope, include_session=False, topic_ids=None):
+                return [SimpleNamespace(node_id="node-1"), SimpleNamespace(node_id="node-2")]
+
+            def list_chronology_event_edges(self, node_ids):
+                return [SimpleNamespace(edge_id="edge-1")]
+
+        report = preflight_replay_environment_from_store(
+            Store(),
+            scope=SimpleNamespace(workspace_id="beam-ws"),
+            min_topics=1,
+            min_nodes=2,
+            min_edges=1,
+        )
+
+        self.assertEqual(report["status"], "ok")
+        self.assertTrue(report["chronology_tables_ready"])
+        self.assertTrue(report["persisted_graph_ready"])
+        self.assertEqual(report["chronology_counts"], {"topics": 1, "nodes": 2, "edges": 1})
+
+    def test_query_scope_preflight_reports_empty_session_scopes(self) -> None:
+        class Store:
+            def list_chronology_topics(self, scope, include_session=False):
+                return [] if scope.session_id == "s-empty" else [SimpleNamespace(topic_id="topic-1")]
+
+            def list_chronology_event_nodes(self, scope, include_session=False, topic_ids=None):
+                return [] if scope.session_id == "s-empty" else [SimpleNamespace(node_id="n1"), SimpleNamespace(node_id="n2")]
+
+            def list_chronology_event_edges(self, node_ids):
+                return [] if not node_ids else [SimpleNamespace(edge_id="edge-1")]
+
+        report = preflight_replay_query_scopes_from_store(
+            Store(),
+            [
+                SimpleNamespace(workspace_id="ws", run_id="r", session_id="s-ready"),
+                SimpleNamespace(workspace_id="ws", run_id="r", session_id="s-empty"),
+            ],
+            min_topics=1,
+            min_nodes=2,
+            min_edges=1,
+        )
+
+        self.assertEqual(report["checked"], 2)
+        self.assertEqual(report["ready"], 1)
+        self.assertEqual(report["not_ready"], 1)
+        self.assertEqual(report["empty"], 1)
+        self.assertEqual(report["failure_samples"][0]["session_id"], "s-empty")
 
     def test_hybrid_source_spans_skips_pack_for_model(self) -> None:
         pack = SimpleNamespace(
@@ -251,6 +330,247 @@ class BeamReplayBucketTests(unittest.TestCase):
 
 
 class BeamReplayModeTests(unittest.TestCase):
+    def test_dual_graph_legacy_items_orders_graph_first_then_legacy_fill(self) -> None:
+        service = SimpleNamespace(
+            _event_ordering_graph_selector_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="g1",
+                        source="event_ordering_persisted_graph",
+                        text="schema setup",
+                        source_span_ids=["span-1"],
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        id="g2",
+                        source="event_ordering_persisted_graph",
+                        text="crud implementation",
+                        source_span_ids=["span-2"],
+                        metadata={},
+                    ),
+                ]
+            ),
+            planner=SimpleNamespace(plan=MagicMock(return_value=SimpleNamespace())),
+            _event_ordering_episode_recall_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="legacy-dup",
+                        source="event_ordering_episode_recall",
+                        text="schema setup",
+                        source_span_ids=["span-1"],
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        id="legacy-fill",
+                        source="event_ordering_episode_recall",
+                        text="deployment checks",
+                        source_span_ids=["span-3"],
+                        metadata={},
+                    ),
+                ]
+            ),
+            _event_ordering_timeline_candidates=MagicMock(return_value=[]),
+            _event_ordering_event_candidates=MagicMock(return_value=[]),
+        )
+
+        items, sources = _dual_graph_legacy_items(service, "rank the work", SimpleNamespace(), 3)
+
+        self.assertEqual(items, ["schema setup", "crud implementation", "deployment checks"])
+        self.assertEqual(
+            sources,
+            [
+                "event_ordering_episode_recall",
+                "event_ordering_persisted_graph",
+                "event_ordering_episode_recall",
+            ],
+        )
+
+    def test_dual_graph_legacy_items_uses_graph_order_over_legacy_text_when_aligned(self) -> None:
+        service = SimpleNamespace(
+            _event_ordering_graph_selector_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="g-crud",
+                        source="event_ordering_persisted_graph",
+                        text="crud implementation",
+                        source_span_ids=["span-crud"],
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        id="g-schema",
+                        source="event_ordering_persisted_graph",
+                        text="schema setup",
+                        source_span_ids=["span-schema"],
+                        metadata={},
+                    ),
+                ]
+            ),
+            planner=SimpleNamespace(plan=MagicMock(return_value=SimpleNamespace())),
+            _event_ordering_episode_recall_candidates=MagicMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="legacy-schema",
+                        source="event_ordering_episode_recall",
+                        text="long user request about initial schema setup and models",
+                        source_span_ids=["span-schema"],
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        id="legacy-crud",
+                        source="event_ordering_episode_recall",
+                        text="long user request about transaction CRUD implementation details",
+                        source_span_ids=["span-crud"],
+                        metadata={},
+                    ),
+                    SimpleNamespace(
+                        id="legacy-deploy",
+                        source="event_ordering_episode_recall",
+                        text="long user request about deployment checks",
+                        source_span_ids=["span-deploy"],
+                        metadata={},
+                    ),
+                ]
+            ),
+            _event_ordering_timeline_candidates=MagicMock(return_value=[]),
+            _event_ordering_event_candidates=MagicMock(return_value=[]),
+        )
+
+        items, sources = _dual_graph_legacy_items(service, "rank the work", SimpleNamespace(), 3)
+
+        self.assertEqual(
+            items,
+            [
+                "long user request about transaction CRUD implementation details",
+                "long user request about initial schema setup and models",
+                "long user request about deployment checks",
+            ],
+        )
+        self.assertEqual(
+            sources,
+            [
+                "event_ordering_episode_recall",
+                "event_ordering_episode_recall",
+                "event_ordering_episode_recall",
+            ],
+        )
+
+    def test_run_replay_graph_dual_legacy_mode_skips_hybrid_path(self) -> None:
+        query = SimpleNamespace(
+            id="q1",
+            query="rank the work",
+            category="event_ordering",
+            metadata={"ordering_tested": ["first step", "second step"]},
+        )
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=3,
+            query_ids=None,
+            max_queries=None,
+            gate=False,
+            mode="graph_dual_legacy",
+            hybrid_source="source_spans",
+            preflight_min_topics=0,
+            preflight_min_nodes=0,
+            preflight_min_edges=0,
+        )
+        service = SimpleNamespace(close=MagicMock())
+
+        with patch.object(replay, "_load_official_beam_dataset", return_value=(None, [query])), patch.object(
+            replay, "memory_service_from_env", return_value=service
+        ), patch.object(
+            replay, "BeamAdapter", return_value=SimpleNamespace(_beam_scope=MagicMock(return_value=SimpleNamespace()))
+        ), patch.object(
+            replay,
+            "preflight_replay_environment_from_store",
+            return_value={"status": "ok", "error": None, "chronology_tables_ready": True, "chronology_error": None},
+        ), patch.object(
+            replay,
+            "_graph_items",
+            return_value=(["first step"], ["event_ordering_persisted_graph"], False),
+        ), patch.object(
+            replay,
+            "_legacy_items",
+            return_value=(["first step", "second step"], ["event_ordering_timeline"]),
+        ), patch.object(
+            replay,
+            "_dual_graph_legacy_items",
+            return_value=(["first step", "second step"], ["event_ordering_persisted_graph", "event_ordering_timeline"]),
+        ), patch.object(
+            replay, "_hybrid_items", side_effect=AssertionError("hybrid path should not run in graph_dual_legacy mode")
+        ):
+            report = run_replay(args)
+
+        self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
+        self.assertTrue(report["records"][0]["paths"]["legacy"]["active"])
+        self.assertTrue(report["records"][0]["paths"]["dual"]["active"])
+        self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
+        self.assertEqual(report["records"][0]["paths"]["dual"]["items"], ["first step", "second step"])
+        self.assertEqual(report["summary"]["dual"]["count"], 1)
+        self.assertEqual(report["summary"]["hybrid"]["count"], 0)
+
+    def test_run_replay_graph_legacy_mode_skips_hybrid_path(self) -> None:
+        query = SimpleNamespace(
+            id="q1",
+            query="rank the work",
+            category="event_ordering",
+            metadata={"ordering_tested": ["first step", "second step"]},
+        )
+        args = SimpleNamespace(
+            dataset="/unused",
+            split="100k",
+            workspace="ws",
+            user_id="beam_user",
+            agent_id="fusion_memory",
+            run_id=None,
+            session_id=None,
+            db="postgresql://example",
+            limit=3,
+            query_ids=None,
+            max_queries=None,
+            gate=False,
+            mode="graph_legacy",
+            hybrid_source="source_spans",
+            preflight_min_topics=0,
+            preflight_min_nodes=0,
+            preflight_min_edges=0,
+        )
+        service = SimpleNamespace(close=MagicMock())
+
+        with patch.object(replay, "_load_official_beam_dataset", return_value=(None, [query])), patch.object(
+            replay, "memory_service_from_env", return_value=service
+        ), patch.object(
+            replay, "BeamAdapter", return_value=SimpleNamespace(_beam_scope=MagicMock(return_value=SimpleNamespace()))
+        ), patch.object(
+            replay,
+            "preflight_replay_environment_from_store",
+            return_value={"status": "ok", "error": None, "chronology_tables_ready": True, "chronology_error": None},
+        ), patch.object(
+            replay,
+            "_graph_items",
+            return_value=(["first step"], ["event_ordering_persisted_graph"], False),
+        ), patch.object(
+            replay,
+            "_legacy_items",
+            return_value=(["first step", "second step"], ["event_ordering_timeline"]),
+        ), patch.object(
+            replay, "_hybrid_items", side_effect=AssertionError("hybrid path should not run in graph_legacy mode")
+        ):
+            report = run_replay(args)
+
+        self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
+        self.assertTrue(report["records"][0]["paths"]["legacy"]["active"])
+        self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
+        self.assertEqual(report["records"][0]["paths"]["graph"]["items"], ["first step"])
+        self.assertEqual(report["records"][0]["paths"]["legacy"]["items"], ["first step", "second step"])
+        self.assertEqual(report["summary"]["hybrid"]["count"], 0)
+
     def test_run_replay_graph_only_excludes_inactive_paths_from_summaries(self) -> None:
         query = SimpleNamespace(
             id="q1",
@@ -356,6 +676,7 @@ class BeamEventOrderingGateTests(unittest.TestCase):
         summary = {
             "graph": {"f1": 0.10, "kendall_tau_norm": 0.20, "empty_rate": 0.0},
             "legacy": {"f1": 0.20, "kendall_tau_norm": 0.25, "empty_rate": 0.0},
+            "dual": {"f1": 0.30, "kendall_tau_norm": 0.30, "empty_rate": 0.0},
             "hybrid": {"f1": 0.18, "kendall_tau_norm": 0.24, "empty_rate": 0.0},
         }
 
@@ -364,6 +685,20 @@ class BeamEventOrderingGateTests(unittest.TestCase):
         self.assertFalse(gate["passed"])
         self.assertIn("graph_f1_below_legacy", gate["failures"])
         self.assertIn("graph_tau_below_legacy", gate["failures"])
+
+    def test_evaluate_gate_requires_dual_to_match_legacy_when_active(self) -> None:
+        summary = {
+            "graph": {"f1": 0.20, "kendall_tau_norm": 0.30, "empty_rate": 0.0},
+            "legacy": {"f1": 0.20, "kendall_tau_norm": 0.30, "empty_rate": 0.0},
+            "dual": {"active": True, "count": 1, "f1": 0.10, "kendall_tau_norm": 0.20, "empty_rate": 0.0},
+            "hybrid": {"active": False, "count": 0},
+        }
+
+        gate = evaluate_gate(summary)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn("dual_f1_below_legacy", gate["failures"])
+        self.assertIn("dual_tau_below_legacy", gate["failures"])
 
     def test_aggregate_reports_gate_fields_and_path_wins(self) -> None:
         records = [
@@ -394,12 +729,66 @@ class BeamEventOrderingGateTests(unittest.TestCase):
         summary = _aggregate(records)
 
         self.assertFalse(summary["graph_vs_legacy_passed"])
+        self.assertFalse(summary["dual_vs_legacy_passed"])
         self.assertIn("graph_f1_below_legacy", summary["gate_failures"])
         self.assertEqual(summary["path_wins"]["f1"], {"graph": 1, "legacy": 1, "hybrid": 0})
         self.assertEqual(summary["path_wins"]["kendall_tau_norm"], {"graph": 1, "legacy": 1, "hybrid": 0})
         self.assertAlmostEqual(summary["graph_fallback_rate"], 0.5)
         self.assertEqual(summary["dropped_high_signal_candidate_count"], 3)
         self.assertEqual(summary["over_abstract_label_count"], 2)
+
+    def test_aggregate_reports_dual_vs_legacy_passed_independently_from_graph(self) -> None:
+        records = [
+            {
+                "paths": {
+                    "graph": {
+                        "active": True,
+                        "items": [],
+                        "metrics": {
+                            "precision": 0.0,
+                            "recall": 0.0,
+                            "f1": 0.0,
+                            "kendall_tau": 0.0,
+                            "kendall_tau_norm": 0.0,
+                            "system_count": 0,
+                            "matched": 0,
+                        },
+                    },
+                    "legacy": {
+                        "active": True,
+                        "items": ["schema setup"],
+                        "metrics": {
+                            "precision": 0.5,
+                            "recall": 0.5,
+                            "f1": 0.5,
+                            "kendall_tau": 0.0,
+                            "kendall_tau_norm": 0.5,
+                            "system_count": 1,
+                            "matched": 1,
+                        },
+                    },
+                    "dual": {
+                        "active": True,
+                        "items": ["schema setup", "crud implementation"],
+                        "metrics": {
+                            "precision": 0.7,
+                            "recall": 0.7,
+                            "f1": 0.7,
+                            "kendall_tau": 0.2,
+                            "kendall_tau_norm": 0.6,
+                            "system_count": 2,
+                            "matched": 2,
+                        },
+                    },
+                    "hybrid": {"active": False, "items": [], "sources": [], "inactive": True},
+                }
+            }
+        ]
+
+        summary = _aggregate(records)
+
+        self.assertFalse(summary["graph_vs_legacy_passed"])
+        self.assertTrue(summary["dual_vs_legacy_passed"])
 
     def test_aggregate_reports_graph_vs_legacy_passed_independently_from_dual(self) -> None:
         records = [

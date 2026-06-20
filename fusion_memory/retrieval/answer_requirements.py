@@ -235,17 +235,6 @@ def _query_requests_version_detail(query_lower: str) -> bool:
     return False
 
 
-def _query_mentions_software_objects(query_lower: str) -> bool:
-    if re.search(r"\b(?:dependencies|dependency|packages?|modules?)\b", query_lower):
-        return True
-    if re.search(r"\b(?:tools|software|apps?|applications?)\b", query_lower):
-        return True
-    return bool(
-        re.search(r"\b(?:libraries|library)\b", query_lower)
-        and re.search(r"\b(?:code|coding|programming|python|javascript|typescript|npm|pip|software)\b", query_lower)
-    )
-
-
 def _evidence_supports_version_requirement(query_lower: str, content_lower: str) -> bool:
     if not _query_requests_version_detail(query_lower):
         return False

@@ -11,8 +11,6 @@ the eval adapter into a growing set of answer templates.
 import re
 from typing import Any
 
-from fusion_memory.core.text import compact_summary
-
 
 def exact_answer_operator_fields(query: str, content: str, *, speaker: str | None = None) -> dict[str, Any]:
     lower = query.lower()
@@ -28,34 +26,6 @@ def exact_answer_operator_fields(query: str, content: str, *, speaker: str | Non
     if candidate:
         return candidate
     return {}
-
-
-def exact_answer_operator_candidates(query: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for record in records:
-        content = str(record.get("content") or record.get("context") or record.get("text") or "")
-        fields = exact_answer_operator_fields(query, content, speaker=str(record.get("speaker") or ""))
-        if not fields:
-            continue
-        value = str(fields.get("answer_value") or "").strip()
-        formula = str(fields.get("extraction_formula") or "")
-        key = (formula, value.lower())
-        if not value or key in seen:
-            continue
-        seen.add(key)
-        out.append(
-            {
-                **fields,
-                "source_span_id": record.get("source_span_id") or record.get("id"),
-                "speaker": record.get("speaker"),
-                "score": max(0.0, min(1.0, float(fields.get("confidence") or 0.0))),
-                "content": compact_summary(content, 1200),
-            }
-        )
-        if len(out) >= 4:
-            break
-    return out
 
 
 def _where_met_candidate(query_lower: str, content: str, *, speaker: str | None) -> dict[str, Any] | None:

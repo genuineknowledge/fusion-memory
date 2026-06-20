@@ -67,7 +67,7 @@ class ChronologySelectorTests(unittest.TestCase):
                     scope=scope,
                     actor="user",
                     action="implemented",
-                    object="budget tracker",
+                    object="schema setup" if node_id == "node-budget-1" else "transaction CRUD validation",
                     topic_id=topic_id,
                     phase_id=f"phase-{topic_id}",
                     timestamp=ts(timestamp),
@@ -270,6 +270,250 @@ class ChronologySelectorTests(unittest.TestCase):
         self.assertEqual(candidates, [])
         self.assertEqual(telemetry["fallback_reason"], "too_few_nodes")
 
+    def test_selector_expands_from_single_matching_node_to_same_topic_timeline(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="graph-select-topic-expand", user_id="u", agent_id="a", session_id="s")
+        created_at = ts("2026-06-18T10:00:00+00:00")
+        topic = ChronologyTopic(
+            topic_id="topic-budget",
+            scope=scope,
+            canonical_label="budget tracker",
+            aliases=["budget tracker work"],
+            language="en",
+            taxonomy_tags=[],
+            source_span_ids=["s1", "s2", "s3"],
+            confidence=0.95,
+            created_at=created_at,
+        )
+        memory.store.upsert_chronology_topic(topic)
+        memory.store.upsert_chronology_phase(
+            ChronologyPhase(
+                phase_id="phase-budget",
+                topic_id=topic.topic_id,
+                phase_type="implementation",
+                order_hint=20,
+                source_span_ids=["s1", "s2", "s3"],
+                confidence=0.9,
+                created_at=created_at,
+            )
+        )
+        for node_id, span_id, text, minute, marker in (
+            ("node-budget-1", "s1", "I first set up the budget tracker schema.", 0, "first"),
+            ("node-budget-2", "s2", "Then I implemented category filters.", 5, "then"),
+            ("node-budget-3", "s3", "Finally I tested monthly reports.", 10, "finally"),
+        ):
+            memory.store.upsert_chronology_event_node(
+                ChronologyEventNode(
+                    node_id=node_id,
+                    scope=scope,
+                    actor="user",
+                    action="implemented",
+                    object="budget tracker",
+                    topic_id=topic.topic_id,
+                    phase_id="phase-budget",
+                    timestamp=ts(f"2026-06-18T10:{minute:02d}:00+00:00"),
+                    source_span_id=span_id,
+                    source_turn_id=f"turn-{span_id}",
+                    text=text,
+                    language="en",
+                    confidence=0.9,
+                    explicit_order_marker=marker,
+                    created_at=created_at,
+                )
+            )
+        for edge_id, left, right, spans in (
+            ("edge-1", "node-budget-1", "node-budget-2", ["s1", "s2"]),
+            ("edge-2", "node-budget-2", "node-budget-3", ["s2", "s3"]),
+        ):
+            memory.store.insert_chronology_event_edge(
+                ChronologyEventEdge(
+                    edge_id=edge_id,
+                    from_node_id=left,
+                    to_node_id=right,
+                    edge_type="before",
+                    evidence_type="explicit_marker",
+                    source_span_ids=spans,
+                    confidence=0.9,
+                    created_at=created_at,
+                )
+            )
+
+        candidates, telemetry = select_persisted_graph_event_ordering_candidates(
+            "What order did I mention category filters?",
+            scope,
+            memory.store,
+            limit=5,
+            include_session=True,
+        )
+
+        self.assertEqual(telemetry["selected_driver"], "persisted_graph")
+        self.assertEqual([candidate.id for candidate in candidates], ["node-budget-1", "node-budget-2", "node-budget-3"])
+
+    def test_persisted_graph_candidate_text_uses_short_object_label(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="graph-select-short-label", user_id="u", agent_id="a", session_id="s")
+        created_at = ts("2026-06-18T10:00:00+00:00")
+        topic = ChronologyTopic(
+            topic_id="topic-budget",
+            scope=scope,
+            canonical_label="budget tracker",
+            aliases=["budget tracker work"],
+            language="en",
+            taxonomy_tags=[],
+            source_span_ids=["s1", "s2"],
+            confidence=0.95,
+            created_at=created_at,
+        )
+        memory.store.upsert_chronology_topic(topic)
+        memory.store.upsert_chronology_phase(
+            ChronologyPhase(
+                phase_id="phase-budget",
+                topic_id=topic.topic_id,
+                phase_type="implementation",
+                order_hint=20,
+                source_span_ids=["s1", "s2"],
+                confidence=0.9,
+                created_at=created_at,
+            )
+        )
+        for node_id, span_id, obj, text, minute in (
+            ("node-core", "s1", "core functionality", "I'm building a budget tracker and need user auth, expenses, and charts.", 0),
+            ("node-crud", "s2", "transaction CRUD implementation", "Then I worked on transaction CRUD implementation.", 5),
+        ):
+            memory.store.upsert_chronology_event_node(
+                ChronologyEventNode(
+                    node_id=node_id,
+                    scope=scope,
+                    actor="user",
+                    action="implemented",
+                    object=obj,
+                    topic_id=topic.topic_id,
+                    phase_id="phase-budget",
+                    timestamp=ts(f"2026-06-18T10:{minute:02d}:00+00:00"),
+                    source_span_id=span_id,
+                    source_turn_id=f"turn-{span_id}",
+                    text=text,
+                    language="en",
+                    confidence=0.9,
+                    explicit_order_marker="then" if node_id == "node-crud" else "first",
+                    created_at=created_at,
+                )
+            )
+        memory.store.insert_chronology_event_edge(
+            ChronologyEventEdge(
+                edge_id="edge-budget",
+                from_node_id="node-core",
+                to_node_id="node-crud",
+                edge_type="before",
+                evidence_type="explicit_marker",
+                source_span_ids=["s1", "s2"],
+                confidence=0.9,
+                created_at=created_at,
+            )
+        )
+
+        candidates, telemetry = select_persisted_graph_event_ordering_candidates(
+            "List the budget tracker work in order.",
+            scope,
+            memory.store,
+            limit=5,
+            include_session=True,
+        )
+
+        self.assertEqual(telemetry["selected_driver"], "persisted_graph")
+        self.assertEqual([candidate.text for candidate in candidates], ["core functionality", "transaction CRUD implementation"])
+
+    def test_selector_falls_back_to_edge_connected_topic_when_topical_hits_are_isolated(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="graph-select-edge-topic", user_id="u", agent_id="a", session_id="s")
+        created_at = ts("2026-06-18T10:00:00+00:00")
+        isolated_topics = [
+            ChronologyTopic(f"topic-isolated-{idx}", scope, f"isolated match {idx}", [f"autocomplete isolated {idx}"], "en", [], [f"iso-{idx}"], 0.9, created_at)
+            for idx in range(3)
+        ]
+        connected_topic = ChronologyTopic(
+            "topic-weather",
+            scope,
+            "weather app",
+            ["city autocomplete", "weather app work"],
+            "en",
+            [],
+            ["s1", "s2"],
+            0.8,
+            created_at,
+        )
+        for topic in [*isolated_topics, connected_topic]:
+            memory.store.upsert_chronology_topic(topic)
+            memory.store.upsert_chronology_phase(
+                ChronologyPhase(f"phase-{topic.topic_id}", topic.topic_id, "implementation", 20, topic.source_span_ids, 0.8, created_at)
+            )
+        for idx, topic in enumerate(isolated_topics):
+            memory.store.upsert_chronology_event_node(
+                ChronologyEventNode(
+                    f"node-isolated-{idx}",
+                    scope,
+                    "user",
+                    "asked",
+                    f"autocomplete isolated {idx}",
+                    topic.topic_id,
+                    f"phase-{topic.topic_id}",
+                    ts(f"2026-06-18T10:0{idx}:00+00:00"),
+                    f"iso-{idx}",
+                    f"turn-iso-{idx}",
+                    f"Autocomplete isolated note {idx}",
+                    "en",
+                    0.8,
+                    None,
+                    created_at,
+                )
+            )
+        for node_id, obj, text, minute, marker in (
+            ("node-weather-1", "debounce implementation", "I first implemented debounce for city autocomplete.", 10, "first"),
+            ("node-weather-2", "dropdown error handling", "Then I handled dropdown and invalid city errors.", 15, "then"),
+        ):
+            memory.store.upsert_chronology_event_node(
+                ChronologyEventNode(
+                    node_id,
+                    scope,
+                    "user",
+                    "implemented",
+                    obj,
+                    connected_topic.topic_id,
+                    f"phase-{connected_topic.topic_id}",
+                    ts(f"2026-06-18T10:{minute}:00+00:00"),
+                    f"s-{node_id}",
+                    f"turn-{node_id}",
+                    text,
+                    "en",
+                    0.9,
+                    marker,
+                    created_at,
+                )
+            )
+        memory.store.insert_chronology_event_edge(
+            ChronologyEventEdge(
+                "edge-weather",
+                "node-weather-1",
+                "node-weather-2",
+                "before",
+                "explicit_marker",
+                ["s-node-weather-1", "s-node-weather-2"],
+                0.9,
+                created_at,
+            )
+        )
+
+        candidates, telemetry = select_persisted_graph_event_ordering_candidates(
+            "List the city autocomplete feature work in order.",
+            scope,
+            memory.store,
+            limit=5,
+            include_session=True,
+        )
+
+        self.assertEqual(telemetry["selected_driver"], "persisted_graph")
+        self.assertEqual([candidate.text for candidate in candidates], ["debounce implementation", "dropdown error handling"])
+
 
     def test_service_uses_query_time_graph_selector_when_persisted_graph_is_unavailable(self) -> None:
         memory = MemoryService()
@@ -298,7 +542,7 @@ class ChronologySelectorTests(unittest.TestCase):
             )
 
         self.assertEqual(candidates[0].source, "event_ordering_graph_selector")
-        self.assertEqual(candidates[0].metadata["persisted_graph_telemetry"]["fallback_reason"], "no_topic")
+        self.assertIn(candidates[0].metadata["persisted_graph_telemetry"]["fallback_reason"], {"no_topic", "too_few_nodes"})
 
     def test_service_uses_legacy_timeline_when_no_graph_selector_is_available(self) -> None:
         memory = MemoryService()
@@ -317,7 +561,7 @@ class ChronologySelectorTests(unittest.TestCase):
         self.assertTrue(candidates)
         self.assertTrue(all(candidate.source != "event_ordering_graph_selector" for candidate in candidates))
         self.assertTrue(any(candidate.source.startswith("event_ordering_coverage") for candidate in candidates))
-        self.assertEqual(candidates[0].metadata["persisted_graph_telemetry"]["fallback_reason"], "no_topic")
+        self.assertIn(candidates[0].metadata["persisted_graph_telemetry"]["fallback_reason"], {"no_topic", "too_few_nodes"})
 
     def test_service_falls_back_when_chronology_tables_are_missing(self) -> None:
         memory = MemoryService()

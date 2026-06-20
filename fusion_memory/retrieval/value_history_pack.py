@@ -254,8 +254,30 @@ def value_mentions(content: str) -> list[dict[str, str]]:
             "date",
             r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+20\d{2})?\b",
         ),
+        ("date", r"(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)"),
         ("time", r"\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)\b"),
         ("time", r"\b\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)\b"),
+        (
+            "count",
+            r"\b\d+(?:,\d{3})*\s+of\s+\d+(?:,\d{3})*\s+"
+            r"(?:tasks?|items?|modules?|tests?|problems?|books?|pages?|scenes?|cards?|columns?|features?)\b",
+        ),
+        (
+            "count",
+            r"\b\d+(?:,\d{3})*(?:\.\d+)?\s*"
+            r"(?:calls?|requests?|commits?|cards?|columns?|features?|concerns?|interviews?|"
+            r"problems?|items?|tests?|modules?|roles?|mentees?|people|women|sources?|series|books?|pages?|words?|scenes?|"
+            r"days?\s+a\s+week|days?\s+per\s+week)"
+            r"(?:\s+per\s+(?:day|week|month|minute|hour))?\b",
+        ),
+        (
+            "count",
+            r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+            r"(?:calls?|requests?|commits?|cards?|columns?|features?|concerns?|interviews?|"
+            r"problems?|items?|tests?|modules?|roles?|mentees?|people|women|sources?|series|books?|pages?|words?|scenes?|"
+            r"days?\s+a\s+week|days?\s+per\s+week)"
+            r"(?:\s+per\s+(?:day|week|month|minute|hour))?\b",
+        ),
         (
             "duration",
             r"\b\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\s*(?:days?|weeks?|months?|hours?|minutes?)\b",
@@ -268,27 +290,6 @@ def value_mentions(content: str) -> list[dict[str, str]]:
         ),
         ("latency", r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?)\b"),
         ("version", r"\bv?\d+\.\d+(?:\.\d+)?\b(?!\s*(?:%|percent))"),
-        (
-            "count",
-            r"\b\d+(?:,\d{3})*(?:\.\d+)?\s*"
-            r"(?:calls?|requests?|commits?|cards?|columns?|features?|concerns?|interviews?|"
-            r"problems?|items?|tests?|modules?|roles?|mentees?|people|women|sources?|series|books?|pages?|words?|scenes?|"
-            r"days?\s+a\s+week|days?\s+per\s+week)"
-            r"(?:\s+per\s+(?:day|week|month|minute|hour))?\b",
-        ),
-        (
-            "count",
-            r"\b\d+(?:,\d{3})*\s+of\s+\d+(?:,\d{3})*\s+"
-            r"(?:tasks?|items?|modules?|tests?|problems?|books?|pages?|scenes?|cards?|columns?|features?)\b",
-        ),
-        (
-            "count",
-            r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
-            r"(?:calls?|requests?|commits?|cards?|columns?|features?|concerns?|interviews?|"
-            r"problems?|items?|tests?|modules?|roles?|mentees?|people|women|sources?|series|books?|pages?|words?|scenes?|"
-            r"days?\s+a\s+week|days?\s+per\s+week)"
-            r"(?:\s+per\s+(?:day|week|month|minute|hour))?\b",
-        ),
     ]
     for kind, pattern in patterns:
         for match in re.finditer(pattern, content, flags=re.I):
@@ -468,29 +469,6 @@ def value_history_sort_key(query: str):
         )
 
     return key
-
-
-def value_history_target_types(query: str) -> set[str]:
-    return set(value_history_target_type_priority(query))
-
-
-def value_history_prefers_largest(query: str, value_type: str) -> bool:
-    lower = query.lower()
-    if value_type == "duration" and re.search(r"\b(?:total|altogether|overall|have\s+i\s+spent)\b", lower):
-        return True
-    if value_type == "count" and re.search(r"\b(?:sources?|library|total|in\s+my\s+.+library)\b", lower):
-        return True
-    return False
-
-
-def value_history_numeric_value(value: str) -> float:
-    match = re.search(r"\d+(?:,\d{3})*(?:\.\d+)?", value)
-    if not match:
-        return 0.0
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return 0.0
 
 
 def value_history_value_role(query: str, context: str, value_text: str, value_type: str) -> str:
@@ -811,7 +789,10 @@ def value_history_target_type_priority(query: str) -> list[str]:
         out.append("money")
     if re.search(r"\b(?:percentage|percent|coverage|accuracy|rate|%)\b", lower):
         out.append("percentage")
-    if re.search(r"\b(?:when|date|deadline|due|scheduled)\b", lower):
+    if re.search(r"\b(?:when|date|deadline|due|scheduled)\b", lower) or re.search(
+        r"(?:日期|时间|截止|发布目标|目标日|目标时间|什么时候)",
+        query,
+    ):
         out.append("date")
     if re.search(r"\b(?:version|library|libraries|dependencies?|package)\b", lower):
         out.append("version")
