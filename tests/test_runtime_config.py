@@ -34,6 +34,11 @@ class RuntimeRetrievalFlagTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported event ordering selector"):
                 build_runtime_retrieval_flags()
 
+    def test_non_legacy_event_ordering_selector_is_rejected_for_product_default(self) -> None:
+        with patch.dict(os.environ, {"FUSION_MEMORY_EVENT_ORDERING_SELECTOR": "dual"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "unsupported event ordering selector"):
+                build_runtime_retrieval_flags()
+
     def test_omitted_query_intent_mode_keeps_router_off_on_memory_service(self) -> None:
         captured_kwargs: dict[str, object] = {}
 

@@ -1061,6 +1061,33 @@ class FusionMemoryTests(unittest.TestCase):
         finally:
             service.close()
 
+    def test_dual_shadow_does_not_replace_event_ordering_selected_candidates(self) -> None:
+        class Flags:
+            dual_event_ordering_shadow = True
+            production_selector = "legacy"
+
+        service = MemoryService(retrieval_flags=Flags())
+        scope = Scope(workspace_id="shadow-default", user_id="u", agent_id="a")
+        try:
+            service.add(
+                {
+                    "role": "user",
+                    "content": "First I created the schema. Then I added CRUD. Finally I tested errors.",
+                },
+                scope,
+            )
+            result = service.search(
+                "What order did I describe the work?",
+                scope,
+                {"query_type_hint": "event_ordering", "limit": 5},
+            )
+        finally:
+            service.close()
+
+        self.assertIn("event_ordering_dual_shadow", result.coverage)
+        self.assertNotEqual(result.coverage["event_ordering_dual_shadow"].get("selected_driver"), "production")
+        self.assertTrue(result.candidates)
+
     def test_event_ordering_dual_shadow_reports_fallback_graph_candidates(self) -> None:
         class Flags:
             dual_event_ordering_shadow = True
