@@ -217,11 +217,14 @@ class RuleAuditTests(unittest.TestCase):
                     reader.fieldnames,
                     [
                         "rule_id",
+                        "ability",
                         "hit_count",
                         "query_count",
                         "contribution_count",
+                        "negative_impact_count",
                         "dropped_count",
                         "candidate_sources",
+                        "evidence_inputs",
                         "recommendation",
                         "duplicate_of",
                         "cleanup_phase",
@@ -233,6 +236,53 @@ class RuleAuditTests(unittest.TestCase):
 
             self.assertEqual([row["rule_id"] for row in rows], ["rule.alpha", "rule.beta"])
             self.assertEqual(rows[0]["candidate_sources"], "source_a;source_b")
+            self.assertEqual(rows[0]["evidence_inputs"], str(input_path))
+
+    def test_cli_merges_multiple_replay_inputs_and_marks_evidence_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            first = tmp / "event.json"
+            second = tmp / "current.json"
+            out = tmp / "audit.json"
+            first.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "query_id": "q1",
+                                "rule_hits": [{"rule_id": "rule.keep", "contributed_candidate_id": "c1"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            second.write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "query_id": "q2",
+                                "rule_hits": [{"rule_id": "rule.drop", "contributed_candidate_id": None}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, "tools/rule_audit.py", "--input", str(first), "--input", str(second), "--output", str(out)],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            rows = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual({row["rule_id"] for row in rows}, {"rule.keep", "rule.drop"})
+            self.assertTrue(all(row["evidence_inputs"] for row in rows))
 
     def test_cli_can_write_json_without_csv(self) -> None:
         payload = {
@@ -324,6 +374,7 @@ class RuleAuditTests(unittest.TestCase):
 
             self.assertEqual([row["rule_id"] for row in rows], ["rule.delta", "rule.gamma"])
             self.assertEqual(rows[0]["candidate_sources"], "source_c")
+            self.assertEqual(rows[0]["evidence_inputs"], str(input_path))
 
 
 if __name__ == "__main__":
