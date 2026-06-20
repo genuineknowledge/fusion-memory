@@ -236,6 +236,33 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(audit[1]["rule_id"], "zh.recall")
         self.assertEqual(audit[1]["hit_count"], 0)
 
+    def test_registered_rule_audit_marks_zero_hit_rules_for_first_pass_cleanup(self) -> None:
+        rules = [
+            RuleDefinition(
+                rule_id="event.order",
+                module="m",
+                purpose="event order",
+                category="event_ordering",
+                ability="event_ordering",
+            ),
+            RuleDefinition(
+                rule_id="zh.recall",
+                module="m",
+                purpose="Chinese recall",
+                category="retrieval",
+                ability="chinese_recall",
+            ),
+        ]
+        hits = [{"rule_id": "event.order", "contributed": True, "impact": "selected"}]
+
+        audit = build_rule_audit(rules, hits)
+        zero_hit = next(row for row in audit if row["rule_id"] == "zh.recall")
+
+        self.assertIsNone(zero_hit["duplicate_of"])
+        self.assertEqual(zero_hit["cleanup_phase"], "first_pass")
+        self.assertEqual(zero_hit["cleanup_action"], "delete_no_hits")
+        self.assertTrue(zero_hit["safe_to_delete"])
+
 
 class RuleInstrumentationTests(unittest.TestCase):
     def setUp(self) -> None:
