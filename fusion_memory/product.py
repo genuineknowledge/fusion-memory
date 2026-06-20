@@ -422,13 +422,33 @@ def upgrade(home: str | Path | None = None, *, package: str | None = None, dry_r
         return {"ok": True, "dry_run": True, "backup": backup_plan, "rollback": rollback, "command": command}
     backup = backup_data(home)
     completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if completed.stdout:
+        paths.log.parent.mkdir(parents=True, exist_ok=True)
+        with paths.log.open("a", encoding="utf-8") as handle:
+            handle.write("\n[fusion-memory upgrade]\n")
+            handle.write(completed.stdout)
+            if not completed.stdout.endswith("\n"):
+                handle.write("\n")
+    if completed.returncode != 0:
+        return {
+            "ok": False,
+            "error": "upgrade_failed",
+            "message": "Upgrade did not finish. Your existing memory data was backed up and the previous version is still available.",
+            "next_step": "Run fusion-memory doctor, then retry fusion-memory upgrade. If it still fails, share the local log with support.",
+            "backup": backup,
+            "rollback": rollback,
+            "command": command,
+            "returncode": completed.returncode,
+            "log": str(paths.log),
+        }
     return {
-        "ok": completed.returncode == 0,
+        "ok": True,
         "backup": backup,
         "rollback": rollback,
         "command": command,
         "returncode": completed.returncode,
-        "output": completed.stdout[-4000:],
+        "message": "Upgrade finished.",
+        "log": str(paths.log),
     }
 
 

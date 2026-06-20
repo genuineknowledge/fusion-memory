@@ -278,6 +278,31 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("backup", plan)
         self.assertIn("rollback", plan)
 
+    def test_upgrade_failure_json_is_beginner_safe_without_raw_subprocess_output(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            init_home(home, local_test=True)
+            raw_output = (
+                "Traceback (most recent call last):\n"
+                "File \"/tmp/pip.py\", line 1, in <module>\n"
+                "RuntimeError: secret internal pip failure\n"
+            )
+            with patch(
+                "fusion_memory.product.subprocess.run",
+                return_value=subprocess.CompletedProcess(["pip"], 1, stdout=raw_output),
+            ):
+                result = upgrade(home, package="fusion-memory-test")
+
+        serialized = json.dumps(result)
+        self.assertFalse(result["ok"])
+        self.assertIn("message", result)
+        self.assertIn("next_step", result)
+        self.assertNotIn("output", result)
+        self.assertNotIn("Traceback", serialized)
+        self.assertNotIn("secret internal pip failure", serialized)
+
     def test_start_failure_maps_qwen_traceback_to_friendly_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

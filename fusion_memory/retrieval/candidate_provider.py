@@ -6,6 +6,15 @@ from fusion_memory.core.models import Candidate, Scope
 from fusion_memory.core.text import keyword_score
 
 
+def _event_ordering_production_candidate(candidate: Candidate) -> bool:
+    source = str(candidate.source or "")
+    if source == "event_ordering_persisted_graph":
+        return False
+    if source.startswith("event_ordering_graph"):
+        return False
+    return True
+
+
 def build_candidate_lists(
     service: Any,
     query: str,
@@ -101,20 +110,17 @@ def build_candidate_lists(
             if aggregation_candidates:
                 candidate_lists.append(aggregation_candidates)
         if plan.query_type == "event_ordering":
-            graph_candidates = service._event_ordering_graph_selector_candidates(
-                query,
-                scope,
-                limit=max(per_source_limit * 3, per_source_limit + 12),
-                include_session=include_session,
-            )
-            if graph_candidates:
-                candidate_lists.append(graph_candidates)
             coverage_candidates = service._event_ordering_coverage_candidates(
                 query,
                 scope,
                 limit=max(per_source_limit * 3, per_source_limit + 12),
                 include_session=include_session,
             )
+            coverage_candidates = [
+                candidate
+                for candidate in coverage_candidates
+                if _event_ordering_production_candidate(candidate)
+            ]
             if coverage_candidates:
                 candidate_lists.append(coverage_candidates)
             episode_recall = service._event_ordering_episode_recall_candidates(

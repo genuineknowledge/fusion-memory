@@ -951,12 +951,13 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("integration_test_coverage", groups)
         self.assertEqual([event["timeline_index"] for event in pack.events], list(range(1, len(pack.events) + 1)))
         self.assertTrue(any(item["type"] == "event" and "event_timeline_graph" in item["source"] for item in pack.debug_trace))
-        graph_coverage = pack.coverage.get("event_ordering_graph")
-        self.assertIsInstance(graph_coverage, dict)
-        self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
-        self.assertGreaterEqual(graph_coverage.get("legacy_candidate_count", 0), 0)
-        self.assertEqual(graph_coverage.get("selected_span_source"), "graph")
-        self.assertIn("graph_candidates_dropped_by_filters", graph_coverage)
+        self.assertNotIn("event_ordering_graph", pack.coverage)
+        self.assertFalse(
+            any(
+                item["source"].startswith("event_ordering_graph")
+                for item in pack.debug_trace
+            )
+        )
 
     def test_event_ordering_pack_tracks_graph_shadow_metrics_when_legacy_fallback_wins(self) -> None:
         memory = MemoryService()
@@ -970,12 +971,10 @@ class FusionMemoryTests(unittest.TestCase):
             budget={"limit": 1},
         )
 
-        graph_coverage = pack.coverage.get("event_ordering_graph")
-        self.assertIsInstance(graph_coverage, dict)
-        self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
-        self.assertGreaterEqual(graph_coverage.get("legacy_candidate_count", 0), 0)
-        self.assertEqual(graph_coverage.get("selected_span_source"), "legacy")
-        self.assertTrue(graph_coverage.get("graph_candidates_dropped_by_filters"))
+        self.assertNotIn("event_ordering_graph", pack.coverage)
+        shadow_coverage = pack.coverage.get("event_ordering_shadow")
+        self.assertIsInstance(shadow_coverage, dict)
+        self.assertEqual(shadow_coverage.get("selected_span_source"), "legacy")
 
     def test_event_ordering_shadow_metrics_track_dropped_graph_by_path_not_id(self) -> None:
         memory = MemoryService()
@@ -1087,6 +1086,33 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("event_ordering_dual_shadow", result.coverage)
         self.assertNotEqual(result.coverage["event_ordering_dual_shadow"].get("selected_driver"), "production")
         self.assertTrue(result.candidates)
+
+    def test_event_ordering_default_search_does_not_select_graph_candidates(self) -> None:
+        service = MemoryService()
+        scope = Scope(workspace_id="ws-legacy-default", user_id="u", agent_id="a")
+        graph_candidate = Candidate(
+            id="graph-default-candidate",
+            type="event",
+            text="Graph candidate should stay out of production selection.",
+            source="event_ordering_graph_selector",
+            scores={"score": 10.0, "utility_score": 10.0},
+            source_span_ids=["span-graph"],
+            metadata={},
+        )
+        try:
+            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
+            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [graph_candidate]
+
+            result = service.search(
+                "What order did I describe the work?",
+                scope,
+                {"query_type_hint": "event_ordering", "limit": 5},
+            )
+        finally:
+            service.close()
+
+        self.assertTrue(result.candidates)
+        self.assertFalse(any("event_ordering_graph" in candidate.source for candidate in result.candidates))
 
     def test_event_ordering_dual_shadow_reports_fallback_graph_candidates(self) -> None:
         class Flags:
@@ -1207,13 +1233,10 @@ class FusionMemoryTests(unittest.TestCase):
                 budget={"limit": 8, "mode": "benchmark"},
             )
 
-            graph_coverage = pack.coverage.get("event_ordering_graph")
             shadow_coverage = pack.coverage.get("event_ordering_shadow")
-            self.assertIsInstance(graph_coverage, dict)
             self.assertIsInstance(shadow_coverage, dict)
-            self.assertGreater(graph_coverage.get("graph_candidate_count", 0), 0)
-            self.assertGreater(graph_coverage.get("legacy_candidate_count", 0), 0)
-            self.assertIn(graph_coverage.get("selected_span_source"), {"graph", "legacy"})
+            self.assertNotIn("event_ordering_graph", pack.coverage)
+            self.assertEqual(shadow_coverage.get("selected_span_source"), "legacy")
             evidence = "\n".join(
                 [event.get("description", "") for event in pack.events]
                 + [span.get("content", "") for span in pack.source_spans]
