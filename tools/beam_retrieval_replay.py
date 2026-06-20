@@ -130,7 +130,7 @@ def run_replay(
             "beam_category": query.category,
             "source_span_count": len(getattr(pack, "source_spans", []) or []),
             "coverage_insufficient": bool(coverage.get("coverage_insufficient", False)),
-            "pipeline_trace": _sanitize_pipeline_trace(getattr(pack, "debug_trace", []) or []),
+            "pipeline_trace": _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or []),
         }
         if "rule_hits" in coverage:
             record["rule_hits"] = _sanitize_rule_hits(coverage["rule_hits"])
@@ -253,6 +253,42 @@ def _sanitize_pipeline_trace(value: Any) -> list[dict[str, Any]]:
     return sanitized_trace
 
 
+def _pipeline_trace_from_pack(coverage: dict[str, Any], debug_trace: Any) -> list[dict[str, Any]]:
+    coverage_trace = _sanitize_pipeline_record(coverage.get("pipeline_trace"))
+    if coverage_trace:
+        return [coverage_trace]
+    return _sanitize_pipeline_trace(debug_trace)
+
+
+def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
+    record = _object_dict(value)
+    if not record:
+        return {}
+    layers = _object_dict(record.get("pipeline_layers"))
+    recall = _object_dict(layers.get("CandidateRecall"))
+    fusion = _object_dict(layers.get("CandidateFusion"))
+    evidence = _object_dict(layers.get("EvidencePackBuilder"))
+    entry: dict[str, Any] = {"layer": "retrieval"}
+    for key in ("query_type", "mode"):
+        if key in record:
+            sanitized = _sanitize_identifier_string(record[key])
+            if sanitized is not None:
+                entry[key] = sanitized
+    source_counts = _sanitize_count_mapping(recall.get("source_counts"))
+    if source_counts:
+        entry["source_counts"] = source_counts
+    selected_sources = _sanitize_selected_source_names(fusion.get("selected_sources"))
+    if selected_sources:
+        entry["selected_sources"] = selected_sources
+    if "source_span_count" in evidence:
+        value = _sanitize_count_value(evidence["source_span_count"])
+        if value is not None:
+            entry["source_span_count"] = value
+    if "coverage_insufficient" in evidence:
+        entry["coverage_insufficient"] = bool(evidence["coverage_insufficient"])
+    return entry if len(entry) > 1 else {}
+
+
 def _sanitize_pipeline_trace_entry(entry: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {}
     for key in ("layer", "query_type", "mode", "id", "type", "source"):
@@ -324,6 +360,17 @@ def _sanitize_selected_sources(value: Any) -> list[dict[str, Any]]:
                 sanitized[key_text] = sanitized_value
         if sanitized:
             sanitized_sources.append(sanitized)
+    return sanitized_sources
+
+
+def _sanitize_selected_source_names(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized_sources: list[dict[str, Any]] = []
+    for source in value:
+        sanitized = _sanitize_identifier_string(source)
+        if sanitized is not None:
+            sanitized_sources.append({"source": sanitized})
     return sanitized_sources
 
 

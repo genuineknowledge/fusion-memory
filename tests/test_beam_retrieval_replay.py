@@ -55,6 +55,53 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertEqual(report["summary"]["categories"]["current_value"]["query_count"], 1)
         self.assertIn("pipeline_trace", payload["records"][0])
 
+    def test_run_replay_prefers_coverage_pipeline_trace_from_answer_context(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "pipeline_trace": {
+                    "query_type": "current_value",
+                    "mode": "benchmark",
+                    "pipeline_layers": {
+                        "CandidateRecall": {"source_counts": {"l0_raw": 2}},
+                        "CandidateFusion": {"selected_sources": ["l0_raw"], "dropped_count": 0},
+                        "EvidencePackBuilder": {"source_span_count": 1, "coverage_insufficient": False},
+                    },
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            payload["records"][0]["pipeline_trace"],
+            [
+                {
+                    "layer": "retrieval",
+                    "query_type": "current_value",
+                    "mode": "benchmark",
+                    "source_counts": {"l0_raw": 2},
+                    "selected_sources": [{"source": "l0_raw"}],
+                    "source_span_count": 1,
+                    "coverage_insufficient": False,
+                }
+            ],
+        )
+
     def test_run_replay_sanitizes_pipeline_trace_before_writing(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         fake_pack = SimpleNamespace(
