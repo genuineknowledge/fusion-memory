@@ -726,6 +726,9 @@ class FusionMemoryTests(unittest.TestCase):
             self.assertIn("candidate_recall", retrieval_trace)
             self.assertIn("candidate_fusion", retrieval_trace)
             self.assertIn("evidence_output", retrieval_trace)
+            self.assertIn("pipeline_layers", retrieval_trace)
+            self.assertIn("QueryUnderstanding", retrieval_trace["pipeline_layers"])
+            self.assertIn("CandidateRecall", retrieval_trace["pipeline_layers"])
         finally:
             memory.close()
 

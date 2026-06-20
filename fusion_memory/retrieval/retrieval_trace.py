@@ -4,6 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+PIPELINE_LAYER_ORDER = (
+    ("QueryUnderstanding", "query_understanding"),
+    ("CandidateRecall", "candidate_recall"),
+    ("CandidateFusion", "candidate_fusion"),
+    ("EvidencePackBuilder", "evidence_output"),
+)
+
+
 @dataclass
 class RetrievalTraceBuilder:
     query_type: str
@@ -34,9 +42,16 @@ class RetrievalTraceBuilder:
             "coverage_insufficient": bool(coverage_insufficient),
         }
 
+    def pipeline_layers(self) -> dict[str, object]:
+        return {
+            layer_name: self._sections.get(section_name, {})
+            for layer_name, section_name in PIPELINE_LAYER_ORDER
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "query_type": self.query_type,
             "mode": self.mode,
+            "pipeline_layers": self.pipeline_layers(),
             **self._sections,
         }

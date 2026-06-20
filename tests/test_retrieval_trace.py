@@ -20,3 +20,16 @@ class RetrievalTraceBuilderTests(unittest.TestCase):
         self.assertEqual(trace["candidate_fusion"]["dropped_count"], 1)
         self.assertFalse(trace["evidence_output"]["coverage_insufficient"])
         self.assertNotIn("query", trace)
+
+    def test_pipeline_layers_expose_stable_boundaries(self) -> None:
+        builder = RetrievalTraceBuilder(query_type="event_ordering", mode="benchmark")
+        builder.query_understanding(language="zh", intent="event_ordering", features=["temporal"])
+        builder.candidate_recall(source_counts={"graph": 2})
+        builder.candidate_fusion(selected_sources=["graph"], dropped_count=0)
+        builder.evidence_output(source_span_count=2, coverage_insufficient=False)
+
+        layers = builder.pipeline_layers()
+
+        self.assertEqual(list(layers), ["QueryUnderstanding", "CandidateRecall", "CandidateFusion", "EvidencePackBuilder"])
+        self.assertEqual(layers["QueryUnderstanding"]["language"], "zh")
+        self.assertEqual(layers["CandidateRecall"]["source_counts"], {"graph": 2})
