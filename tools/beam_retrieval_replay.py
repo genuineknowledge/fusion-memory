@@ -405,9 +405,11 @@ def _sanitize_metadata_value(value: Any) -> Any:
     if isinstance(value, dict):
         return _sanitize_metadata(value)
     if isinstance(value, list):
-        return [_sanitize_metadata_value(item) for item in value if _sanitize_metadata_value(item) is not None]
+        sanitized_items = [_sanitize_metadata_value(item) for item in value]
+        return [item for item in sanitized_items if item is not None]
     if isinstance(value, tuple):
-        return [_sanitize_metadata_value(item) for item in value if _sanitize_metadata_value(item) is not None]
+        sanitized_items = [_sanitize_metadata_value(item) for item in value]
+        return [item for item in sanitized_items if item is not None]
     if isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):

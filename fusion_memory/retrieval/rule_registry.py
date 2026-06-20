@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from hashlib import sha1
+import re
 from typing import Iterator
 
 
@@ -125,7 +126,7 @@ def _sanitize_metadata(metadata: dict[str, object] | None) -> dict[str, object]:
         if _metadata_key_contains_raw_text(key):
             sanitized[key] = _hash_metadata_value(value)
             continue
-        sanitized[key] = value
+        sanitized[key] = _sanitize_metadata_value(value)
     return sanitized
 
 
@@ -138,3 +139,26 @@ def _metadata_key_contains_raw_text(key: str) -> bool:
 
 def _hash_metadata_value(value: object) -> str:
     return sha1(repr(value).encode("utf-8")).hexdigest()[:12]
+
+
+def _sanitize_metadata_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): (_hash_metadata_value(item) if _metadata_key_contains_raw_text(str(key)) else _sanitize_metadata_value(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_metadata_value(item) for item in value]
+    if isinstance(value, str):
+        return value if _is_safe_metadata_string(value) else _hash_metadata_value(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _hash_metadata_value(value)
+
+
+def _is_safe_metadata_string(value: str) -> bool:
+    if len(value) > 128:
+        return False
+    if re.search(r"\s|[\u4e00-\u9fff]", value):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/@+\-]*", value))

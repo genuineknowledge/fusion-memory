@@ -118,6 +118,25 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertRegex(str(hit.metadata["span_message"]), r"^[0-9a-f]{12}$")
         self.assertNotIn("I initially used SQLite.", hit.text_hash)
 
+    def test_record_rule_hit_hashes_raw_text_in_neutral_metadata_keys(self) -> None:
+        hit = record_rule_hit(
+            rule_id="current_value.neutral_metadata",
+            query="What is my preference?",
+            text="I prefer PostgreSQL for memory.",
+            stage="test",
+            metadata={
+                "note": "I prefer PostgreSQL for memory.",
+                "nested": {"note": "我的默认数据库是 PostgreSQL"},
+                "safe": {"decision": "selected", "candidate": "candidate_1"},
+            },
+        )
+
+        self.assertRegex(str(hit.metadata["note"]), r"^[0-9a-f]{12}$")
+        self.assertRegex(str(hit.metadata["nested"]["note"]), r"^[0-9a-f]{12}$")
+        self.assertEqual(hit.metadata["safe"], {"decision": "selected", "candidate": "candidate_1"})
+        self.assertNotIn("PostgreSQL for memory", str(hit.metadata))
+        self.assertNotIn("默认数据库", str(hit.metadata))
+
     def test_record_rule_hit_preserves_positional_metadata(self) -> None:
         metadata = {"decision": "drop_stale_history", "source": "candidate_1"}
 
