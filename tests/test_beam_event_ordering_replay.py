@@ -10,6 +10,7 @@ from tools.beam_event_ordering_replay import (
     _compact_coverage,
     _dual_graph_legacy_items,
     _hybrid_items,
+    _summary_for_stdout,
     _graph_items,
     _record_diagnostics,
     evaluate_gate,
@@ -19,6 +20,26 @@ from tools.beam_event_ordering_replay import (
     run_replay,
     score_ordering_candidates,
 )
+
+
+class BeamReplaySummaryTests(unittest.TestCase):
+    def test_summary_for_stdout_includes_dual_and_cluster_fields(self) -> None:
+        report = {
+            "workspace": "w",
+            "split": "100k",
+            "query_count": 2,
+            "summary": {
+                "dual_vs_legacy_passed": True,
+                "dual_lift_over_legacy_f1": 0.03,
+                "cluster_diagnostics": {"expanded_query_count": 1},
+            },
+        }
+
+        summary = _summary_for_stdout(report)
+
+        self.assertTrue(summary["dual_vs_legacy_passed"])
+        self.assertEqual(summary["dual_lift_over_legacy_f1"], 0.03)
+        self.assertEqual(summary["cluster_expanded_query_count"], 1)
 
 
 class BeamEventOrderingReplayTests(unittest.TestCase):
@@ -660,6 +681,13 @@ class BeamReplayModeTests(unittest.TestCase):
         self.assertEqual(report["summary"]["path_wins"]["f1"], {"graph": 1})
         self.assertEqual(report["summary"]["path_wins"]["kendall_tau_norm"], {"graph": 1})
         self.assertEqual(report["route_summary"], {})
+        self.assertEqual(
+            report["replay_config"]["artifact_commands"],
+            {
+                "rule_audit_json": "python3 tools/rule_audit.py --input replay.json --output artifacts/rule-audit.json",
+                "rule_audit_csv": "python3 tools/rule_audit.py --input replay.json --output artifacts/rule-audit.json --csv artifacts/rule-audit.csv",
+            },
+        )
         self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
         self.assertFalse(report["records"][0]["paths"]["legacy"]["active"])
         self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])

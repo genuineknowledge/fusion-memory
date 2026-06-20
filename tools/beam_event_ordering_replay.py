@@ -319,6 +319,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
+        output_path = getattr(args, "output", "replay.json")
         report = {
             "workspace": args.workspace,
             "split": args.split,
@@ -337,6 +338,16 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                 "mode": args.mode,
                 "hybrid_source": args.hybrid_source,
                 "limit": args.limit,
+                "artifact_commands": {
+                    "rule_audit_json": (
+                        f"python3 tools/rule_audit.py --input {output_path} "
+                        "--output artifacts/rule-audit.json"
+                    ),
+                    "rule_audit_csv": (
+                        f"python3 tools/rule_audit.py --input {output_path} "
+                        "--output artifacts/rule-audit.json --csv artifacts/rule-audit.csv"
+                    ),
+                },
             },
             "records": records,
         }
@@ -993,11 +1004,18 @@ def _summary_for_stdout(report: dict[str, Any]) -> dict[str, Any]:
             "preflight": report.get("preflight"),
             "output": "written",
         }
+    summary = report.get("summary", {})
+    cluster_diagnostics = summary.get("cluster_diagnostics", {}) if isinstance(summary, dict) else {}
     return {
         "workspace": report.get("workspace"),
         "split": report.get("split"),
         "query_count": report.get("query_count"),
-        "summary": report.get("summary"),
+        "summary": summary,
+        "dual_vs_legacy_passed": summary.get("dual_vs_legacy_passed") if isinstance(summary, dict) else None,
+        "dual_lift_over_legacy_f1": summary.get("dual_lift_over_legacy_f1") if isinstance(summary, dict) else None,
+        "cluster_expanded_query_count": (
+            cluster_diagnostics.get("expanded_query_count") if isinstance(cluster_diagnostics, dict) else None
+        ),
         "output": "written",
     }
 
