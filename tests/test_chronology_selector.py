@@ -349,6 +349,40 @@ class ChronologySelectorTests(unittest.TestCase):
         self.assertEqual(telemetry["selected_driver"], "persisted_graph")
         self.assertEqual([candidate.id for candidate in candidates], ["node-budget-1", "node-budget-2", "node-budget-3"])
 
+    def test_selector_expands_cluster_related_topics_by_alias(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="graph-select-cluster", user_id="u", agent_id="a", session_id="s")
+        created_at = ts("2026-06-18T10:00:00+00:00")
+        topic_a = ChronologyTopic("topic-tri-a", scope, "triangle classification", ["triangle geometry"], "en", [], [], 0.9, created_at)
+        topic_b = ChronologyTopic("topic-tri-b", scope, "triangle area methods", ["triangle geometry"], "en", [], [], 0.9, created_at)
+        for topic in (topic_a, topic_b):
+            memory.store.upsert_chronology_topic(topic)
+            memory.store.upsert_chronology_phase(ChronologyPhase(f"phase-{topic.topic_id}", topic.topic_id, "implementation", 20, [], 0.9, created_at))
+        for node_id, topic_id, text, minute, marker in (
+            ("node-a", "topic-tri-a", "First I studied triangle classification.", 0, "first"),
+            ("node-b", "topic-tri-b", "Then I compared triangle area methods.", 5, "then"),
+        ):
+            memory.store.upsert_chronology_event_node(
+                ChronologyEventNode(
+                    node_id, scope, "user", "studied", text, topic_id, f"phase-{topic_id}",
+                    ts(f"2026-06-18T10:0{minute}:00+00:00"), f"span-{node_id}", f"turn-{node_id}",
+                    text, "en", 0.9, marker, created_at
+                )
+            )
+        memory.store.insert_chronology_event_edge(ChronologyEventEdge("edge-tri", "node-a", "node-b", "before", "explicit_marker", ["span-node-a", "span-node-b"], 0.9, created_at))
+
+        candidates, telemetry = select_persisted_graph_event_ordering_candidates(
+            "What order did I study triangle geometry?",
+            scope,
+            memory.store,
+            limit=5,
+            include_session=True,
+        )
+
+        self.assertEqual(telemetry["selected_driver"], "persisted_graph")
+        self.assertEqual(telemetry["selected_topic_count"], 2)
+        self.assertEqual({candidate.metadata["graph_topic_id"] for candidate in candidates}, {"topic-tri-a", "topic-tri-b"})
+
     def test_persisted_graph_candidate_text_uses_short_object_label(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="graph-select-short-label", user_id="u", agent_id="a", session_id="s")

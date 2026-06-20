@@ -31,13 +31,27 @@ def select_persisted_graph_event_ordering_candidates(
                 [topic.topic_id for topic in topics],
                 include_session=include_session,
             )
+        topic_ids, cluster_expanded_topic_ids = _expand_topic_ids_by_cluster_alias(topics, topic_ids)
         if not topic_ids:
-            return [], {"selected_driver": "none", "fallback_reason": "no_topic"}
+            return [], {
+                "selected_driver": "none",
+                "fallback_reason": "no_topic",
+                "cluster_expanded_topic_ids": [],
+                "selected_topic_count": 0,
+                "graph_ordered_legacy_recall_count": 0,
+            }
         phases = {phase.phase_id: phase for phase in store.list_chronology_phases(topic_ids)}
         nodes = store.list_chronology_event_nodes(scope, include_session=include_session, topic_ids=topic_ids)
         nodes = _expand_relevant_nodes(query, scope, store, nodes, topic_ids=topic_ids, include_session=include_session)
         if not nodes:
-            return [], {"selected_driver": "none", "fallback_reason": "no_nodes", "topic_ids": topic_ids}
+            return [], {
+                "selected_driver": "none",
+                "fallback_reason": "no_nodes",
+                "topic_ids": topic_ids,
+                "cluster_expanded_topic_ids": cluster_expanded_topic_ids,
+                "selected_topic_count": len(topic_ids),
+                "graph_ordered_legacy_recall_count": 0,
+            }
         node_ids = [node.node_id for node in nodes]
         if any(node.phase_id and node.phase_id not in phases for node in nodes):
             phases.update(
@@ -54,6 +68,9 @@ def select_persisted_graph_event_ordering_candidates(
                 "selected_driver": "none",
                 "fallback_reason": "graph_unavailable",
                 "error": type(exc).__name__,
+                "cluster_expanded_topic_ids": [],
+                "selected_topic_count": 0,
+                "graph_ordered_legacy_recall_count": 0,
             }
         raise
 
@@ -63,6 +80,9 @@ def select_persisted_graph_event_ordering_candidates(
             "selected_driver": "none",
             "fallback_reason": "too_few_nodes",
             "topic_ids": topic_ids,
+            "cluster_expanded_topic_ids": cluster_expanded_topic_ids,
+            "selected_topic_count": len(topic_ids),
+            "graph_ordered_legacy_recall_count": 0,
             "node_count": len(deduped_nodes),
         }
 
@@ -79,6 +99,9 @@ def select_persisted_graph_event_ordering_candidates(
             "selected_driver": "none",
             "fallback_reason": "no_edges",
             "topic_ids": topic_ids,
+            "cluster_expanded_topic_ids": cluster_expanded_topic_ids,
+            "selected_topic_count": len(topic_ids),
+            "graph_ordered_legacy_recall_count": 0,
             "node_count": len(deduped_nodes),
         }
     edge_connected_ids = {node_id for node_id, count in edge_count_by_node.items() if count > 0}
@@ -94,6 +117,9 @@ def select_persisted_graph_event_ordering_candidates(
             "selected_driver": "none",
             "fallback_reason": "weak_coverage",
             "topic_ids": topic_ids,
+            "cluster_expanded_topic_ids": cluster_expanded_topic_ids,
+            "selected_topic_count": len(topic_ids),
+            "graph_ordered_legacy_recall_count": 0,
             "node_count": len(deduped_nodes),
             "edge_count": len(usable_edges),
             "source_span_count": len(source_span_ids),
@@ -136,11 +162,35 @@ def select_persisted_graph_event_ordering_candidates(
     return candidates[:limit], {
         "selected_driver": "persisted_graph",
         "topic_ids": topic_ids,
+        "cluster_expanded_topic_ids": cluster_expanded_topic_ids,
+        "selected_topic_count": len(topic_ids),
+        "graph_ordered_legacy_recall_count": 0,
         "node_count": len(deduped_nodes),
         "edge_count": len(usable_edges),
         "source_span_count": len(source_span_ids),
         "candidate_count": min(len(candidates), limit),
     }
+
+
+def _expand_topic_ids_by_cluster_alias(topics: list[Any], topic_ids: list[str]) -> tuple[list[str], list[str]]:
+    selected_topic_ids = set(topic_ids)
+    selected = {topic.topic_id for topic in topics if topic.topic_id in selected_topic_ids}
+    selected_aliases = {
+        str(alias).lower()
+        for topic in topics
+        if topic.topic_id in selected
+        for alias in getattr(topic, "aliases", []) or []
+    }
+    expanded: list[str] = list(topic_ids)
+    added: list[str] = []
+    for topic in topics:
+        if topic.topic_id in selected:
+            continue
+        aliases = {str(alias).lower() for alias in getattr(topic, "aliases", []) or []}
+        if selected_aliases and selected_aliases & aliases:
+            expanded.append(topic.topic_id)
+            added.append(topic.topic_id)
+    return list(dict.fromkeys(expanded)), added
 
 
 def _topic_ids_from_node_relevance(

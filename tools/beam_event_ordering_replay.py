@@ -648,6 +648,9 @@ def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             "mean_system_count": _mean(metrics, "system_count"),
             "mean_matched": _mean(metrics, "matched"),
         }
+    out["dual_lift_over_legacy_f1"] = float(out.get("dual", {}).get("f1") or 0.0) - float(out.get("legacy", {}).get("f1") or 0.0)
+    out["dual_lift_over_legacy_tau"] = float(out.get("dual", {}).get("kendall_tau_norm") or 0.0) - float(out.get("legacy", {}).get("kendall_tau_norm") or 0.0)
+    out["cluster_diagnostics"] = _cluster_diagnostics(records)
     gate = evaluate_gate(out)
     out["graph_vs_legacy_passed"] = _graph_vs_legacy_passed(out)
     out["dual_vs_legacy_passed"] = _dual_vs_legacy_passed(out)
@@ -665,6 +668,24 @@ def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         int(record.get("over_abstract_label_count") or 0) for record in diagnostics_records
     )
     return out
+
+
+def _cluster_diagnostics(records: list[dict[str, Any]]) -> dict[str, float | int]:
+    expanded_query_count = 0
+    selected_topic_counts: list[float] = []
+    for record in records:
+        coverage = record.get("coverage", {}) if isinstance(record.get("coverage"), dict) else {}
+        graph_coverage = coverage.get("event_ordering_graph", {}) if isinstance(coverage.get("event_ordering_graph"), dict) else {}
+        expanded_topic_ids = graph_coverage.get("cluster_expanded_topic_ids") or []
+        if expanded_topic_ids:
+            expanded_query_count += 1
+        selected_topic_count = graph_coverage.get("selected_topic_count")
+        if isinstance(selected_topic_count, (int, float)):
+            selected_topic_counts.append(float(selected_topic_count))
+    return {
+        "expanded_query_count": expanded_query_count,
+        "mean_selected_topic_count": sum(selected_topic_counts) / len(selected_topic_counts) if selected_topic_counts else 0.0,
+    }
 
 
 def _event_ordering_bucket(query: str, reference: list[str]) -> str:

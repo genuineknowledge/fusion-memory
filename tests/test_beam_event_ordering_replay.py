@@ -46,6 +46,25 @@ class BeamEventOrderingReplayTests(unittest.TestCase):
         self.assertAlmostEqual(score["recall"], 1 / 3)
         self.assertAlmostEqual(score["f1"], 0.4)
 
+    def test_aggregate_reports_dual_lift_and_cluster_diagnostics(self) -> None:
+        records = [
+            {
+                "paths": {
+                    "legacy": {"active": True, "metrics": {"f1": 0.25, "kendall_tau_norm": 0.40, "system_count": 2, "matched": 1}},
+                    "dual": {"active": True, "metrics": {"f1": 0.50, "kendall_tau_norm": 0.60, "system_count": 2, "matched": 2}},
+                    "graph": {"active": True, "metrics": {"f1": 0.10, "kendall_tau_norm": 0.30, "system_count": 1, "matched": 0}},
+                    "hybrid": {"active": False},
+                },
+                "coverage": {"event_ordering_graph": {"selected_topic_count": 2, "cluster_expanded_topic_ids": ["topic-b"]}},
+            }
+        ]
+
+        summary = _aggregate(records)
+
+        self.assertAlmostEqual(summary["dual_lift_over_legacy_f1"], 0.25)
+        self.assertAlmostEqual(summary["dual_lift_over_legacy_tau"], 0.20)
+        self.assertEqual(summary["cluster_diagnostics"]["expanded_query_count"], 1)
+
 
 class BeamReplayPreflightTests(unittest.TestCase):
     def test_preflight_reports_postgres_chronology_migration_status(self) -> None:
