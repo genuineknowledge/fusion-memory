@@ -722,31 +722,56 @@ def _model_checks(config: dict[str, Any]) -> list[dict[str, Any]]:
     for label in ("embedding", "reranker", "extractor", "query_intent"):
         raw = config.get(label) if isinstance(config.get(label), dict) else {}
         provider = str(raw.get("provider") or "")
-        if provider in {"", "deterministic", "lexical", "rule", "off"}:
+        if label in {"embedding", "reranker"}:
+            checks.extend(_retrieval_model_checks(label, provider, raw))
+            continue
+        if provider in {"", "rule", "off"}:
             checks.append(_check(label, True, provider or "default"))
             continue
-        if provider == "qwen":
-            model = str(raw.get("model") or "")
-            dependency = _qwen_dependency_check(label)
-            readiness = _qwen_model_readiness_check(label, model, dependency["ok"])
-            checks.append(dependency)
-            checks.append({**readiness, "name": f"{label}_readiness"})
-            checks.append(readiness)
+        if provider in {"deterministic", "lexical"}:
+            checks.append(_check(label, True, f"{provider} fallback is built in."))
             continue
         if provider in {"http", "api"}:
-            endpoint = str(raw.get("endpoint") or raw.get("base_url") or "")
-            env_name = str(raw.get("api_key_env") or "")
-            secret_ok = not env_name or bool(os.getenv(env_name))
-            checks.append(
-                _check(
-                    label,
-                    bool(endpoint) and secret_ok,
-                    f"{provider} endpoint={'set' if endpoint else 'missing'}, key_env={env_name or 'none'}{' set' if secret_ok else ' missing'}",
-                )
-            )
+            checks.append(_http_model_check(label, provider, raw))
             continue
         checks.append(_check(label, False, f"unsupported provider: {provider}"))
     return checks
+
+
+def _retrieval_model_checks(label: str, provider: str, raw: dict[str, Any]) -> list[dict[str, Any]]:
+    if provider in {"", "deterministic", "lexical"}:
+        detail = f"{provider or 'default'} fallback is built in and requires no external dependency."
+        return [
+            _check(f"{label}_dependency", True, detail),
+            _check(f"{label}_readiness", True, detail),
+        ]
+    if provider == "qwen":
+        model = str(raw.get("model") or "")
+        dependency = _qwen_dependency_check(label)
+        readiness = _qwen_model_readiness_check(label, model, dependency["ok"])
+        return [dependency, {**readiness, "name": f"{label}_readiness"}, readiness]
+    if provider in {"http", "api"}:
+        check = _http_model_check(label, provider, raw)
+        return [
+            {**check, "name": f"{label}_dependency"},
+            {**check, "name": f"{label}_readiness"},
+        ]
+    detail = f"unsupported provider: {provider}"
+    return [
+        _check(f"{label}_dependency", False, detail),
+        _check(f"{label}_readiness", False, detail),
+    ]
+
+
+def _http_model_check(label: str, provider: str, raw: dict[str, Any]) -> dict[str, Any]:
+    endpoint = str(raw.get("endpoint") or raw.get("base_url") or "")
+    env_name = str(raw.get("api_key_env") or "")
+    secret_ok = not env_name or bool(os.getenv(env_name))
+    return _check(
+        label,
+        bool(endpoint) and secret_ok,
+        f"{provider} endpoint={'set' if endpoint else 'missing'}, key_env={env_name or 'none'}{' set' if secret_ok else ' missing'}",
+    )
 
 
 def _postgres_readiness(dsn: str) -> dict[str, dict[str, Any]]:

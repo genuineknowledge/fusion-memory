@@ -199,6 +199,26 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(config["embedding"]["provider"], "deterministic")
         self.assertEqual(config["reranker"]["provider"], "lexical")
 
+    def test_doctor_local_test_reports_model_dependency_and_readiness_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            init_home(home, local_test=True)
+
+            report = doctor(home)
+
+        names = {item["name"]: item for item in report["checks"]}
+        self.assertIn("embedding_dependency", names)
+        self.assertIn("embedding_readiness", names)
+        self.assertIn("reranker_dependency", names)
+        self.assertIn("reranker_readiness", names)
+        self.assertTrue(names["embedding_dependency"]["ok"])
+        self.assertTrue(names["embedding_readiness"]["ok"])
+        self.assertTrue(names["reranker_dependency"]["ok"])
+        self.assertTrue(names["reranker_readiness"]["ok"])
+        self.assertNotIn("embedding", names)
+        self.assertNotIn("reranker", names)
+        self.assertNotIn("Traceback", json.dumps(report))
+
     def test_local_test_init_is_explicit_fallback_not_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
