@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 .runtime/
+.worktrees/
 
 .env
 *.env
