@@ -112,6 +112,45 @@ class RetrievalPipelineTests(unittest.TestCase):
         self.assertEqual(summary["source_span_count"], 2)
         self.assertEqual(summary["source_span_ids"], ["span_1", "span_2"])
 
+    def test_selected_temporal_relation_summary_prefers_relation_records_over_summary_for_same_candidate(self) -> None:
+        candidates = [
+            Candidate(
+                "c1",
+                "event",
+                "before the deadline",
+                "source_a",
+                {"utility_score": 0.6},
+                ["span_1"],
+                {
+                    "temporal_relations": [
+                        {
+                            "relation_type": "before",
+                            "reason_code": "explicit_order_marker",
+                            "role_labels": ["earlier_event"],
+                            "source_span_ids": ["span_1"],
+                        }
+                    ],
+                    "temporal_relation_summary": {
+                        "relation_count": 2,
+                        "relation_types": ["before"],
+                        "role_labels": ["earlier_event"],
+                        "reason_codes": ["explicit_order_marker"],
+                        "source_span_count": 1,
+                        "source_span_ids": ["span_1"],
+                    },
+                },
+            ),
+        ]
+
+        summary = selected_temporal_relation_summary(candidates)
+
+        self.assertEqual(summary["relation_count"], 1)
+        self.assertEqual(summary["relation_types"], ["before"])
+        self.assertEqual(summary["role_labels"], ["earlier_event"])
+        self.assertEqual(summary["reason_codes"], ["explicit_order_marker"])
+        self.assertEqual(summary["source_span_count"], 1)
+        self.assertEqual(summary["source_span_ids"], ["span_1"])
+
     def test_search_attaches_pipeline_trace_without_raw_text(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="ws-pipeline", user_id="u", agent_id="a")

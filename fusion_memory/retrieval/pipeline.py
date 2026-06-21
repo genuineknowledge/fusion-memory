@@ -191,6 +191,12 @@ def selected_temporal_relation_summary(candidates: list[Candidate]) -> dict[str,
 
     for candidate in candidates:
         metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        relations = metadata.get("temporal_relations")
+        candidate_safe_records = [item for item in relations if isinstance(item, dict)] if isinstance(relations, list) else []
+        if candidate_safe_records:
+            safe_records.extend(candidate_safe_records)
+            continue
+
         summary = metadata.get("temporal_relation_summary")
         if isinstance(summary, dict):
             summary_relation_count += int(summary.get("relation_count") or 0)
@@ -198,10 +204,6 @@ def selected_temporal_relation_summary(candidates: list[Candidate]) -> dict[str,
             summary_role_labels.update(str(item) for item in (summary.get("role_labels") or []) if item)
             summary_reason_codes.update(str(item) for item in (summary.get("reason_codes") or []) if item)
             summary_source_span_ids.update(str(item) for item in (summary.get("source_span_ids") or []) if item)
-
-        relations = metadata.get("temporal_relations")
-        if isinstance(relations, list):
-            safe_records.extend(item for item in relations if isinstance(item, dict))
 
     if summary_relation_count == 0 and not safe_records:
         return None
