@@ -34,6 +34,70 @@ _RULE_HIT_SAFE_KEYS = {
     "impact",
 }
 
+_RULE_HIT_DIMENSION_KEYS = {
+    "provider_id",
+    "lifecycle_stage",
+    "lifecycle_reason",
+    "protected_reason",
+}
+
+_SAFE_DIMENSION_IDENTIFIERS = {
+    "aggregation_context_support",
+    "aggregation_coverage",
+    "aggregation_coverage_raw",
+    "broad_raw",
+    "broad_raw_recall",
+    "chinese_recall_precision",
+    "contradiction_claim",
+    "contradiction_claim_negative",
+    "contradiction_claim_positive",
+    "contradiction_claim_uncertain",
+    "dropped",
+    "entities",
+    "entity_graph",
+    "event_ordering_coverage",
+    "event_ordering_coverage_support",
+    "event_ordering_episode",
+    "event_ordering_episode_recall",
+    "event_ordering_timeline",
+    "event_timeline_graph",
+    "events",
+    "exact",
+    "exact_answer",
+    "facts",
+    "filtered",
+    "final_selection",
+    "high_precision_current_value",
+    "hybrid",
+    "l0_raw_hybrid",
+    "l1_fact_hybrid",
+    "l2_event_graph",
+    "l3_current_view",
+    "l3_entity_profile",
+    "legacy_event_ordering_fallback",
+    "legacy_fallback",
+    "misranked",
+    "packed",
+    "profiles",
+    "quality_fallback",
+    "raw_provider",
+    "raw_scent_trail",
+    "raw_span",
+    "recalled",
+    "rescued",
+    "scent_trail",
+    "scored",
+    "selected",
+    "taxonomy",
+    "temporal_coverage",
+    "temporal_coverage_raw",
+    "timeline",
+    "topic_scope",
+    "topic_scoped_raw",
+    "unspecified",
+    "views",
+}
+
 _SENSITIVE_METADATA_KEY_PARTS = (
     "raw_text",
     "text",
@@ -277,6 +341,12 @@ def _sanitize_rule_hits(value: Any) -> list[dict[str, Any]]:
         if not hit_dict:
             continue
         sanitized = {key: hit_dict[key] for key in _RULE_HIT_SAFE_KEYS if key in hit_dict}
+        for key in _RULE_HIT_DIMENSION_KEYS:
+            safe_value = _sanitize_dimension_string(hit_dict.get(key))
+            if safe_value is not None:
+                sanitized[key] = safe_value
+        if isinstance(hit_dict.get("protected"), bool):
+            sanitized["protected"] = hit_dict["protected"]
         metadata = _sanitize_metadata(hit_dict.get("metadata"))
         if metadata:
             sanitized["metadata"] = metadata
@@ -318,7 +388,40 @@ def _sanitize_candidate_lifecycle(value: Any) -> dict[str, Any]:
         mapping = _sanitize_count_mapping(data.get(key))
         if mapping:
             out[key] = mapping
+    records = _sanitize_candidate_lifecycle_records(data.get("records"))
+    if records:
+        out["records"] = records
     return out
+
+
+def _sanitize_candidate_lifecycle_records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized_records: list[dict[str, Any]] = []
+    for record in value:
+        record_dict = _object_dict(record)
+        if not record_dict:
+            continue
+        sanitized: dict[str, Any] = {}
+        for key in ("candidate_id", "candidate_source", "candidate_type"):
+            identifier = _sanitize_identifier_string(record_dict.get(key))
+            if identifier is not None:
+                sanitized[key] = identifier
+        for source_key, target_key in (("stage", "stage"), ("reason_code", "reason_code")):
+            dimension = _sanitize_dimension_string(record_dict.get(source_key))
+            if dimension is not None:
+                sanitized[target_key] = dimension
+        source_span_ids = _sanitize_identifier_list(record_dict.get("source_span_ids"))
+        if source_span_ids:
+            sanitized["source_span_ids"] = source_span_ids
+        scores = _sanitize_count_mapping(record_dict.get("scores"))
+        if scores:
+            sanitized["scores"] = scores
+        if isinstance(record_dict.get("contributed"), bool):
+            sanitized["contributed"] = record_dict["contributed"]
+        if sanitized:
+            sanitized_records.append(sanitized)
+    return sanitized_records
 
 
 def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
@@ -486,6 +589,24 @@ def _sanitize_identifier_list(value: Any) -> list[str]:
         if identifier is not None:
             sanitized.append(identifier)
     return sanitized
+
+
+def _sanitize_dimension_string(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _is_safe_dimension_identifier(value):
+        return value
+    return sha1(repr(value).encode("utf-8")).hexdigest()[:12]
+
+
+def _is_safe_dimension_identifier(value: str) -> bool:
+    if len(value) > 128:
+        return False
+    if value != value.strip():
+        return False
+    if any(character.isspace() or "\u4e00" <= character <= "\u9fff" for character in value):
+        return False
+    return value in _SAFE_DIMENSION_IDENTIFIERS
 
 
 def _object_dict(value: Any) -> dict[str, Any]:

@@ -364,6 +364,31 @@ class RuleAuditTests(unittest.TestCase):
         self.assertEqual(row["cleanup_action"], "keep_protected")
         self.assertEqual(row["cleanup_blockers"], ["protected:high_precision_current_value"])
 
+    def test_explicit_protected_unknown_rule_blocks_safe_delete(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.explicitly_protected",
+                        "contributed_candidate_id": None,
+                        "protected": True,
+                        "protected_reason": "custom private reason",
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.explicitly_protected")
+
+        self.assertTrue(row["protected"])
+        self.assertEqual(len(row["protected_reason"]), 12)
+        self.assertFalse(row["safe_to_delete"])
+        self.assertEqual(row["cleanup_action"], "keep_protected")
+        self.assertEqual(row["cleanup_blockers"], [f"protected:{row['protected_reason']}"])
+        self.assertNotIn("custom private reason", repr(row))
+
     def test_cleanup_gate_marks_exact_duplicate_unprotected_rule_safe_to_delete(self) -> None:
         records = [
             {

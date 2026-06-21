@@ -34,12 +34,14 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "facts",
     "filtered",
     "final_selection",
+    "high_precision_current_value",
     "hybrid",
     "l0_raw_hybrid",
     "l1_fact_hybrid",
     "l2_event_graph",
     "l3_current_view",
     "l3_entity_profile",
+    "legacy_event_ordering_fallback",
     "legacy_fallback",
     "misranked",
     "packed",
@@ -59,6 +61,7 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "timeline",
     "topic_scope",
     "topic_scoped_raw",
+    "unspecified",
     "views",
 }
 
@@ -121,6 +124,15 @@ def _protected_governance_for_rule(rule_id: str) -> tuple[bool, str]:
     if rule_id.startswith("event_ordering.legacy"):
         return True, "legacy_event_ordering_fallback"
     return False, ""
+
+
+def _explicit_protected_governance(row: dict[str, Any]) -> tuple[bool, str | None]:
+    if row.get("explicit_protected") is not True:
+        return False, None
+    explicit_reason = row.get("explicit_protected_reason")
+    if isinstance(explicit_reason, str) and explicit_reason:
+        return True, explicit_reason
+    return True, None
 
 
 def _lifecycle_records_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
@@ -247,6 +259,8 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                     "provider_ids": set(),
                     "lifecycle_stages": set(),
                     "lifecycle_reasons": set(),
+                    "explicit_protected": False,
+                    "explicit_protected_reason": None,
                 },
             )
             row["hit_count"] += 1
@@ -292,6 +306,11 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
             lifecycle_reason = _safe_string(hit.get("lifecycle_reason"))
             if lifecycle_reason is not None:
                 row["lifecycle_reasons"].add(lifecycle_reason)
+            if hit.get("protected") is True:
+                row["explicit_protected"] = True
+                explicit_reason = _safe_string(hit.get("protected_reason"))
+                if explicit_reason is not None and row["explicit_protected_reason"] is None:
+                    row["explicit_protected_reason"] = explicit_reason
 
             metadata = _as_dict(hit.get("metadata"))
             category = metadata.get("category")
@@ -309,7 +328,10 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
         categories = set(row["categories"])
         recommendation = _recommendation_for_rule(rule_id, hit_count, contribution_count, categories)
         duplicate_of = row["duplicate_of"] if isinstance(row["duplicate_of"], str) else None
-        protected, protected_reason = _protected_governance_for_rule(rule_id)
+        explicit_protected, explicit_protected_reason = _explicit_protected_governance(row)
+        fallback_protected, fallback_protected_reason = _protected_governance_for_rule(rule_id)
+        protected = explicit_protected or fallback_protected
+        protected_reason = explicit_protected_reason or fallback_protected_reason or ("unspecified" if protected else "")
         cleanup_phase, cleanup_action, safe_to_delete, cleanup_blockers = _cleanup_classification(
             rule_id,
             hit_count,
