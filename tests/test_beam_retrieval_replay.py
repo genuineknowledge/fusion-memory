@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tools.beam_retrieval_replay as replay
-from tools.rule_audit import build_rule_audit
+from tools.rule_audit import build_provider_audit, build_rule_audit
 
 
 class BeamRetrievalReplayTests(unittest.TestCase):
@@ -102,6 +102,140 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_run_replay_preserves_provider_summary_for_provider_audit(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "pipeline_trace": {
+                    "query_type": "current_value",
+                    "mode": "benchmark",
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "source_counts": {"l0_raw_hybrid": 2},
+                            "provider_summary": [
+                                {
+                                    "provider_id": "raw_provider",
+                                    "source_family": "raw_provider",
+                                    "output_count": 2,
+                                    "output_source_counts": {"l0_raw_hybrid": 2},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                }
+                            ],
+                        },
+                        "CandidateFusion": {"selected_sources": ["l0_raw_hybrid"], "dropped_count": 0},
+                        "EvidencePackBuilder": {"source_span_count": 1, "coverage_insufficient": False},
+                    },
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        trace = payload["records"][0]["pipeline_trace"]
+        provider_summary = trace[0]["pipeline_layers"]["CandidateRecall"]["provider_summary"]
+        audit = build_provider_audit(payload["records"])
+
+        self.assertEqual(trace[0]["source_counts"], {"l0_raw_hybrid": 2})
+        self.assertEqual(
+            provider_summary,
+            [
+                {
+                    "provider_id": "raw_provider",
+                    "source_family": "raw_provider",
+                    "output_count": 2,
+                    "output_source_counts": {"l0_raw_hybrid": 2},
+                    "production_default": True,
+                    "shadow_only": False,
+                    "graph_related": False,
+                }
+            ],
+        )
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["provider_id"], "raw_provider")
+        self.assertEqual(audit[0]["output_count"], 2)
+        self.assertEqual(audit[0]["output_source_counts"], {"l0_raw_hybrid": 2})
+
+    def test_run_replay_hashes_unsafe_provider_summary_dimensions_without_raw_text(self) -> None:
+        secret = "zinc-sparrow-17"
+        fake_query = SimpleNamespace(id="q1", query=f"What mentions {secret}?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "pipeline_trace": {
+                    "query_type": "current_value",
+                    "mode": "benchmark",
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "source_counts": {"l0_raw_hybrid": 2},
+                            "provider_summary": [
+                                {
+                                    "provider_id": f"private provider {secret}",
+                                    "source_family": f"private family {secret}",
+                                    "output_count": float("inf"),
+                                    "output_source_counts": {f"candidate text {secret}": "invalid"},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                    "sample_text": f"raw candidate text {secret}",
+                                    "raw_query": f"What mentions {secret}?",
+                                }
+                            ],
+                        },
+                        "CandidateFusion": {"selected_sources": ["l0_raw_hybrid"], "dropped_count": 0},
+                        "EvidencePackBuilder": {"source_span_count": 1, "coverage_insufficient": False},
+                    },
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        provider_summary = payload["records"][0]["pipeline_trace"][0]["pipeline_layers"]["CandidateRecall"]["provider_summary"]
+        provider_record = provider_summary[0]
+        serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+        self.assertEqual(len(provider_record["provider_id"]), 12)
+        self.assertEqual(len(provider_record["source_family"]), 12)
+        self.assertEqual(provider_record["output_count"], 0)
+        self.assertEqual(list(provider_record["output_source_counts"].values()), [0])
+        self.assertTrue(all(len(source) == 12 for source in provider_record["output_source_counts"]))
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("private provider", serialized)
+        self.assertNotIn("private family", serialized)
+        self.assertNotIn("candidate text", serialized)
+        self.assertNotIn("raw candidate text", serialized)
+        self.assertNotIn("sample_text", serialized)
+        self.assertNotIn("raw_query", serialized)
 
     def test_run_replay_sanitizes_pipeline_trace_before_writing(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")

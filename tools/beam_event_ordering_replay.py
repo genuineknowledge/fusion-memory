@@ -26,6 +26,7 @@ from fusion_memory.eval.beam_adapter import (  # noqa: E402
     _normalize_order_item,
 )
 from fusion_memory.eval.model_adapters import _pack_for_model  # noqa: E402
+from tools.beam_retrieval_replay import _sanitize_pipeline_record  # noqa: E402
 
 
 REPLAY_PATHS = ("graph", "legacy", "dual", "hybrid")
@@ -971,7 +972,11 @@ def _compact_coverage(coverage: dict[str, Any]) -> dict[str, Any]:
         "dropped_high_signal_candidates",
         "rule_hits",
     ]
-    return {key: coverage.get(key) for key in keys if key in coverage}
+    compacted = {key: coverage.get(key) for key in keys if key in coverage}
+    pipeline_trace = _sanitize_pipeline_record(coverage.get("pipeline_trace"))
+    if pipeline_trace:
+        compacted["pipeline_trace"] = pipeline_trace
+    return compacted
 
 
 def _record_graph_fallback(record: dict[str, Any], graph: dict[str, Any], shadow: dict[str, Any]) -> bool:

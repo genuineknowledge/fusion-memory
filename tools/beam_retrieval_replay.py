@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from hashlib import sha1
@@ -242,14 +243,18 @@ def run_replay(
             budget={"mode": "benchmark", "query_type_hint": canonical_category},
         )
         coverage = _coverage_dict(getattr(pack, "coverage", {}))
+        pipeline_trace = _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or [])
         record = {
             "query_id": query.id,
             "category": canonical_category,
             "beam_category": query.category,
             "source_span_count": len(getattr(pack, "source_spans", []) or []),
             "coverage_insufficient": bool(coverage.get("coverage_insufficient", False)),
-            "pipeline_trace": _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or []),
+            "pipeline_trace": pipeline_trace,
         }
+        provider_audit_coverage = _provider_audit_coverage_from_pipeline_trace(pipeline_trace)
+        if provider_audit_coverage:
+            record["coverage"] = provider_audit_coverage
         temporal_relation_summary = _temporal_relation_summary_from_coverage(coverage)
         if temporal_relation_summary:
             record["temporal_relation_summary"] = temporal_relation_summary
@@ -390,6 +395,15 @@ def _pipeline_trace_from_pack(coverage: dict[str, Any], debug_trace: Any) -> lis
     return _sanitize_pipeline_trace(debug_trace)
 
 
+def _provider_audit_coverage_from_pipeline_trace(pipeline_trace: list[dict[str, Any]]) -> dict[str, Any]:
+    for trace in pipeline_trace:
+        layers = _object_dict(trace.get("pipeline_layers"))
+        recall = _object_dict(layers.get("CandidateRecall"))
+        if recall.get("provider_summary"):
+            return {"pipeline_trace": {"pipeline_layers": {"CandidateRecall": recall}}}
+    return {}
+
+
 def _temporal_relation_summary_from_coverage(coverage: dict[str, Any]) -> dict[str, Any]:
     summary = _sanitize_temporal_relation_summary(coverage.get("temporal_relation_summary"))
     if summary:
@@ -469,6 +483,12 @@ def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
     source_counts = _sanitize_count_mapping(recall.get("source_counts"))
     if source_counts:
         entry["source_counts"] = source_counts
+    provider_summary = _sanitize_provider_summary_list(recall.get("provider_summary"))
+    if provider_summary:
+        candidate_recall: dict[str, Any] = {"provider_summary": provider_summary}
+        if source_counts:
+            candidate_recall["source_counts"] = source_counts
+        entry["pipeline_layers"] = {"CandidateRecall": candidate_recall}
     selected_sources = _sanitize_selected_source_names(fusion.get("selected_sources"))
     if selected_sources:
         entry["selected_sources"] = selected_sources
@@ -538,6 +558,58 @@ def _sanitize_count_mapping(value: Any) -> dict[str, int | float | bool]:
         if count is not None:
             sanitized[safe_key] = count
     return sanitized
+
+
+def _sanitize_provider_summary_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized_summary: list[dict[str, Any]] = []
+    for item in value:
+        summary = _object_dict(item)
+        if not summary:
+            continue
+        sanitized = _sanitize_provider_summary(summary)
+        if sanitized:
+            sanitized_summary.append(sanitized)
+    return sanitized_summary
+
+
+def _sanitize_provider_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key in ("provider_id", "source_family"):
+        value = _sanitize_dimension_string(summary.get(key))
+        if value is not None:
+            sanitized[key] = value
+    if "output_count" in summary:
+        sanitized["output_count"] = _safe_int_count(summary.get("output_count"))
+    output_source_counts = _sanitize_provider_output_source_counts(summary.get("output_source_counts"))
+    if output_source_counts:
+        sanitized["output_source_counts"] = output_source_counts
+    for key in ("production_default", "shadow_only", "graph_related"):
+        if key in summary:
+            sanitized[key] = bool(summary[key])
+    return sanitized
+
+
+def _sanitize_provider_output_source_counts(value: Any) -> dict[str, int]:
+    mapping = _object_dict(value)
+    if not mapping:
+        return {}
+    sanitized: dict[str, int] = {}
+    for key, item in mapping.items():
+        safe_key = _sanitize_dimension_string(key)
+        if safe_key is not None:
+            sanitized[safe_key] = _safe_int_count(item)
+    return sanitized
+
+
+def _safe_int_count(value: Any) -> int:
+    try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _sanitize_temporal_relation_summary(value: Any) -> dict[str, Any]:
