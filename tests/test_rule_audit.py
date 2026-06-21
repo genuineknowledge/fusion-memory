@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import tools.rule_audit as rule_audit
 from tools.rule_audit import build_rule_audit
 
 
@@ -15,6 +16,262 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuleAuditTests(unittest.TestCase):
+    def _build_provider_audit(self, records: list[dict[str, object]]) -> list[dict[str, object]]:
+        builder = getattr(rule_audit, "build_provider_audit", None)
+        self.assertIsNotNone(builder, "build_provider_audit() must be exported")
+        return builder(records)
+
+    def test_build_provider_audit_aggregates_top_level_and_coverage_provider_summary(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "_audit_input": "first.json",
+                "pipeline_trace": {
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "provider_summary": [
+                                {
+                                    "provider_id": "raw_provider",
+                                    "source_family": "raw_provider",
+                                    "output_count": 2,
+                                    "output_source_counts": {"l0_raw_hybrid": 2},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                }
+                            ]
+                        }
+                    }
+                },
+            },
+            {
+                "query_id": "q1",
+                "_audit_input": "second.json",
+                "coverage": {
+                    "pipeline_trace": {
+                        "pipeline_layers": {
+                            "CandidateRecall": {
+                                "provider_summary": [
+                                    {
+                                        "provider_id": "raw_provider",
+                                        "source_family": "raw_provider",
+                                        "output_count": 3,
+                                        "output_source_counts": {"l0_raw_hybrid": 1, "raw_span": 2},
+                                        "production_default": True,
+                                        "shadow_only": False,
+                                        "graph_related": False,
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            },
+            {
+                "query_id": "q2",
+                "_audit_input": "second.json",
+                "coverage": {
+                    "pipeline_trace": {
+                        "pipeline_layers": {
+                            "CandidateRecall": {
+                                "provider_summary": [
+                                    {
+                                        "provider_id": "entity_graph",
+                                        "source_family": "entity_graph",
+                                        "output_count": 1,
+                                        "output_source_counts": {"entity_graph": 1},
+                                        "production_default": False,
+                                        "shadow_only": True,
+                                        "graph_related": True,
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            },
+        ]
+
+        audit = self._build_provider_audit(records)
+
+        self.assertEqual([row["provider_id"] for row in audit], ["entity_graph", "raw_provider"])
+        raw_row = next(row for row in audit if row["provider_id"] == "raw_provider")
+        self.assertEqual(raw_row["source_family"], "raw_provider")
+        self.assertEqual(raw_row["hit_count"], 2)
+        self.assertEqual(raw_row["query_count"], 1)
+        self.assertEqual(raw_row["output_count"], 5)
+        self.assertEqual(raw_row["output_source_counts"], {"l0_raw_hybrid": 3, "raw_span": 2})
+        self.assertEqual(raw_row["evidence_inputs"], ["first.json", "second.json"])
+        self.assertTrue(raw_row["production_default"])
+        self.assertFalse(raw_row["shadow_only"])
+        self.assertFalse(raw_row["graph_related"])
+
+        graph_row = next(row for row in audit if row["provider_id"] == "entity_graph")
+        self.assertEqual(graph_row["query_count"], 1)
+        self.assertEqual(graph_row["output_count"], 1)
+        self.assertFalse(graph_row["production_default"])
+        self.assertTrue(graph_row["shadow_only"])
+        self.assertTrue(graph_row["graph_related"])
+
+    def test_build_provider_audit_deduplicates_same_provider_summary_across_trace_locations(self) -> None:
+        pipeline_trace = {
+            "pipeline_layers": {
+                "CandidateRecall": {
+                    "provider_summary": [
+                        {
+                            "provider_id": "raw_provider",
+                            "source_family": "raw_provider",
+                            "output_count": 2,
+                            "output_source_counts": {"l0_raw_hybrid": 2},
+                            "production_default": True,
+                            "shadow_only": False,
+                            "graph_related": False,
+                        }
+                    ]
+                }
+            }
+        }
+        records = [
+            {
+                "query_id": "q1",
+                "pipeline_trace": pipeline_trace,
+                "coverage": {"pipeline_trace": pipeline_trace},
+            }
+        ]
+
+        audit = self._build_provider_audit(records)
+
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["hit_count"], 1)
+        self.assertEqual(audit[0]["output_count"], 2)
+        self.assertEqual(audit[0]["output_source_counts"], {"l0_raw_hybrid": 2})
+
+    def test_build_provider_audit_hashes_unsafe_dimensions_and_excludes_raw_text(self) -> None:
+        records = [
+            {
+                "query_id": "private question zinc-sparrow-17",
+                "_audit_input": "raw-input.json",
+                "pipeline_trace": {
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "provider_summary": [
+                                {
+                                    "provider_id": "private provider PostgreSQL",
+                                    "source_family": "数据库 selected",
+                                    "output_count": 1,
+                                    "output_source_counts": {"candidate text zinc-sparrow-17": 1},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                    "sample_text": "candidate text zinc-sparrow-17",
+                                    "raw_query": "private question zinc-sparrow-17",
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        ]
+
+        audit = self._build_provider_audit(records)
+
+        self.assertEqual(len(audit), 1)
+        row = audit[0]
+        self.assertEqual(len(row["provider_id"]), 12)
+        self.assertEqual(len(row["source_family"]), 12)
+        self.assertTrue(all(len(source) == 12 for source in row["output_source_counts"]))
+        self.assertEqual(row["output_count"], 1)
+        output_text = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("PostgreSQL", output_text)
+        self.assertNotIn("数据库", output_text)
+        self.assertNotIn("zinc-sparrow-17", output_text)
+        self.assertNotIn("private question", output_text)
+        self.assertNotIn("candidate text", output_text)
+
+    def test_cli_writes_provider_json_and_csv_without_changing_rule_outputs(self) -> None:
+        payload = {
+            "records": [
+                {
+                    "query_id": "q1",
+                    "rule_hits": [{"rule_id": "rule.alpha", "contributed_candidate_id": "c1"}],
+                    "pipeline_trace": {
+                        "pipeline_layers": {
+                            "CandidateRecall": {
+                                "provider_summary": [
+                                    {
+                                        "provider_id": "raw_provider",
+                                        "source_family": "raw_provider",
+                                        "output_count": 2,
+                                        "output_source_counts": {"l0_raw_hybrid": 2},
+                                        "production_default": True,
+                                        "shadow_only": False,
+                                        "graph_related": False,
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "replay.json"
+            rule_output = tmp / "rule-audit.json"
+            provider_output = tmp / "provider-audit.json"
+            provider_csv = tmp / "provider-audit.csv"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(rule_output),
+                    "--provider-output",
+                    str(provider_output),
+                    "--provider-csv",
+                    str(provider_csv),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            rule_rows = json.loads(rule_output.read_text(encoding="utf-8"))
+            self.assertEqual([row["rule_id"] for row in rule_rows], ["rule.alpha"])
+
+            provider_rows = json.loads(provider_output.read_text(encoding="utf-8"))
+            self.assertEqual([row["provider_id"] for row in provider_rows], ["raw_provider"])
+            self.assertEqual(provider_rows[0]["evidence_inputs"], [str(input_path)])
+
+            with provider_csv.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(
+                    reader.fieldnames,
+                    [
+                        "provider_id",
+                        "source_family",
+                        "hit_count",
+                        "query_count",
+                        "output_count",
+                        "output_source_counts",
+                        "evidence_inputs",
+                        "production_default",
+                        "shadow_only",
+                        "graph_related",
+                    ],
+                )
+                csv_rows = list(reader)
+            self.assertEqual(csv_rows[0]["provider_id"], "raw_provider")
+            self.assertEqual(csv_rows[0]["output_source_counts"], "l0_raw_hybrid:2")
+            self.assertEqual(csv_rows[0]["evidence_inputs"], str(input_path))
+
     def test_build_rule_audit_counts_hits_contribution_and_drops(self) -> None:
         records = [
             {

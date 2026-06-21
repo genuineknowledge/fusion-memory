@@ -107,6 +107,13 @@ def _safe_string(value: Any) -> str | None:
     return hashlib.sha1(repr(value).encode("utf-8")).hexdigest()[:12]
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_safe_identifier(value: str) -> bool:
     if len(value) > 128:
         return False
@@ -153,6 +160,26 @@ def _candidate_sources_for_record(record: dict[str, object]) -> list[str]:
     hybrid = _as_dict(paths.get("hybrid"))
     sources = _as_list(hybrid.get("sources"))
     return sorted({safe_source for source in sources if (safe_source := _safe_string(source)) is not None})
+
+
+def _provider_summary_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    for trace in (
+        _as_dict(record.get("pipeline_trace")),
+        _as_dict(_as_dict(record.get("coverage")).get("pipeline_trace")),
+    ):
+        layers = _as_dict(trace.get("pipeline_layers"))
+        candidate_recall = _as_dict(layers.get("CandidateRecall"))
+        for item in _as_list(candidate_recall.get("provider_summary")):
+            if not isinstance(item, dict):
+                continue
+            signature = json.dumps(item, sort_keys=True, default=str)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            summaries.append(item)
+    return summaries
 
 
 def _dropped_candidate_ids(record: dict[str, object]) -> set[str]:
@@ -368,6 +395,78 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
     return audit_rows
 
 
+def build_provider_audit(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    stats: dict[str, dict[str, Any]] = {}
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        query_id = record.get("query_id")
+        query_key = query_id if isinstance(query_id, str) else None
+        audit_input = record.get("_audit_input")
+        evidence_input = audit_input if isinstance(audit_input, str) and audit_input else None
+
+        for summary in _provider_summary_for_record(record):
+            provider_id = _safe_string(summary.get("provider_id"))
+            if provider_id is None:
+                continue
+            row = stats.setdefault(
+                provider_id,
+                {
+                    "source_family": "",
+                    "hit_count": 0,
+                    "query_ids": set(),
+                    "output_count": 0,
+                    "output_source_counts": {},
+                    "evidence_inputs": set(),
+                    "production_default": False,
+                    "shadow_only": False,
+                    "graph_related": False,
+                },
+            )
+            row["hit_count"] += 1
+            if query_key is not None:
+                row["query_ids"].add(query_key)
+            if evidence_input is not None:
+                row["evidence_inputs"].add(evidence_input)
+
+            source_family = _safe_string(summary.get("source_family"))
+            if source_family is not None and not row["source_family"]:
+                row["source_family"] = source_family
+
+            row["output_count"] += _safe_int(summary.get("output_count"))
+            output_source_counts = row["output_source_counts"]
+            for source, count in _as_dict(summary.get("output_source_counts")).items():
+                safe_source = _safe_string(source)
+                if safe_source is None:
+                    continue
+                output_source_counts[safe_source] = output_source_counts.get(safe_source, 0) + _safe_int(count)
+
+            row["production_default"] = bool(row["production_default"] or summary.get("production_default"))
+            row["shadow_only"] = bool(row["shadow_only"] or summary.get("shadow_only"))
+            row["graph_related"] = bool(row["graph_related"] or summary.get("graph_related"))
+
+    audit_rows: list[dict[str, object]] = []
+    for provider_id in sorted(stats):
+        row = stats[provider_id]
+        output_source_counts = _as_dict(row["output_source_counts"])
+        audit_rows.append(
+            {
+                "provider_id": provider_id,
+                "source_family": row["source_family"],
+                "hit_count": int(row["hit_count"]),
+                "query_count": len(row["query_ids"]),
+                "output_count": int(row["output_count"]),
+                "output_source_counts": {source: int(output_source_counts[source]) for source in sorted(output_source_counts)},
+                "evidence_inputs": sorted(row["evidence_inputs"]),
+                "production_default": bool(row["production_default"]),
+                "shadow_only": bool(row["shadow_only"]),
+                "graph_related": bool(row["graph_related"]),
+            }
+        )
+    return audit_rows
+
+
 def _load_records(input_path: Path) -> list[dict[str, object]]:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -420,11 +519,39 @@ def _write_csv(csv_path: Path, audit_rows: list[dict[str, object]]) -> None:
             writer.writerow(csv_row)
 
 
+def _write_provider_csv(csv_path: Path, audit_rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "provider_id",
+        "source_family",
+        "hit_count",
+        "query_count",
+        "output_count",
+        "output_source_counts",
+        "evidence_inputs",
+        "production_default",
+        "shadow_only",
+        "graph_related",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in audit_rows:
+            csv_row = dict(row)
+            output_source_counts = _as_dict(row["output_source_counts"])
+            csv_row["output_source_counts"] = ";".join(
+                f"{source}:{output_source_counts[source]}" for source in sorted(output_source_counts)
+            )
+            csv_row["evidence_inputs"] = ";".join(row["evidence_inputs"])
+            writer.writerow(csv_row)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a retrieval rule audit report from replay records.")
     parser.add_argument("--input", action="append", required=True, help="Replay JSON input. May be repeated.")
     parser.add_argument("--output", required=True, help="Path to audit JSON output.")
     parser.add_argument("--csv", default=None, help="Optional path to audit CSV output.")
+    parser.add_argument("--provider-output", default=None, help="Optional path to provider audit JSON output.")
+    parser.add_argument("--provider-csv", default=None, help="Optional path to provider audit CSV output.")
     args = parser.parse_args()
 
     records: list[dict[str, object]] = []
@@ -448,6 +575,12 @@ def main() -> int:
         _write_json(Path(args.output), audit_rows)
         if args.csv:
             _write_csv(Path(args.csv), audit_rows)
+        if args.provider_output or args.provider_csv:
+            provider_rows = build_provider_audit(records)
+            if args.provider_output:
+                _write_json(Path(args.provider_output), provider_rows)
+            if args.provider_csv:
+                _write_provider_csv(Path(args.provider_csv), provider_rows)
     except (OSError, ValueError) as exc:
         print(
             f"Error: failed to write audit output: {exc}. "
