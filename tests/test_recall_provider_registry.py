@@ -176,6 +176,15 @@ class StructuredProviderTests(unittest.TestCase):
             [["l1_fact_hybrid"], ["l2_event_graph"], ["l3_current_view"], ["l3_entity_profile"], ["exact_answer"], ["entity_graph"]],
         )
 
+    def test_structured_providers_respect_plan_source_gates(self) -> None:
+        context = self._context()
+        context.service._plan_uses_source = lambda plan, source: False
+        providers = [FactProvider(), EventProvider(), CurrentViewProvider(), EntityProfileProvider()]
+
+        for provider in providers:
+            with self.subTest(provider=provider.provider_id):
+                self.assertEqual(provider.recall(context), [])
+
     def test_event_provider_preserves_event_ordering_source(self) -> None:
         context = self._context(query_type="event_ordering")
         context.service._event_ordering_event_candidates = lambda *args, **kwargs: [

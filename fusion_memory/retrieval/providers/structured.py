@@ -55,6 +55,9 @@ class _StructuredProvider:
     def replay_categories(self) -> frozenset[str]:
         return self.meta.replay_categories
 
+    def _plan_uses_source(self, context: RecallContext) -> bool:
+        return context.service._plan_uses_source(context.plan, self.source_family)
+
 
 class FactProvider(_StructuredProvider):
     meta = _ProviderMeta(
@@ -64,6 +67,8 @@ class FactProvider(_StructuredProvider):
     )
 
     def recall(self, context: RecallContext) -> list[Candidate]:
+        if not self._plan_uses_source(context):
+            return []
         service = context.service
         fact_results = service.store.search_facts(
             service._retrieval_query(context.query, context.plan, "facts"),
@@ -94,6 +99,8 @@ class EventProvider(_StructuredProvider):
     )
 
     def recall(self, context: RecallContext) -> list[Candidate]:
+        if not self._plan_uses_source(context):
+            return []
         service = context.service
         if context.plan.query_type == "event_ordering":
             event_results = service._event_ordering_event_candidates(
@@ -141,6 +148,8 @@ class CurrentViewProvider(_StructuredProvider):
     )
 
     def recall(self, context: RecallContext) -> list[Candidate]:
+        if not self._plan_uses_source(context):
+            return []
         views = context.service.store.list_current_views(context.scope, include_session=context.include_session)
         return [
             Candidate(
@@ -168,6 +177,8 @@ class EntityProfileProvider(_StructuredProvider):
     )
 
     def recall(self, context: RecallContext) -> list[Candidate]:
+        if not self._plan_uses_source(context):
+            return []
         service = context.service
         profile_results = service.store.search_entity_profiles(
             service._retrieval_query(context.query, context.plan, "profiles"),
