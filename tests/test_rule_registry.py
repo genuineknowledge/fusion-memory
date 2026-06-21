@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
 
@@ -627,7 +628,7 @@ print(json.dumps({"score": score, "hits": hits}))
             check=True,
             capture_output=True,
             text=True,
-            cwd="/public/home/wwb/memory/.worktrees/rule-telemetry-coverage",
+            cwd=Path(__file__).resolve().parents[1],
         )
         payload = json.loads(result.stdout)
 
