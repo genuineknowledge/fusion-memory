@@ -26,6 +26,26 @@ from fusion_memory.retrieval.providers.structured import (
     FactProvider,
 )
 
+_LEGACY_EMPTY_GROUP_PROVIDER_IDS = frozenset(
+    {
+        "raw_span",
+        "facts",
+        "events",
+        "views",
+        "profiles",
+        "exact",
+        "entities",
+        "event_ordering_timeline",
+    }
+)
+
+
+def _should_preserve_empty_group(context: RecallContext, provider: RecallProvider) -> bool:
+    provider_id = provider.provider_id
+    if provider_id in {"facts", "events", "views", "profiles"}:
+        return bool(context.service._plan_uses_source(context.plan, provider.source_family))
+    return provider_id in _LEGACY_EMPTY_GROUP_PROVIDER_IDS
+
 
 class ProviderRegistry:
     def __init__(self, providers: Iterable[RecallProvider]) -> None:
@@ -57,8 +77,9 @@ class ProviderRegistry:
         summary: list[dict[str, Any]] = []
         for provider in self.enabled_providers(context):
             candidates = provider.recall(context)
-            if candidates:
+            if candidates or _should_preserve_empty_group(context, provider):
                 candidate_lists.append(candidates)
+            if candidates:
                 context.prior_candidates.extend(candidates)
             summary.append(
                 {

@@ -8,6 +8,7 @@ from typing import Any
 
 from fusion_memory.api.service import MemoryService
 from fusion_memory.core.models import Candidate, QueryPlan, Scope
+from fusion_memory.core.text import keyword_score
 from fusion_memory.retrieval.candidate_provider import build_candidate_lists
 from fusion_memory.retrieval.event_graph_selection import _event_milestone_group
 from fusion_memory.retrieval.providers.base import RecallContext
@@ -45,6 +46,260 @@ def _candidate_signature(candidate: Candidate) -> tuple[Any, ...]:
     )
 
 
+def _legacy_build_candidate_lists(
+    service: Any,
+    query: str,
+    scope: Scope,
+    plan: Any,
+    per_source_limit: int,
+    enabled_sources: list[str] | set[str] | None = None,
+    include_session: bool = False,
+    *,
+    event_milestone_group: Any,
+) -> list[list[Candidate]]:
+    enabled = set(enabled_sources) if enabled_sources is not None else None
+    candidate_lists: list[list[Candidate]] = []
+    speaker = plan.speaker_focus if plan.speaker_focus != "any" else None
+    if service._source_enabled("raw", enabled):
+        raw_span_results = service.store.search_spans(
+            service._retrieval_query(query, plan, "raw"),
+            scope,
+            limit=per_source_limit,
+            speaker=speaker,
+            include_session=include_session,
+        )
+        candidate_lists.append(
+            [
+                Candidate(
+                    id=span.span_id,
+                    type="span",
+                    text=span.content,
+                    source="l0_raw_hybrid",
+                    scores=scores,
+                    source_span_ids=[span.span_id],
+                    metadata={"speaker": span.speaker, "span_type": span.span_type, "timestamp": span.timestamp.isoformat()},
+                )
+                for span, scores in raw_span_results
+            ]
+        )
+        topic_scoped = service._topic_scoped_raw_candidates(
+            query,
+            scope,
+            plan,
+            limit=max(per_source_limit * 2, per_source_limit + 12),
+            include_session=include_session,
+        )
+        if topic_scoped:
+            candidate_lists.append(topic_scoped)
+        broad_raw = service._broad_raw_recall_candidates(
+            query,
+            scope,
+            plan,
+            limit=max(per_source_limit * 3, per_source_limit + 24),
+            include_session=include_session,
+        )
+        if broad_raw:
+            candidate_lists.append(broad_raw)
+        scent_trail = service._raw_scent_trail_candidates(
+            query,
+            scope,
+            plan,
+            [candidate for items in candidate_lists for candidate in items],
+            limit=max(per_source_limit, 12),
+            include_session=include_session,
+        )
+        if scent_trail:
+            candidate_lists.append(scent_trail)
+        if plan.query_type == "contradiction_resolution":
+            contradiction_claims = service._contradiction_claim_candidates(
+                query,
+                scope,
+                plan,
+                limit=max(per_source_limit, 12),
+                include_session=include_session,
+            )
+            if contradiction_claims:
+                candidate_lists.append(contradiction_claims)
+        if plan.query_type == "temporal_lookup":
+            temporal_candidates = service._temporal_coverage_candidates(
+                query,
+                scope,
+                plan,
+                limit=max(per_source_limit * 2, per_source_limit + 12),
+                include_session=include_session,
+            )
+            if temporal_candidates:
+                candidate_lists.append(temporal_candidates)
+        if plan.query_type == "multi_session_reasoning":
+            aggregation_candidates = service._aggregation_coverage_candidates(
+                query,
+                scope,
+                plan,
+                limit=max(per_source_limit * 2, per_source_limit + 12),
+                include_session=include_session,
+            )
+            if aggregation_candidates:
+                candidate_lists.append(aggregation_candidates)
+        if plan.query_type == "event_ordering":
+            coverage_candidates = service._event_ordering_coverage_candidates(
+                query,
+                scope,
+                limit=max(per_source_limit * 3, per_source_limit + 12),
+                include_session=include_session,
+            )
+            coverage_candidates = [
+                candidate
+                for candidate in coverage_candidates
+                if candidate.source != "event_ordering_persisted_graph"
+                and not str(candidate.source).startswith("event_ordering_graph")
+            ]
+            if coverage_candidates:
+                candidate_lists.append(coverage_candidates)
+            episode_recall = service._event_ordering_episode_recall_candidates(
+                query,
+                scope,
+                plan,
+                limit=max(per_source_limit * 4, per_source_limit + 24),
+                include_session=include_session,
+            )
+            if episode_recall:
+                candidate_lists.append(episode_recall)
+            candidate_lists.append(
+                service._event_ordering_timeline_candidates(
+                    query,
+                    plan,
+                    scope,
+                    limit=max(per_source_limit * 3, per_source_limit + 12),
+                    include_session=include_session,
+                )
+            )
+    if service._source_enabled("facts", enabled) and service._plan_uses_source(plan, "facts"):
+        fact_results = service.store.search_facts(
+            service._retrieval_query(query, plan, "facts"),
+            scope,
+            limit=per_source_limit,
+            include_session=include_session,
+        )
+        candidate_lists.append(
+            [
+                Candidate(
+                    id=fact.fact_id,
+                    type="fact",
+                    text=fact.text,
+                    source="l1_fact_hybrid",
+                    scores={**scores, "view_or_profile_prior": 0.0},
+                    source_span_ids=fact.source_span_ids,
+                    metadata={"category": fact.category, "confidence": fact.confidence},
+                )
+                for fact, scores in fact_results
+            ]
+        )
+    if service._source_enabled("events", enabled) and service._plan_uses_source(plan, "events"):
+        if plan.query_type == "event_ordering":
+            event_results = service._event_ordering_event_candidates(
+                query,
+                scope,
+                limit=max(per_source_limit * 2, 12),
+                include_session=include_session,
+            )
+        else:
+            event_results = service.store.search_events(
+                service._retrieval_query(query, plan, "events"),
+                scope,
+                limit=per_source_limit,
+                include_session=include_session,
+            )
+        candidate_lists.append(
+            [
+                Candidate(
+                    id=event.event_id,
+                    type="event",
+                    text=event.description,
+                    source="event_timeline_graph" if plan.query_type == "event_ordering" else "l2_event_graph",
+                    scores={**scores, "graph_proximity": 0.80 if plan.query_type == "event_ordering" else 0.55},
+                    source_span_ids=event.source_span_ids,
+                    metadata={
+                        "event_type": event.event_type,
+                        "time_start": (
+                            service._event_ordering_observed_at(event).isoformat()
+                            if plan.query_type == "event_ordering" and service._event_ordering_observed_at(event)
+                            else event.time_start.isoformat()
+                            if event.time_start
+                            else None
+                        ),
+                        "milestone_group": event_milestone_group(event),
+                    },
+                )
+                for event, scores in event_results
+            ]
+        )
+    if service._source_enabled("views", enabled) and service._plan_uses_source(plan, "views"):
+        views = service.store.list_current_views(scope, include_session=include_session)
+        candidate_lists.append(
+            [
+                Candidate(
+                    id=view.view_id,
+                    type="view",
+                    text=view.text,
+                    source="l3_current_view",
+                    scores={
+                        "bm25_score": keyword_score(query, view.text),
+                        "view_or_profile_prior": 0.85,
+                        "score": keyword_score(query, view.text) + 0.85,
+                    },
+                    source_span_ids=view.source_span_ids,
+                    metadata={"view_type": view.view_type, "confidence": view.confidence},
+                )
+                for view in views
+            ]
+        )
+    if service._source_enabled("profiles", enabled) and service._plan_uses_source(plan, "profiles"):
+        profile_results = service.store.search_entity_profiles(
+            service._retrieval_query(query, plan, "profiles"),
+            scope,
+            limit=per_source_limit,
+            include_session=include_session,
+        )
+        candidate_lists.append(
+            [
+                Candidate(
+                    id=profile.profile_id,
+                    type="profile",
+                    text=profile.text,
+                    source="l3_entity_profile",
+                    scores={
+                        **scores,
+                        "view_or_profile_prior": 0.55,
+                        "score": scores.get("score", 0.0) + 0.55,
+                    },
+                    source_span_ids=profile.source_span_ids,
+                    metadata={"profile_type": profile.profile_type, "support_count": profile.support_count},
+                )
+                for profile, scores in profile_results
+            ]
+        )
+    if service._source_enabled("exact", enabled):
+        candidate_lists.append(
+            service._exact_candidates(
+                service._retrieval_query(query, plan, "exact"),
+                scope,
+                per_source_limit,
+                plan=plan,
+                include_session=include_session,
+            )
+        )
+    if service._source_enabled("entities", enabled):
+        candidate_lists.append(
+            service._entity_candidates(
+                service._retrieval_query(query, plan, "entities"),
+                scope,
+                per_source_limit,
+                include_session=include_session,
+            )
+        )
+    return candidate_lists
+
+
 @dataclass(frozen=True)
 class DummyProvider:
     provider_id: str
@@ -77,6 +332,40 @@ class DummyProvider:
         ]
 
 
+@dataclass(frozen=True)
+class StaticProvider:
+    provider_id: str
+    source_family: str
+    output_source: str
+    candidate_ids: tuple[str, ...]
+    supported_query_types: frozenset[str] | None = None
+    production_default: bool = True
+    shadow_only: bool = False
+    graph_related: bool = False
+
+    @property
+    def output_sources(self) -> frozenset[str]:
+        return frozenset({self.output_source})
+
+    @property
+    def replay_categories(self) -> frozenset[str]:
+        return frozenset()
+
+    def recall(self, context: RecallContext) -> list[Candidate]:
+        return [
+            Candidate(
+                id=candidate_id,
+                type="span",
+                text=f"candidate text for {candidate_id}",
+                source=self.output_source,
+                scores={"score": 1.0},
+                source_span_ids=[candidate_id],
+                metadata={},
+            )
+            for candidate_id in self.candidate_ids
+        ]
+
+
 class RecallProviderRegistryTests(unittest.TestCase):
     def _context(
         self,
@@ -85,7 +374,7 @@ class RecallProviderRegistryTests(unittest.TestCase):
         enabled_sources: set[str] | None = None,
     ) -> RecallContext:
         return RecallContext(
-            service=object(),
+            service=SimpleNamespace(_plan_uses_source=lambda plan, source: True),
             query="raw private query should not be serialized",
             scope=Scope(workspace_id="w", user_id="u", agent_id="a"),
             plan=QueryPlan(query="q", query_type=query_type, entities=[], time_constraints=[]),
@@ -116,6 +405,28 @@ class RecallProviderRegistryTests(unittest.TestCase):
 
         self.assertEqual([[candidate.id for candidate in items] for items in lists], [["first"], ["second"]])
         self.assertEqual([candidate.id for candidate in context.prior_candidates], ["first", "second"])
+
+    def test_registry_recall_keeps_empty_groups_for_enabled_applicable_providers(self) -> None:
+        first = StaticProvider("raw_span", "raw", "l0_raw_hybrid", ("first",))
+        second = StaticProvider("facts", "facts", "l1_fact_hybrid", ())
+        third = StaticProvider("views", "views", "l3_current_view", ("third",))
+        registry = ProviderRegistry([first, second, third])
+        context = self._context()
+
+        lists = registry.recall(context)
+
+        self.assertEqual([[candidate.id for candidate in items] for items in lists], [["first"], [], ["third"]])
+
+    def test_registry_recall_excludes_empty_groups_from_prior_candidates(self) -> None:
+        first = StaticProvider("raw_span", "raw", "l0_raw_hybrid", ("first",))
+        second = StaticProvider("facts", "facts", "l1_fact_hybrid", ())
+        third = StaticProvider("views", "views", "l3_current_view", ("third",))
+        registry = ProviderRegistry([first, second, third])
+        context = self._context()
+
+        registry.recall(context)
+
+        self.assertEqual([candidate.id for candidate in context.prior_candidates], ["first", "third"])
 
     def test_registry_summary_is_structural_without_query_text(self) -> None:
         registry = ProviderRegistry([DummyProvider("raw_span", "raw", "l0_raw_hybrid")])
@@ -194,6 +505,37 @@ class CandidateProviderFacadeParityTests(unittest.TestCase):
         sources = [candidate.source for items in lists for candidate in items]
         self.assertNotIn("event_ordering_persisted_graph", sources)
         self.assertFalse(any(source.startswith("event_ordering_graph") for source in sources))
+
+    def test_facade_candidate_signatures_match_legacy_order_for_populated_query(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-provider-signature-parity", user_id="u", agent_id="a")
+        query = "What retrieval database do I currently prefer?"
+        try:
+            memory.add("I prefer PostgreSQL for Atlas retrieval. I also mentioned Qdrant as a backup.", scope)
+            plan = memory.planner.plan(query)
+            lists = build_candidate_lists(
+                memory,
+                query,
+                scope,
+                plan,
+                per_source_limit=6,
+                event_milestone_group=_event_milestone_group,
+            )
+            legacy_lists = _legacy_build_candidate_lists(
+                memory,
+                query,
+                scope,
+                plan,
+                per_source_limit=6,
+                event_milestone_group=_event_milestone_group,
+            )
+        finally:
+            memory.close()
+
+        self.assertEqual(
+            [[_candidate_signature(candidate) for candidate in items] for items in lists],
+            [[_candidate_signature(candidate) for candidate in items] for items in legacy_lists],
+        )
 
 
 class StructuredProviderTests(unittest.TestCase):
