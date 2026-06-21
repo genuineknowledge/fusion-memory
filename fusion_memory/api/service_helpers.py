@@ -843,6 +843,7 @@ def _cjk_exact_match_phrases(query: str, text: str, *, min_len: int = 2) -> list
             query=query,
             text=text,
             stage="exact_filter",
+            impact="observed",
             metadata={"decision": "observed", "source": "cjk_exact", "match_count": len(unique_matches)},
         )
     return unique_matches
@@ -861,6 +862,7 @@ def _matched_query_conditions(query: str, text: str, *, min_len: int = 3) -> lis
             query=query,
             text=text,
             stage="search_filter",
+            impact="observed",
             metadata={"decision": "observed", "source": "multi_condition", "match_count": len(unique_matches)},
         )
     return unique_matches

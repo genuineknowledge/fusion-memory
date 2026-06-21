@@ -13,7 +13,7 @@ from fusion_memory.retrieval.taxonomy import taxonomy_alias_hits
 register_rule(
     RuleDefinition(
         rule_id="taxonomy.alias_match",
-        module=__name__,
+        module="fusion_memory.api.service_helpers",
         purpose="Observe taxonomy alias matching without changing retrieval behavior.",
         category="taxonomy_candidate",
         ability="zh_recall",
@@ -380,7 +380,7 @@ def _event_ordering_event_relevance(query: str, event: MemoryEvent) -> float:
     group = _event_milestone_group(event)
     description = event.description
     base = keyword_score(query, description)
-    aspect = _event_group_query_fit(query.lower(), group, description)
+    aspect = _event_group_query_fit(query, group, description)
     if group:
         aspect = max(aspect, 0.22)
     return base + aspect
@@ -411,9 +411,9 @@ def _event_group_family(group: str) -> str:
     return group
 
 
-def _event_group_query_fit(query_lower: str, group: str | None, description: str) -> float:
+def _event_group_query_fit(query: str, group: str | None, description: str) -> float:
     lower = description.lower()
-    query_tokens = _event_ordering_tokens(query_lower)
+    query_tokens = _event_ordering_tokens(query.lower())
     event_tokens = _event_ordering_tokens(lower)
     group_tokens = _event_ordering_tokens((group or "").replace("_", " "))
     if not event_tokens and not group_tokens:
@@ -423,9 +423,10 @@ def _event_group_query_fit(query_lower: str, group: str | None, description: str
     if taxonomy_hits:
         record_rule_hit(
             "taxonomy.alias_match",
-            query=query_lower,
+            query=query,
             text=description,
             stage="search_filter",
+            impact="observed",
             metadata={"decision": "observed", "source": "taxonomy", "match_count": len(taxonomy_hits)},
         )
     salient_hits = sum(1 for token in event_tokens.union(group_tokens) if token in SOFTWARE_ASPECT_TERMS)

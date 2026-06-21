@@ -531,6 +531,7 @@ class RuleInstrumentationTests(unittest.TestCase):
             self.assertEqual(hit.metadata["match_count"], len(matches))
             self.assertNotIn("默认数据库", str(hit.metadata))
         observed = next(hit for hit in hits if hit.rule_id == "zh_recall.cjk_exact_match")
+        self.assertEqual(observed.impact, "observed")
         self.assertEqual(observed.metadata["decision"], "observed")
         self.assertEqual(observed.metadata["source"], "cjk_exact")
 
@@ -545,7 +546,8 @@ class RuleInstrumentationTests(unittest.TestCase):
         self.assertIn("openclaw", matches)
         self.assertIn("install", matches)
         hits = drain_rule_hits()
-        self.assertTrue(any(hit.rule_id == "multi_condition.query_token_match" for hit in hits))
+        observed = next(hit for hit in hits if hit.rule_id == "multi_condition.query_token_match")
+        self.assertEqual(observed.impact, "observed")
         self.assertFalse(any("OpenClaw" in str(hit.__dict__) for hit in hits))
         self.assertFalse(any("beginner friendly" in str(hit.__dict__) for hit in hits))
 
@@ -598,6 +600,7 @@ print(json.dumps({"score": score, "hits": hits}))
         taxonomy_hit = taxonomy_hits[0]
         self.assertRegex(taxonomy_hit["query"], r"^[0-9a-f]{12}$")
         self.assertNotEqual(taxonomy_hit["query"], "")
+        self.assertEqual(taxonomy_hit["impact"], "observed")
         self.assertEqual(taxonomy_hit["metadata"]["decision"], "observed")
         self.assertEqual(taxonomy_hit["metadata"]["source"], "taxonomy")
         self.assertFalse(any("deployment" in json.dumps(hit, ensure_ascii=False) for hit in payload["hits"]))
