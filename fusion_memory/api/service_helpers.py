@@ -24,6 +24,9 @@ register_rule(
         purpose="mark Chinese exact phrase preservation hits",
         category="high_risk",
         pattern="cjk_exact_phrase",
+        ability="zh_recall",
+        protected=True,
+        protected_reason="chinese_recall_precision",
     )
 )
 

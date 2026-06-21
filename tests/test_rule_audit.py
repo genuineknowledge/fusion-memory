@@ -103,12 +103,336 @@ class RuleAuditTests(unittest.TestCase):
         self.assertEqual(taxonomy_row["recommendation"], "migrate_to_taxonomy")
         self.assertEqual(taxonomy_row["cleanup_phase"], "first_pass")
         self.assertEqual(taxonomy_row["cleanup_action"], "migrate_to_taxonomy")
+        self.assertEqual(taxonomy_row["cleanup_blockers"], ["domain_label_taxonomy_migration_required"])
         self.assertFalse(taxonomy_row["safe_to_delete"])
 
         legacy_row = next(item for item in audit if item["rule_id"] == "event_ordering.legacy.tie_breaker")
         self.assertEqual(legacy_row["recommendation"], "legacy_shadow")
-        self.assertEqual(legacy_row["cleanup_action"], "keep_shadow")
+        self.assertEqual(legacy_row["cleanup_action"], "keep_protected")
+        self.assertEqual(legacy_row["cleanup_blockers"], ["protected:legacy_event_ordering_fallback"])
         self.assertFalse(legacy_row["safe_to_delete"])
+
+    def test_build_rule_audit_includes_provider_and_lifecycle_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "current_value.stale_history_marker",
+                        "contributed_candidate_id": "c1",
+                        "provider_id": "views",
+                        "lifecycle_stage": "selected",
+                        "lifecycle_reason": "views",
+                        "impact": "selected",
+                    }
+                ],
+                "candidate_lifecycle": {
+                    "records": [
+                        {
+                            "candidate_id": "c1",
+                            "candidate_source": "l3_current_view",
+                            "stage": "selected",
+                            "reason_code": "views",
+                        }
+                    ]
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "current_value.stale_history_marker")
+
+        self.assertEqual(row["provider_ids"], ["views"])
+        self.assertEqual(row["lifecycle_stages"], ["selected"])
+        self.assertEqual(row["lifecycle_reasons"], ["views"])
+
+    def test_build_rule_audit_hashes_unsafe_provider_and_lifecycle_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "current_value.stale_history_marker",
+                        "contributed_candidate_id": "c1",
+                        "provider_id": "private provider PostgreSQL",
+                        "lifecycle_stage": "数据库 selected",
+                        "lifecycle_reason": "current database is PostgreSQL",
+                        "impact": "selected",
+                    }
+                ],
+                "pipeline_trace": {
+                    "candidate_lifecycle": {
+                        "records": [
+                            {
+                                "candidate_id": "c1",
+                                "stage": "selected from private text",
+                                "reason_code": "raw reason PostgreSQL",
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "current_value.stale_history_marker")
+
+        self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"] if item != "selected"))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+        self.assertNotIn("PostgreSQL", repr(row))
+        self.assertNotIn("数据库", repr(row))
+        self.assertNotIn("private text", repr(row))
+
+    def test_build_rule_audit_hashes_raw_looking_provider_and_lifecycle_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.raw_values",
+                        "provider_id": "postgres://user@example.com/db",
+                        "lifecycle_stage": "/var/lib/private/current.txt",
+                        "lifecycle_reason": "acct-1234@example.com",
+                        "impact": "selected",
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.raw_values")
+
+        self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+        self.assertNotIn("postgres://", repr(row))
+        self.assertNotIn("/var/lib", repr(row))
+        self.assertNotIn("@example.com", repr(row))
+
+    def test_build_rule_audit_hashes_unknown_identifier_like_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.identifier_like_values",
+                        "provider_id": "source_private_project",
+                        "lifecycle_stage": "l3_private_goal",
+                        "lifecycle_reason": "event_ordering_secret",
+                        "impact": "selected",
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.identifier_like_values")
+
+        self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+        self.assertNotIn("source_private_project", repr(row))
+        self.assertNotIn("event_ordering_secret", repr(row))
+        self.assertNotIn("l3_private_goal", repr(row))
+
+    def test_build_rule_audit_correlates_lifecycle_with_raw_candidate_ids_before_hashing(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.raw_candidate",
+                        "contributed_candidate_id": "candidate id/用户@example.com",
+                        "provider_id": "views",
+                    }
+                ],
+                "candidate_lifecycle": {
+                    "records": [
+                        {
+                            "candidate_id": "candidate id/用户@example.com",
+                            "stage": "selected",
+                            "reason_code": "views",
+                        }
+                    ]
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.raw_candidate")
+
+        self.assertEqual(row["lifecycle_stages"], ["selected"])
+        self.assertEqual(row["lifecycle_reasons"], ["views"])
+
+    def test_build_rule_audit_reads_coverage_candidate_lifecycle_records(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.coverage_lifecycle",
+                        "contributed_candidate_id": "c1",
+                    }
+                ],
+                "coverage": {
+                    "candidate_lifecycle": {
+                        "records": [
+                            {
+                                "candidate_id": "c1",
+                                "stage": "rescued",
+                                "reason_code": "event_ordering_coverage",
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.coverage_lifecycle")
+
+        self.assertEqual(row["lifecycle_stages"], ["rescued"])
+        self.assertEqual(row["lifecycle_reasons"], ["event_ordering_coverage"])
+
+    def test_build_rule_audit_marks_known_cli_governance_rules_protected(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {"rule_id": "current_value.stale_history_marker"},
+                    {"rule_id": "exact_match.cjk_phrase"},
+                    {"rule_id": "event_ordering.legacy.unused"},
+                    {"rule_id": "event_ordering.legacy_rescue"},
+                    {
+                        "rule_id": "event_ordering.taxonomy.domain_label_match",
+                        "metadata": {"category": "taxonomy_candidate"},
+                    },
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        by_rule = {str(row["rule_id"]): row for row in audit}
+
+        self.assertTrue(by_rule["current_value.stale_history_marker"]["protected"])
+        self.assertEqual(
+            by_rule["current_value.stale_history_marker"]["protected_reason"],
+            "high_precision_current_value",
+        )
+        self.assertFalse(by_rule["current_value.stale_history_marker"]["safe_to_delete"])
+        self.assertTrue(by_rule["exact_match.cjk_phrase"]["protected"])
+        self.assertEqual(by_rule["exact_match.cjk_phrase"]["protected_reason"], "chinese_recall_precision")
+        self.assertFalse(by_rule["exact_match.cjk_phrase"]["safe_to_delete"])
+        self.assertTrue(by_rule["event_ordering.legacy.unused"]["protected"])
+        self.assertEqual(by_rule["event_ordering.legacy.unused"]["protected_reason"], "legacy_event_ordering_fallback")
+        self.assertEqual(by_rule["event_ordering.legacy.unused"]["cleanup_action"], "keep_protected")
+        self.assertEqual(
+            by_rule["event_ordering.legacy.unused"]["cleanup_blockers"],
+            ["protected:legacy_event_ordering_fallback"],
+        )
+        self.assertFalse(by_rule["event_ordering.legacy.unused"]["safe_to_delete"])
+        self.assertTrue(by_rule["event_ordering.legacy_rescue"]["protected"])
+        self.assertFalse(by_rule["event_ordering.legacy_rescue"]["safe_to_delete"])
+        self.assertEqual(by_rule["event_ordering.taxonomy.domain_label_match"]["recommendation"], "migrate_to_taxonomy")
+        self.assertEqual(by_rule["event_ordering.taxonomy.domain_label_match"]["cleanup_action"], "migrate_to_taxonomy")
+        self.assertEqual(
+            by_rule["event_ordering.taxonomy.domain_label_match"]["cleanup_blockers"],
+            ["domain_label_taxonomy_migration_required"],
+        )
+        self.assertFalse(by_rule["event_ordering.taxonomy.domain_label_match"]["safe_to_delete"])
+
+    def test_cleanup_gate_blocks_protected_zero_contribution_rules(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "current_value.stale_history_marker",
+                        "contributed_candidate_id": None,
+                        "protected": True,
+                        "protected_reason": "high_precision_current_value",
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "current_value.stale_history_marker")
+
+        self.assertFalse(row["safe_to_delete"])
+        self.assertEqual(row["cleanup_action"], "keep_protected")
+        self.assertEqual(row["cleanup_blockers"], ["protected:high_precision_current_value"])
+
+    def test_explicit_protected_unknown_rule_blocks_safe_delete(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.explicitly_protected",
+                        "contributed_candidate_id": None,
+                        "protected": True,
+                        "protected_reason": "custom private reason",
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.explicitly_protected")
+
+        self.assertTrue(row["protected"])
+        self.assertEqual(len(row["protected_reason"]), 12)
+        self.assertFalse(row["safe_to_delete"])
+        self.assertEqual(row["cleanup_action"], "keep_protected")
+        self.assertEqual(row["cleanup_blockers"], [f"protected:{row['protected_reason']}"])
+        self.assertNotIn("custom private reason", repr(row))
+
+    def test_cleanup_gate_marks_exact_duplicate_unprotected_rule_safe_to_delete(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.alpha_duplicate",
+                        "contributed_candidate_id": None,
+                        "metadata": {"duplicate_of": "rule.alpha"},
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "rule.alpha_duplicate")
+
+        self.assertEqual(row["cleanup_action"], "delete_duplicate")
+        self.assertEqual(row["cleanup_phase"], "first_pass")
+        self.assertTrue(row["safe_to_delete"])
+
+    def test_cleanup_gate_migrates_domain_label_rules_even_when_duplicate(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "event_ordering.taxonomy.domain_label_match",
+                        "contributed_candidate_id": None,
+                        "metadata": {
+                            "category": "taxonomy_candidate",
+                            "duplicate_of": "event_ordering.taxonomy.domain_label",
+                        },
+                    }
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "event_ordering.taxonomy.domain_label_match")
+
+        self.assertEqual(row["cleanup_action"], "migrate_to_taxonomy")
+        self.assertEqual(row["cleanup_blockers"], ["domain_label_taxonomy_migration_required"])
+        self.assertFalse(row["safe_to_delete"])
 
     def test_build_rule_audit_marks_event_ordering_legacy_rules_as_legacy_shadow(self) -> None:
         records = [
@@ -127,10 +451,12 @@ class RuleAuditTests(unittest.TestCase):
 
         legacy_row = next(item for item in audit if item["rule_id"] == "event_ordering.legacy.tie_breaker")
         self.assertEqual(legacy_row["recommendation"], "legacy_shadow")
-        self.assertEqual(legacy_row["cleanup_action"], "keep_shadow")
+        self.assertEqual(legacy_row["cleanup_action"], "keep_protected")
+        self.assertEqual(legacy_row["cleanup_blockers"], ["protected:legacy_event_ordering_fallback"])
         unused_row = next(item for item in audit if item["rule_id"] == "event_ordering.legacy.unused")
         self.assertEqual(unused_row["recommendation"], "legacy_shadow")
-        self.assertEqual(unused_row["cleanup_action"], "keep_shadow")
+        self.assertEqual(unused_row["cleanup_action"], "keep_protected")
+        self.assertEqual(unused_row["cleanup_blockers"], ["protected:legacy_event_ordering_fallback"])
         self.assertFalse(unused_row["safe_to_delete"])
 
     def test_rule_audit_marks_duplicate_no_contribution_rules_for_first_pass_cleanup(self) -> None:
@@ -207,7 +533,7 @@ class RuleAuditTests(unittest.TestCase):
 
             audit = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual([row["rule_id"] for row in audit], ["rule.alpha", "rule.beta"])
-            self.assertEqual(audit[0]["candidate_sources"], ["source_a", "source_b"])
+            self.assertTrue(all(len(item) == 12 for item in audit[0]["candidate_sources"]))
             self.assertEqual(audit[0]["recommendation"], "keep")
             self.assertEqual(audit[1]["recommendation"], "delete_candidate")
 
@@ -225,18 +551,123 @@ class RuleAuditTests(unittest.TestCase):
                         "dropped_count",
                         "candidate_sources",
                         "evidence_inputs",
+                        "provider_ids",
+                        "lifecycle_stages",
+                        "lifecycle_reasons",
                         "recommendation",
+                        "protected",
+                        "protected_reason",
                         "duplicate_of",
                         "cleanup_phase",
                         "cleanup_action",
                         "safe_to_delete",
+                        "cleanup_blockers",
                     ],
                 )
                 rows = list(reader)
 
             self.assertEqual([row["rule_id"] for row in rows], ["rule.alpha", "rule.beta"])
-            self.assertEqual(rows[0]["candidate_sources"], "source_a;source_b")
+            self.assertNotIn("source_a", rows[0]["candidate_sources"])
+            self.assertNotIn("source_b", rows[0]["candidate_sources"])
             self.assertEqual(rows[0]["evidence_inputs"], str(input_path))
+
+    def test_cli_csv_includes_rule_governance_columns(self) -> None:
+        payload = {
+            "records": [
+                {
+                    "query_id": "q1",
+                    "rule_hits": [
+                        {
+                            "rule_id": "event_ordering.legacy_rescue",
+                            "provider_id": "event_ordering_coverage",
+                            "lifecycle_stage": "rescued",
+                            "lifecycle_reason": "event_ordering_coverage",
+                        }
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "replay.json"
+            output_path = tmp / "audit.json"
+            csv_path = tmp / "audit.csv"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--csv",
+                    str(csv_path),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertIn("provider_ids", reader.fieldnames)
+                self.assertIn("lifecycle_stages", reader.fieldnames)
+                self.assertIn("lifecycle_reasons", reader.fieldnames)
+                self.assertIn("protected", reader.fieldnames)
+                self.assertIn("protected_reason", reader.fieldnames)
+
+    def test_cli_hashes_unknown_identifier_like_dimensions(self) -> None:
+        payload = {
+            "records": [
+                {
+                    "query_id": "q1",
+                    "rule_hits": [
+                        {
+                            "rule_id": "rule.identifier_like_values",
+                            "provider_id": "source_private_project",
+                            "lifecycle_stage": "l3_private_goal",
+                            "lifecycle_reason": "event_ordering_secret",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "replay.json"
+            output_path = tmp / "audit.json"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            output_text = output_path.read_text(encoding="utf-8")
+            audit = json.loads(output_text)
+            row = audit[0]
+            self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+            self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"]))
+            self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+            self.assertNotIn("source_private_project", output_text)
+            self.assertNotIn("event_ordering_secret", output_text)
+            self.assertNotIn("l3_private_goal", output_text)
 
     def test_cli_merges_multiple_replay_inputs_and_marks_evidence_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,7 +835,8 @@ class RuleAuditTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
 
             self.assertEqual([row["rule_id"] for row in rows], ["rule.delta", "rule.gamma"])
-            self.assertEqual(rows[0]["candidate_sources"], "source_c")
+            self.assertNotEqual(rows[0]["candidate_sources"], "source_c")
+            self.assertEqual(len(rows[0]["candidate_sources"]), 12)
             self.assertEqual(rows[0]["evidence_inputs"], str(input_path))
 
 

@@ -205,6 +205,63 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(hit.impact, "selected")
         self.assertEqual(hit.metadata, {"decision": "selected"})
 
+    def test_rule_definition_declares_protection_and_duplicates(self) -> None:
+        protected = RuleDefinition(
+            rule_id="current_value.stale_history_marker",
+            module="m",
+            purpose="drop stale current-value history",
+            category="high_risk",
+            ability="current_value",
+            protected=True,
+            protected_reason="high_precision_current_value",
+        )
+        duplicate = RuleDefinition(
+            rule_id="current_value.stale_history_marker.cn_alias",
+            module="m",
+            purpose="duplicate Chinese alias",
+            category="current_value",
+            duplicate_of="current_value.stale_history_marker",
+        )
+
+        self.assertTrue(protected.protected)
+        self.assertEqual(protected.protected_reason, "high_precision_current_value")
+        self.assertEqual(duplicate.duplicate_of, "current_value.stale_history_marker")
+
+    def test_record_rule_hit_accepts_sanitized_provider_and_lifecycle_dimensions(self) -> None:
+        hit = record_rule_hit(
+            "current_value.stale_history_marker",
+            query="What is my current database?",
+            text="I now use PostgreSQL.",
+            stage="evidence_pack_filter",
+            provider_id="l3_current_view",
+            lifecycle_stage="selected",
+            lifecycle_reason="views",
+            metadata={"note": "I now use PostgreSQL."},
+        )
+
+        self.assertEqual(hit.provider_id, "l3_current_view")
+        self.assertEqual(hit.lifecycle_stage, "selected")
+        self.assertEqual(hit.lifecycle_reason, "views")
+        self.assertRegex(str(hit.metadata["note"]), r"^[0-9a-f]{12}$")
+        self.assertNotIn("PostgreSQL", repr(hit.metadata))
+
+    def test_record_rule_hit_hashes_raw_provider_and_lifecycle_dimensions(self) -> None:
+        hit = record_rule_hit(
+            "current_value.stale_history_marker",
+            query="What is my current database?",
+            text="I now use PostgreSQL.",
+            stage="evidence_pack_filter",
+            provider_id="private provider PostgreSQL",
+            lifecycle_stage="数据库 selected",
+            lifecycle_reason="current database is PostgreSQL",
+        )
+
+        self.assertRegex(str(hit.provider_id), r"^[0-9a-f]{12}$")
+        self.assertRegex(str(hit.lifecycle_stage), r"^[0-9a-f]{12}$")
+        self.assertRegex(str(hit.lifecycle_reason), r"^[0-9a-f]{12}$")
+        self.assertNotIn("PostgreSQL", repr(hit))
+        self.assertNotIn("数据库", repr(hit))
+
     def test_collect_rule_hits_isolates_and_clears_on_exception(self) -> None:
         record_rule_hit(
             rule_id="outer.rule",
@@ -275,6 +332,73 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(audit[1]["rule_id"], "zh.recall")
         self.assertEqual(audit[1]["hit_count"], 0)
 
+    def test_registered_rule_audit_reports_provider_and_lifecycle_dimensions(self) -> None:
+        rules = [
+            RuleDefinition(
+                rule_id="event.order",
+                module="m",
+                purpose="event order",
+                category="event_ordering",
+                ability="event_ordering",
+            ),
+        ]
+        hits = [
+            {
+                "rule_id": "event.order",
+                "provider_id": "views",
+                "lifecycle_stage": "selected",
+                "lifecycle_reason": "views",
+            },
+            {
+                "rule_id": "event.order",
+                "provider_id": "l3_current_view",
+                "lifecycle_stage": "selected",
+                "lifecycle_reason": "event_ordering_coverage",
+            },
+            {
+                "rule_id": "event.order",
+                "provider_id": ["raw provider value"],
+                "lifecycle_stage": None,
+                "lifecycle_reason": {"raw": "value"},
+            },
+        ]
+
+        audit = build_rule_audit(rules, hits)
+        row = audit[0]
+
+        self.assertEqual(row["provider_ids"], ["l3_current_view", "views"])
+        self.assertEqual(row["lifecycle_stages"], ["selected"])
+        self.assertEqual(row["lifecycle_reasons"], ["event_ordering_coverage", "views"])
+
+    def test_registered_rule_audit_hashes_raw_provider_and_lifecycle_dimensions(self) -> None:
+        rules = [
+            RuleDefinition(
+                rule_id="event.order",
+                module="m",
+                purpose="event order",
+                category="event_ordering",
+                ability="event_ordering",
+            ),
+        ]
+        hits = [
+            {
+                "rule_id": "event.order",
+                "provider_id": "private provider PostgreSQL",
+                "lifecycle_stage": "数据库 selected",
+                "lifecycle_reason": "source_private_project",
+            }
+        ]
+
+        audit = build_rule_audit(rules, hits)
+        row = audit[0]
+
+        self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+        self.assertNotIn("private provider PostgreSQL", repr(row))
+        self.assertNotIn("数据库 selected", repr(row))
+        self.assertNotIn("source_private_project", repr(row))
+
     def test_registered_rule_audit_marks_zero_hit_rules_for_first_pass_cleanup(self) -> None:
         rules = [
             RuleDefinition(
@@ -298,6 +422,9 @@ class RuleRegistryTests(unittest.TestCase):
         zero_hit = next(row for row in audit if row["rule_id"] == "zh.recall")
 
         self.assertIsNone(zero_hit["duplicate_of"])
+        self.assertEqual(zero_hit["provider_ids"], [])
+        self.assertEqual(zero_hit["lifecycle_stages"], [])
+        self.assertEqual(zero_hit["lifecycle_reasons"], [])
         self.assertEqual(zero_hit["cleanup_phase"], "first_pass")
         self.assertEqual(zero_hit["cleanup_action"], "delete_no_hits")
         self.assertTrue(zero_hit["safe_to_delete"])
@@ -319,6 +446,41 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertFalse(legacy["candidate_for_deletion"])
         self.assertEqual(legacy["cleanup_action"], "keep_shadow")
         self.assertFalse(legacy["safe_to_delete"])
+
+    def test_registered_rule_audit_keeps_protected_zero_hit_rules(self) -> None:
+        rules = [
+            RuleDefinition(
+                rule_id="current_value.stale_history_marker",
+                module="m",
+                purpose="drop stale current-value history",
+                category="high_risk",
+                ability="current_value",
+                protected=True,
+                protected_reason="high_precision_current_value",
+            ),
+            RuleDefinition(
+                rule_id="current_value.stale_history_marker.cn_alias",
+                module="m",
+                purpose="duplicate Chinese alias",
+                category="current_value",
+                duplicate_of="current_value.stale_history_marker",
+            ),
+        ]
+
+        audit = build_rule_audit(rules, [])
+        protected = next(row for row in audit if row["rule_id"] == "current_value.stale_history_marker")
+        duplicate = next(row for row in audit if row["rule_id"] == "current_value.stale_history_marker.cn_alias")
+
+        self.assertTrue(protected["protected"])
+        self.assertEqual(protected["protected_reason"], "high_precision_current_value")
+        self.assertIsNone(protected["duplicate_of"])
+        self.assertFalse(protected["candidate_for_deletion"])
+        self.assertEqual(protected["cleanup_phase"], "")
+        self.assertEqual(protected["cleanup_action"], "keep_protected")
+        self.assertFalse(protected["safe_to_delete"])
+        self.assertEqual(duplicate["duplicate_of"], "current_value.stale_history_marker")
+        self.assertEqual(duplicate["cleanup_action"], "delete_duplicate")
+        self.assertTrue(duplicate["safe_to_delete"])
 
 
 class RuleInstrumentationTests(unittest.TestCase):

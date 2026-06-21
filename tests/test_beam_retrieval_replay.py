@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tools.beam_retrieval_replay as replay
+from tools.rule_audit import build_rule_audit
 
 
 class BeamRetrievalReplayTests(unittest.TestCase):
@@ -277,6 +278,81 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertEqual(lifecycle["source_counts"]["l0_raw_hybrid"], 2)
         self.assertNotIn("raw_text", lifecycle)
         self.assertNotIn("do not persist", json.dumps(payload, ensure_ascii=False))
+
+    def test_run_replay_output_preserves_rule_audit_dimensions(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "candidate_lifecycle": {
+                    "record_count": 1,
+                    "records": [
+                        {
+                            "candidate_id": "candidate-1",
+                            "candidate_source": "l3_current_view",
+                            "candidate_type": "span",
+                            "stage": "selected",
+                            "reason_code": "views",
+                            "source_span_ids": ["span_1"],
+                            "scores": {"utility_score": 0.9},
+                            "contributed": True,
+                            "text": "raw candidate text must not persist",
+                        }
+                    ],
+                },
+                "rule_hits": [
+                    {
+                        "rule_id": "rule.audit_dimensions",
+                        "contributed_candidate_id": "candidate-1",
+                        "provider_id": "views",
+                        "lifecycle_stage": "selected",
+                        "lifecycle_reason": "views",
+                        "protected": True,
+                        "protected_reason": "high_precision_current_value",
+                        "impact": "selected",
+                        "text": "raw hit text must not persist",
+                    }
+                ],
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        record = payload["records"][0]
+        hit = record["rule_hits"][0]
+        lifecycle_record = record["candidate_lifecycle"]["records"][0]
+        audit = build_rule_audit(payload["records"])
+        row = next(item for item in audit if item["rule_id"] == "rule.audit_dimensions")
+
+        self.assertEqual(hit["provider_id"], "views")
+        self.assertEqual(hit["lifecycle_stage"], "selected")
+        self.assertEqual(hit["lifecycle_reason"], "views")
+        self.assertTrue(hit["protected"])
+        self.assertEqual(hit["protected_reason"], "high_precision_current_value")
+        self.assertEqual(lifecycle_record["candidate_id"], "candidate-1")
+        self.assertEqual(lifecycle_record["stage"], "selected")
+        self.assertEqual(lifecycle_record["reason_code"], "views")
+        self.assertEqual(row["provider_ids"], ["views"])
+        self.assertEqual(row["lifecycle_stages"], ["selected"])
+        self.assertEqual(row["lifecycle_reasons"], ["views"])
+        self.assertTrue(row["protected"])
+        self.assertEqual(row["protected_reason"], "high_precision_current_value")
+        self.assertFalse(row["safe_to_delete"])
+        self.assertNotIn("raw candidate text", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn("raw hit text", json.dumps(payload, ensure_ascii=False))
 
     def test_run_replay_sanitizes_rule_hits_before_writing(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
