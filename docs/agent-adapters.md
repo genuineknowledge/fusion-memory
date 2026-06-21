@@ -32,11 +32,19 @@ checkouts return `ok=false` with recovery guidance instead of raw runtime logs.
 runtime exposes that information. Repository source files are not enough to make
 the runtime smoke pass.
 
-OpenClaw and Hermes need an adapter-level smoke command because Fusion Memory
-cannot safely prove that their runtime used the installed adapter by talking to
-the Fusion Memory HTTP API directly. Configure one of these environment
-variables with a command that exercises the target adapter and prints JSON with
-explicit `write_smoke` and `retrieve_smoke` boolean fields:
+OpenClaw, Hermes, and Fusion-Agent include built-in write/retrieve smoke paths.
+OpenClaw first asks the host to inspect the `fusion-memory` plugin with
+`openclaw plugins inspect fusion-memory --runtime --json`, then runs the
+external plugin's `smoke.mjs` script, which executes the same registered
+`fusion_memory_store` and `fusion_memory_search` tool handlers. Hermes loads the
+installed `fusion_memory` provider from the runtime plugin directory and calls
+its store/search tool methods. Fusion-Agent imports its in-repo memory adapter.
+A passing report means both `write_smoke` and `retrieve_smoke` were explicitly
+verified through the adapter path.
+
+For custom host deployments, override the built-in smoke with an adapter-level
+command that exercises the target adapter and prints JSON with explicit
+`write_smoke` and `retrieve_smoke` boolean fields:
 
 ```bash
 export FUSION_MEMORY_OPENCLAW_SMOKE_COMMAND="openclaw fusion-memory-smoke"
@@ -44,10 +52,10 @@ export FUSION_MEMORY_HERMES_SMOKE_COMMAND="hermes fusion-memory-smoke"
 export FUSION_MEMORY_FUSION_AGENT_SMOKE_COMMAND="python3 path/to/fusion-agent-smoke.py"
 ```
 
-The smoke harness passes the selected service URL to the command as
-`FUSION_MEMORY_SMOKE_MEMORY_URL`. If OpenClaw or Hermes has no configured smoke
-command, the report returns `ok=false`, `write_smoke=false`, and
-`retrieve_smoke=false` with a safe unverified message.
+The smoke harness passes the selected service URL to an override command as
+`FUSION_MEMORY_SMOKE_MEMORY_URL`. If a built-in or override smoke cannot run,
+the report returns `ok=false`, `write_smoke=false`, and `retrieve_smoke=false`
+with a beginner-safe recovery message.
 
 OpenClaw and Hermes are installed as external plugins. Their source checkouts
 are not modified in stage one.

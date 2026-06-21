@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import shlex
@@ -64,12 +65,8 @@ def run_smoke(target: str, *, memory_url: str, timeout: int = DEFAULT_TIMEOUT_SE
         report.update(_run_fusion_agent_adapter_smoke(memory_url=memory_url, timeout=timeout))
         return _normalize_report(target, report)
 
-    report["message"] = (
-        f"{_display_name(target)} host and installed plugin were found, but runtime smoke is not configured or verified. "
-        f"Set {SMOKE_COMMAND_ENV[target]} to an adapter-level smoke command that prints JSON with "
-        "write_smoke and retrieve_smoke."
-    )
-    return report
+    report.update(_run_builtin_adapter_smoke(target, memory_url=memory_url, timeout=timeout))
+    return _normalize_report(target, report)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -195,9 +192,9 @@ def _run_command_smoke(target: str, command: list[str], *, memory_url: str, time
         return {"message": f"{_display_name(target)} adapter runtime smoke could not be started. Check the command and run fusion-memory doctor."}
 
     parsed = _parse_command_report(completed.stdout)
-    if completed.returncode != 0:
-        return {"message": f"{_display_name(target)} adapter runtime smoke failed. Run fusion-memory doctor."}
     if not parsed:
+        if completed.returncode != 0:
+            return {"message": f"{_display_name(target)} adapter runtime smoke failed. Run fusion-memory doctor."}
         return {
             "message": (
                 f"{_display_name(target)} adapter runtime smoke exited successfully, but did not print JSON "
@@ -207,18 +204,17 @@ def _run_command_smoke(target: str, command: list[str], *, memory_url: str, time
 
     write_smoke = parsed.get("write_smoke") is True
     retrieve_smoke = parsed.get("retrieve_smoke") is True
+    process_ok = completed.returncode == 0
+    fallback_message = (
+        f"{_display_name(target)} adapter runtime smoke completed."
+        if process_ok and write_smoke and retrieve_smoke
+        else f"{_display_name(target)} adapter runtime smoke did not explicitly verify write and retrieve."
+    )
     return {
-        "write_smoke": write_smoke,
-        "retrieve_smoke": retrieve_smoke,
-        "ok": write_smoke and retrieve_smoke,
-        "message": (
-            str(parsed.get("message") or f"{_display_name(target)} adapter runtime smoke completed.")
-            if write_smoke and retrieve_smoke
-            else str(
-                parsed.get("message")
-                or f"{_display_name(target)} adapter runtime smoke did not explicitly verify write and retrieve."
-            )
-        ),
+        "write_smoke": process_ok and write_smoke,
+        "retrieve_smoke": process_ok and retrieve_smoke,
+        "ok": process_ok and write_smoke and retrieve_smoke,
+        "message": _safe_adapter_message(parsed.get("message"), fallback_message),
     }
 
 
@@ -228,6 +224,126 @@ def _parse_command_report(stdout: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _safe_adapter_message(value: Any, fallback: str) -> str:
+    message = str(value or fallback).strip()
+    unsafe_markers = ("traceback", "exception", "error:", "errno", "econnrefused", "secret", "\n")
+    if not message or any(marker in message.lower() for marker in unsafe_markers):
+        return fallback
+    return message[:240]
+
+
+def _run_builtin_adapter_smoke(target: str, *, memory_url: str, timeout: int) -> dict[str, Any]:
+    if target == "openclaw":
+        return _run_openclaw_plugin_smoke(memory_url=memory_url, timeout=timeout)
+    if target == "hermes":
+        return _run_hermes_provider_smoke(memory_url=memory_url, timeout=timeout)
+    return {"message": f"{_display_name(target)} adapter runtime smoke is not available. Run fusion-memory doctor."}
+
+
+def _run_openclaw_plugin_smoke(*, memory_url: str, timeout: int) -> dict[str, Any]:
+    node = shutil.which("node")
+    smoke_script = REPO_ROOT / "integrations" / "openclaw-fusion-memory" / "smoke.mjs"
+    if node is None or not smoke_script.exists():
+        return {
+            "message": (
+                "OpenClaw Fusion Memory plugin smoke could not run. Install Node.js, reinstall the plugin, "
+                "then run fusion-memory doctor."
+            )
+        }
+    runtime_ok, runtime_message = _openclaw_runtime_tools_available(timeout=timeout)
+    if not runtime_ok:
+        return {"message": runtime_message}
+    return _run_command_smoke("openclaw", [node, str(smoke_script)], memory_url=memory_url, timeout=timeout)
+
+
+def _openclaw_runtime_tools_available(*, timeout: int) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            ["openclaw", "plugins", "inspect", "fusion-memory", "--runtime", "--json"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=min(max(timeout, 1), 10),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        return (
+            False,
+            "OpenClaw could not inspect the Fusion Memory plugin runtime. Reinstall the plugin, restart OpenClaw, then run fusion-memory doctor.",
+        )
+    if completed.returncode != 0:
+        return (
+            False,
+            "OpenClaw did not load the Fusion Memory plugin runtime. Reinstall the plugin, restart OpenClaw, then run fusion-memory doctor.",
+        )
+    output = completed.stdout.lower()
+    required = ("fusion_memory_store", "fusion_memory_search")
+    if all(name in output for name in required):
+        return True, "OpenClaw Fusion Memory plugin runtime tools are visible."
+    return (
+        False,
+        "OpenClaw loaded the plugin, but Fusion Memory tools were not visible. Reinstall the plugin, restart OpenClaw, then run fusion-memory doctor.",
+    )
+
+
+def _run_hermes_provider_smoke(*, memory_url: str, timeout: int) -> dict[str, Any]:
+    plugin_dir = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")).expanduser() / "plugins" / "fusion_memory"
+    plugin_file = plugin_dir / "__init__.py"
+    if not plugin_file.exists():
+        return {
+            "message": "Hermes Fusion Memory provider is not installed. Run fusion-memory install-agent --target hermes."
+        }
+    token = f"hermes-smoke-{uuid.uuid4().hex}"
+    previous_env = {
+        "FUSION_MEMORY_BASE_URL": os.environ.get("FUSION_MEMORY_BASE_URL"),
+        "FUSION_MEMORY_TIMEOUT_SECONDS": os.environ.get("FUSION_MEMORY_TIMEOUT_SECONDS"),
+    }
+    try:
+        os.environ["FUSION_MEMORY_BASE_URL"] = memory_url
+        os.environ["FUSION_MEMORY_TIMEOUT_SECONDS"] = str(timeout)
+        provider_cls = _load_hermes_provider_class(plugin_file)
+        provider = provider_cls()
+        provider.initialize("agent-runtime-smoke", agent_workspace="agent-runtime-smoke", user_id="smoke-user")
+        write_payload = json.loads(provider.handle_tool_call("fusion_memory_store", {"content": f"Hermes runtime smoke token: {token}"}))
+        retrieve_payload = json.loads(
+            provider.handle_tool_call("fusion_memory_search", {"query": f"Find Hermes runtime smoke token {token}", "limit": 3})
+        )
+        write_smoke = write_payload.get("ok") is True and write_payload.get("saved") is True
+        retrieve_smoke = token in json.dumps(retrieve_payload, ensure_ascii=False)
+        return {
+            "write_smoke": write_smoke,
+            "retrieve_smoke": retrieve_smoke,
+            "ok": write_smoke and retrieve_smoke,
+            "message": (
+                "Hermes adapter runtime smoke completed."
+                if write_smoke and retrieve_smoke
+                else "Hermes adapter runtime smoke did not verify write and retrieve. Run fusion-memory doctor."
+            ),
+        }
+    except Exception:
+        return {
+            "message": (
+                "Hermes adapter runtime smoke could not verify memory through the provider. "
+                "Start Fusion Memory and run fusion-memory doctor."
+            )
+        }
+    finally:
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _load_hermes_provider_class(plugin_file: Path) -> Any:
+    spec = importlib.util.spec_from_file_location("fusion_memory_hermes_smoke_provider", plugin_file)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("hermes provider could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.FusionMemoryProvider
 
 
 def _run_fusion_agent_adapter_smoke(*, memory_url: str, timeout: int) -> dict[str, Any]:
