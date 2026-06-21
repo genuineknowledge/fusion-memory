@@ -279,6 +279,93 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertNotIn("raw_text", lifecycle)
         self.assertNotIn("do not persist", json.dumps(payload, ensure_ascii=False))
 
+    def test_run_replay_preserves_safe_temporal_relation_telemetry(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="When is the deployment due?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "temporal_relation_summary": {
+                    "relation_count": 1,
+                    "relation_types": ["deadline"],
+                    "source_span_count": 1,
+                    "query": "When is the deployment due?",
+                },
+                "candidate_lifecycle": {
+                    "record_count": 1,
+                    "records": [
+                        {
+                            "candidate_id": "candidate-1",
+                            "candidate_source": "l3_current_view",
+                            "candidate_type": "span",
+                            "stage": "selected",
+                            "reason_code": "views",
+                            "source_span_ids": ["span_1"],
+                            "temporal_relations": [
+                                {
+                                    "relation_type": "deadline",
+                                    "confidence": 0.82,
+                                    "reason_code": "deadline_marker",
+                                    "source_span_id": "span_1",
+                                    "value_type": "date",
+                                    "normalized_date": "2026-07-01",
+                                    "text": "Deployment deadline is July 1, 2026.",
+                                    "query": "When is the deployment due?",
+                                    "context": "raw context",
+                                    "prompt": "raw prompt",
+                                    "content": "raw content",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            report = replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        record = payload["records"][0]
+        self.assertEqual(
+            record["temporal_relation_summary"],
+            {
+                "relation_count": 1,
+                "relation_types": ["deadline"],
+                "source_span_count": 1,
+            },
+        )
+        self.assertEqual(
+            record["candidate_lifecycle"]["records"][0]["temporal_relations"],
+            [
+                {
+                    "relation_type": "deadline",
+                    "confidence": 0.82,
+                    "reason_code": "deadline_marker",
+                    "source_span_id": "span_1",
+                    "value_type": "date",
+                    "normalized_date": "2026-07-01",
+                }
+            ],
+        )
+        payload_text = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("When is the deployment due?", payload_text)
+        self.assertNotIn("Deployment deadline is July 1, 2026.", payload_text)
+        self.assertNotIn("raw context", payload_text)
+        self.assertNotIn("raw prompt", payload_text)
+        self.assertNotIn("raw content", payload_text)
+        self.assertEqual(report["records"][0]["temporal_relation_summary"], record["temporal_relation_summary"])
+
     def test_run_replay_output_preserves_rule_audit_dimensions(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         fake_pack = SimpleNamespace(

@@ -41,6 +41,16 @@ _RULE_HIT_DIMENSION_KEYS = {
     "protected_reason",
 }
 
+_TEMPORAL_RELATION_SAFE_KEYS = (
+    "relation_type",
+    "confidence",
+    "reason_code",
+    "source_span_id",
+    "value_type",
+    "value_hash",
+    "normalized_date",
+)
+
 _SAFE_DIMENSION_IDENTIFIERS = {
     "aggregation_context_support",
     "aggregation_coverage",
@@ -238,6 +248,9 @@ def run_replay(
             "coverage_insufficient": bool(coverage.get("coverage_insufficient", False)),
             "pipeline_trace": _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or []),
         }
+        temporal_relation_summary = _sanitize_temporal_relation_summary(coverage.get("temporal_relation_summary"))
+        if temporal_relation_summary:
+            record["temporal_relation_summary"] = temporal_relation_summary
         lifecycle = _sanitize_candidate_lifecycle(coverage.get("candidate_lifecycle"))
         if lifecycle:
             record["candidate_lifecycle"] = lifecycle
@@ -419,6 +432,9 @@ def _sanitize_candidate_lifecycle_records(value: Any) -> list[dict[str, Any]]:
             sanitized["scores"] = scores
         if isinstance(record_dict.get("contributed"), bool):
             sanitized["contributed"] = record_dict["contributed"]
+        temporal_relations = _sanitize_temporal_relations(record_dict.get("temporal_relations"))
+        if temporal_relations:
+            sanitized["temporal_relations"] = temporal_relations
         if sanitized:
             sanitized_records.append(sanitized)
     return sanitized_records
@@ -504,6 +520,57 @@ def _sanitize_count_mapping(value: Any) -> dict[str, int | float | bool]:
         if count is not None:
             sanitized[safe_key] = count
     return sanitized
+
+
+def _sanitize_temporal_relation_summary(value: Any) -> dict[str, Any]:
+    summary = _object_dict(value)
+    if not summary:
+        return {}
+    sanitized: dict[str, Any] = {}
+    relation_count = _sanitize_count_value(summary.get("relation_count"))
+    if isinstance(relation_count, int):
+        sanitized["relation_count"] = relation_count
+    relation_types = _sanitize_identifier_list(summary.get("relation_types"))
+    if relation_types:
+        sanitized["relation_types"] = relation_types
+    source_span_count = _sanitize_count_value(summary.get("source_span_count"))
+    if isinstance(source_span_count, int):
+        sanitized["source_span_count"] = source_span_count
+    reason_codes = _sanitize_identifier_list(summary.get("reason_codes"))
+    if reason_codes:
+        sanitized["reason_codes"] = reason_codes
+    source_span_ids = _sanitize_identifier_list(summary.get("source_span_ids"))
+    if source_span_ids:
+        sanitized["source_span_ids"] = source_span_ids
+    return sanitized
+
+
+def _sanitize_temporal_relations(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sanitized_relations: list[dict[str, Any]] = []
+    for relation in value:
+        relation_dict = _object_dict(relation)
+        if not relation_dict:
+            continue
+        sanitized: dict[str, Any] = {}
+        for key in _TEMPORAL_RELATION_SAFE_KEYS:
+            item = relation_dict.get(key)
+            if item is None:
+                continue
+            if key == "confidence":
+                confidence = _sanitize_count_value(item)
+                if isinstance(confidence, bool):
+                    continue
+                if isinstance(confidence, int | float):
+                    sanitized[key] = confidence
+                continue
+            value_text = _sanitize_identifier_string(item)
+            if value_text is not None:
+                sanitized[key] = value_text
+        if sanitized:
+            sanitized_relations.append(sanitized)
+    return sanitized_relations
 
 
 def _sanitize_selected_sources(value: Any) -> list[dict[str, Any]]:
