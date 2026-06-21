@@ -205,6 +205,46 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(hit.impact, "selected")
         self.assertEqual(hit.metadata, {"decision": "selected"})
 
+    def test_rule_definition_declares_protection_and_duplicates(self) -> None:
+        protected = RuleDefinition(
+            rule_id="current_value.stale_history_marker",
+            module="m",
+            purpose="drop stale current-value history",
+            category="high_risk",
+            ability="current_value",
+            protected=True,
+            protected_reason="high_precision_current_value",
+        )
+        duplicate = RuleDefinition(
+            rule_id="current_value.stale_history_marker.cn_alias",
+            module="m",
+            purpose="duplicate Chinese alias",
+            category="current_value",
+            duplicate_of="current_value.stale_history_marker",
+        )
+
+        self.assertTrue(protected.protected)
+        self.assertEqual(protected.protected_reason, "high_precision_current_value")
+        self.assertEqual(duplicate.duplicate_of, "current_value.stale_history_marker")
+
+    def test_record_rule_hit_accepts_sanitized_provider_and_lifecycle_dimensions(self) -> None:
+        hit = record_rule_hit(
+            "current_value.stale_history_marker",
+            query="What is my current database?",
+            text="I now use PostgreSQL.",
+            stage="evidence_pack_filter",
+            provider_id="l3_current_view",
+            lifecycle_stage="selected",
+            lifecycle_reason="views",
+            metadata={"note": "I now use PostgreSQL."},
+        )
+
+        self.assertEqual(hit.provider_id, "l3_current_view")
+        self.assertEqual(hit.lifecycle_stage, "selected")
+        self.assertEqual(hit.lifecycle_reason, "views")
+        self.assertRegex(str(hit.metadata["note"]), r"^[0-9a-f]{12}$")
+        self.assertNotIn("PostgreSQL", repr(hit.metadata))
+
     def test_collect_rule_hits_isolates_and_clears_on_exception(self) -> None:
         record_rule_hit(
             rule_id="outer.rule",

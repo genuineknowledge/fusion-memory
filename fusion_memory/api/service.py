@@ -153,6 +153,9 @@ register_rule(
         purpose="track legacy event-ordering fallback candidates selected instead of graph-first path",
         category="high_risk",
         pattern="graph_fallback|legacy_fallback",
+        ability="event_ordering",
+        protected=True,
+        protected_reason="legacy_event_ordering_fallback",
     )
 )
 

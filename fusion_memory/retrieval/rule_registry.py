@@ -17,6 +17,9 @@ class RuleDefinition:
     pattern: str | None = None
     owner: str = "retrieval"
     ability: str = "general"
+    protected: bool = False
+    protected_reason: str = ""
+    duplicate_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class RuleHit:
     metadata: dict[str, object] = field(default_factory=dict)
     contributed: bool | None = None
     impact: str = "observed"
+    provider_id: str | None = None
+    lifecycle_stage: str | None = None
+    lifecycle_reason: str | None = None
 
 
 _RULE_REGISTRY: dict[str, RuleDefinition] = {}
@@ -80,6 +86,7 @@ _PLAINTEXT_METADATA_STRINGS = {
     "span_1",
     "suppress",
     "test_exception_cleanup",
+    "views",
 }
 _PLAINTEXT_METADATA_KEY_VALUES = {
     "category": {
@@ -145,6 +152,9 @@ def record_rule_hit(
     *,
     contributed: bool | None = None,
     impact: str = "observed",
+    provider_id: str | None = None,
+    lifecycle_stage: str | None = None,
+    lifecycle_reason: str | None = None,
 ) -> RuleHit:
     hit = RuleHit(
         rule_id=rule_id,
@@ -155,6 +165,9 @@ def record_rule_hit(
         metadata=_sanitize_metadata(metadata),
         contributed=contributed,
         impact=impact,
+        provider_id=_safe_identifier(provider_id),
+        lifecycle_stage=_safe_identifier(lifecycle_stage),
+        lifecycle_reason=_safe_identifier(lifecycle_reason),
     )
     _current_hits().append(hit)
     return hit
@@ -239,6 +252,13 @@ def _sanitize_metadata_value(value: object, key: str | None = None) -> object:
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return _hash_metadata_value(value)
+
+
+def _safe_identifier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if _is_safe_metadata_string(text) else _hash_metadata_value(text)
 
 
 def _is_safe_metadata_string(value: str, key: str | None = None) -> bool:

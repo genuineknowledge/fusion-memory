@@ -51,6 +51,9 @@ register_rule(
         purpose="drop stale historical spans when resolving current value",
         category="high_risk",
         pattern="initially|previously|formerly|原来|曾经",
+        ability="current_value",
+        protected=True,
+        protected_reason="high_precision_current_value",
     )
 )
 
