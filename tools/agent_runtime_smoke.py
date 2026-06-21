@@ -50,7 +50,7 @@ def run_smoke(target: str, *, memory_url: str, timeout: int = DEFAULT_TIMEOUT_SE
         report["message"] = host_message
         return report
 
-    plugin_available, plugin_message = _plugin_available(target)
+    plugin_available, plugin_message = _plugin_available(target, timeout=timeout)
     report["plugin_available"] = plugin_available
     if not plugin_available:
         report["message"] = plugin_message
@@ -112,9 +112,9 @@ def _host_available(target: str) -> tuple[bool, str]:
     return False, f"Fusion-Agent checkout was not found at {root}. Set FUSION_AGENT_ROOT or clone Fusion-Agent before running the smoke."
 
 
-def _plugin_available(target: str) -> tuple[bool, str]:
+def _plugin_available(target: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> tuple[bool, str]:
     if target == "openclaw":
-        return _openclaw_plugin_available()
+        return _openclaw_plugin_available(timeout=timeout)
     if target == "hermes":
         hermes_plugin = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")).expanduser() / "plugins" / "fusion_memory"
         ok = (hermes_plugin / "__init__.py").exists()
@@ -135,14 +135,14 @@ def _plugin_available(target: str) -> tuple[bool, str]:
     )
 
 
-def _openclaw_plugin_available() -> tuple[bool, str]:
+def _openclaw_plugin_available(*, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> tuple[bool, str]:
     try:
         completed = subprocess.run(
             ["openclaw", "plugins", "list"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=3,
+            timeout=min(max(timeout, 1), 30),
             check=False,
         )
     except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):

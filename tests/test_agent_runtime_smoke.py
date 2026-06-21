@@ -104,6 +104,22 @@ class AgentRuntimeSmokeTests(unittest.TestCase):
         builtin.assert_called_once()
         self.assertEqual(builtin.call_args.args[0], "openclaw")
 
+    def test_openclaw_plugin_check_uses_runtime_timeout_budget(self) -> None:
+        completed = CompletedProcess(
+            args=["openclaw", "plugins", "list"],
+            returncode=0,
+            stdout="Fusion Memory plugin is enabled",
+            stderr="",
+        )
+        with (
+            patch("tools.agent_runtime_smoke._host_available", return_value=(True, "host ok")),
+            patch("tools.agent_runtime_smoke.subprocess.run", return_value=completed) as run,
+            patch.dict(os.environ, {"FUSION_MEMORY_OPENCLAW_SMOKE_COMMAND": "fake-smoke"}, clear=True),
+        ):
+            smoke.run_smoke("openclaw", memory_url="http://127.0.0.1:8765", timeout=12)
+
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 12)
+
     def test_openclaw_builtin_smoke_requires_runtime_tool_inspection(self) -> None:
         with (
             patch("tools.agent_runtime_smoke._openclaw_runtime_tools_available", return_value=(False, "runtime missing")),
