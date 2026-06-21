@@ -256,6 +256,57 @@ class RetrievalPipelineTests(unittest.TestCase):
         self.assertEqual(payload["pipeline_layers"]["CandidateFusion"]["selected_sources"], ["l3_current_view"])
         self.assertNotIn("raw secret text", repr(payload))
 
+    def test_build_pipeline_record_can_include_sanitized_provider_summary(self) -> None:
+        recalled = [
+            Candidate("c1", "span", "raw secret text zinc-sparrow-17", "l0_raw", {"utility_score": 0.8}, ["s1"], {}),
+        ]
+
+        record = build_pipeline_record(
+            "fact_lookup",
+            "benchmark",
+            language="en",
+            intent="fact_lookup",
+            features=[],
+            recalled=recalled,
+            selected=recalled,
+            dropped_count=0,
+            source_span_count=1,
+            coverage_insufficient=False,
+            provider_summary=[
+                {
+                    "provider_id": "raw_exact",
+                    "source_family": "raw",
+                    "output_count": "1",
+                    "output_source_counts": {"l0_raw": "1"},
+                    "production_default": 1,
+                    "shadow_only": 0,
+                    "graph_related": False,
+                    "sample_text": "raw secret text zinc-sparrow-17",
+                    "raw_query": "private query zinc-sparrow-17",
+                }
+            ],
+        )
+        payload = record.to_dict()
+
+        self.assertEqual(
+            payload["pipeline_layers"]["CandidateRecall"]["provider_summary"],
+            [
+                {
+                    "provider_id": "raw_exact",
+                    "source_family": "raw",
+                    "output_count": 1,
+                    "output_source_counts": {"l0_raw": 1},
+                    "production_default": True,
+                    "shadow_only": False,
+                    "graph_related": False,
+                }
+            ],
+        )
+        self.assertEqual(payload["candidate_recall"], payload["pipeline_layers"]["CandidateRecall"])
+        self.assertNotIn("sample_text", repr(payload))
+        self.assertNotIn("raw_query", repr(payload))
+        self.assertNotIn("zinc-sparrow-17", repr(payload))
+
     def test_build_pipeline_record_can_include_temporal_relation_summary(self) -> None:
         record = build_pipeline_record(
             "temporal_lookup",

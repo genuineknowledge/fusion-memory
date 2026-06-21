@@ -270,9 +270,13 @@ def _safe_provider_summary(summary: dict[str, Any]) -> dict[str, Any]:
 @dataclass(frozen=True)
 class CandidateRecallRecord:
     source_counts: dict[str, int]
+    provider_summary: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {"source_counts": dict(self.source_counts)}
+        record: dict[str, Any] = {"source_counts": dict(self.source_counts)}
+        if self.provider_summary:
+            record["provider_summary"] = [dict(item) for item in self.provider_summary]
+        return record
 
 
 @dataclass(frozen=True)
@@ -384,6 +388,7 @@ def build_pipeline_record(
     source_span_count: int,
     coverage_insufficient: bool,
     temporal_relation_summary: dict[str, object] | None = None,
+    provider_summary: list[dict[str, object]] | None = None,
 ) -> RetrievalPipelineRecord:
     source_counts: dict[str, int] = {}
     for candidate in recalled:
@@ -397,7 +402,10 @@ def build_pipeline_record(
             intent=intent,
             features=tuple(features),
         ),
-        candidate_recall=CandidateRecallRecord(source_counts=source_counts),
+        candidate_recall=CandidateRecallRecord(
+            source_counts=source_counts,
+            provider_summary=tuple(_safe_provider_summary(item) for item in (provider_summary or [])),
+        ),
         candidate_fusion=CandidateFusionRecord(
             selected_sources=selected_sources,
             dropped_count=dropped_count,

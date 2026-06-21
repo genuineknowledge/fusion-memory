@@ -569,6 +569,7 @@ class MemoryService:
             source_span_count=len(quota_result.selected_span_ids),
             coverage_insufficient=quota_result.coverage_insufficient,
             temporal_relation_summary=selected_temporal_relation_summary(selected),
+            provider_summary=recall_result.provider_summary,
         )
         pipeline_trace = RetrievalTraceRecorder(pipeline_record).flush()
         coverage["pipeline_trace"] = pipeline_trace

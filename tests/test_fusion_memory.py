@@ -752,9 +752,11 @@ class FusionMemoryTests(unittest.TestCase):
     def test_search_trace_contains_retrieval_pipeline_sections(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="ws-trace", user_id="u", agent_id="a")
+        raw_memory_text = "I now prefer PostgreSQL for the memory database."
+        raw_query_text = "What database do I currently prefer?"
         try:
-            memory.add({"role": "user", "content": "I now prefer PostgreSQL for the memory database."}, scope)
-            result = memory.search("What database do I currently prefer?", scope)
+            memory.add({"role": "user", "content": raw_memory_text}, scope)
+            result = memory.search(raw_query_text, scope)
             trace = memory.store.get_trace(result.trace_id, scope)
 
             retrieval_trace = trace["retrieval_trace"]
@@ -765,6 +767,15 @@ class FusionMemoryTests(unittest.TestCase):
             self.assertIn("pipeline_layers", retrieval_trace)
             self.assertIn("QueryUnderstanding", retrieval_trace["pipeline_layers"])
             self.assertIn("CandidateRecall", retrieval_trace["pipeline_layers"])
+            candidate_recall = retrieval_trace["pipeline_layers"]["CandidateRecall"]
+            self.assertIn("provider_summary", candidate_recall)
+            self.assertTrue(candidate_recall["provider_summary"])
+            self.assertEqual(
+                candidate_recall["provider_summary"],
+                result.coverage["pipeline_trace"]["pipeline_layers"]["CandidateRecall"]["provider_summary"],
+            )
+            self.assertNotIn(raw_memory_text, repr(candidate_recall))
+            self.assertNotIn(raw_query_text, repr(candidate_recall))
         finally:
             memory.close()
 
