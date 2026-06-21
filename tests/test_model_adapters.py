@@ -292,6 +292,24 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertTrue(embedder.calls)
             self.assertTrue(any(request["path"] == "/embed" for request in server.requests))
 
+    def test_http_embedding_client_can_send_dashscope_dimensions(self) -> None:
+        with FakeModelServer() as server:
+            embedder = HTTPEmbeddingClient(
+                server.url("/embed"),
+                model="text-embedding-v4",
+                dimensions=1024,
+                encoding_format="float",
+            )
+
+            embeddings = embedder.embed_texts(["中文检索", "dense retrieval"])
+
+        self.assertEqual(len(embeddings), 2)
+        request_payload = server.requests[-1]["json"]
+        self.assertEqual(request_payload["model"], "text-embedding-v4")
+        self.assertEqual(request_payload["input"], ["中文检索", "dense retrieval"])
+        self.assertEqual(request_payload["dimensions"], 1024)
+        self.assertEqual(request_payload["encoding_format"], "float")
+
     def test_http_reranker_is_used_in_balanced_mode(self) -> None:
         with FakeModelServer() as server:
             reranker = HTTPReranker(server.url("/rerank"), model="test-rerank")
@@ -307,12 +325,25 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertTrue(reranker.calls)
             self.assertTrue(any(request["path"] == "/rerank" for request in server.requests))
 
+    def test_http_reranker_accepts_dashscope_results_shape(self) -> None:
+        with FakeModelServer() as server:
+            reranker = HTTPReranker(server.url("/dashscope-rerank"), model="qwen3-rerank")
+
+            scores = reranker.score("dense retrieval", ["dense retrieval notes", "unrelated billing notes"])
+
+        self.assertEqual(scores, [0.91, 0.12])
+        request_payload = server.requests[-1]["json"]
+        self.assertEqual(request_payload["model"], "qwen3-rerank")
+        self.assertEqual(request_payload["query"], "dense retrieval")
+        self.assertEqual(request_payload["documents"], ["dense retrieval notes", "unrelated billing notes"])
+
     def test_runtime_config_wires_http_model_adapters_from_env(self) -> None:
         with FakeModelServer() as server:
             env = {
                 "FUSION_MEMORY_EMBEDDING_PROVIDER": "http",
                 "FUSION_MEMORY_EMBEDDING_ENDPOINT": server.url("/embed"),
                 "FUSION_MEMORY_EMBEDDING_MODEL": "env-embed",
+                "FUSION_MEMORY_EMBEDDING_DIMENSION": "1024",
                 "FUSION_MEMORY_RERANKER_PROVIDER": "http",
                 "FUSION_MEMORY_RERANKER_ENDPOINT": server.url("/rerank"),
                 "FUSION_MEMORY_RERANKER_MODEL": "env-rerank",
@@ -335,6 +366,7 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertIn("/embed", paths)
             self.assertIn("/rerank", paths)
             self.assertTrue(any(request["json"].get("model") == "env-embed" for request in server.requests))
+            self.assertTrue(any(request["json"].get("dimensions") == 1024 for request in server.requests if request["path"] == "/embed"))
             self.assertTrue(any(request["json"].get("model") == "env-rerank" for request in server.requests))
             self.assertTrue(any(request["json"].get("model") == "env-extractor" for request in server.requests))
 
@@ -6082,6 +6114,14 @@ class FakeModelServer:
                 elif handler_self.path == "/rerank":
                     docs = payload["documents"]
                     response = {"scores": [float(index + 1) for index, _ in enumerate(docs)]}
+                elif handler_self.path == "/dashscope-rerank":
+                    response = {
+                        "results": [
+                            {"index": 1, "relevance_score": 0.12},
+                            {"index": 0, "relevance_score": 0.91},
+                        ],
+                        "usage": {"total_tokens": 2},
+                    }
                 elif handler_self.path == "/answer":
                     response = {
                         "choices": [{"message": {"content": json.dumps({"answer": "Qdrant"})}}],

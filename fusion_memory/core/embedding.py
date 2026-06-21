@@ -62,11 +62,15 @@ class HTTPEmbeddingClient:
         api_key: str | None = None,
         model: str = "local-embedding",
         timeout_seconds: float = 30.0,
+        dimensions: int | None = None,
+        encoding_format: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.dimensions = dimensions
+        self.encoding_format = encoding_format
         self.calls: list[dict[str, object]] = []
         self.version = f"http-embedding:{model}"
 
@@ -76,6 +80,10 @@ class HTTPEmbeddingClient:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         started = time.perf_counter()
         payload = {"model": self.model, "input": texts}
+        if self.dimensions is not None:
+            payload["dimensions"] = self.dimensions
+        if self.encoding_format:
+            payload["encoding_format"] = self.encoding_format
         data = _post_json(self.endpoint, payload, api_key=self.api_key, timeout_seconds=self.timeout_seconds)
         embeddings = _extract_embeddings(data)
         if len(embeddings) != len(texts):

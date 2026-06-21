@@ -135,6 +135,38 @@ or set a base URL and let runtime config append `/chat/completions`:
 export FUSION_MEMORY_EXTRACTOR_BASE_URL=https://provider.example/v1
 ```
 
+## Aliyun DashScope HTTP Models
+
+Fusion Memory can use DashScope hosted models through the existing HTTP
+embedding/reranker adapters. Store the real key in an ignored local env file,
+not in `deploy/fusion-memory.env.example`.
+
+Embedding:
+
+```bash
+export DASHSCOPE_API_KEY=...
+export FUSION_MEMORY_EMBEDDING_PROVIDER=http
+export FUSION_MEMORY_EMBEDDING_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
+export FUSION_MEMORY_EMBEDDING_API_KEY=$DASHSCOPE_API_KEY
+export FUSION_MEMORY_EMBEDDING_MODEL=text-embedding-v4
+export FUSION_MEMORY_EMBEDDING_DIMENSION=1024
+export FUSION_MEMORY_EMBEDDING_ENCODING_FORMAT=float
+```
+
+Reranker:
+
+```bash
+export FUSION_MEMORY_RERANKER_PROVIDER=http
+export FUSION_MEMORY_RERANKER_ENDPOINT=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
+export FUSION_MEMORY_RERANKER_API_KEY=$DASHSCOPE_API_KEY
+export FUSION_MEMORY_RERANKER_MODEL=qwen3-rerank
+```
+
+The embedding endpoint is OpenAI-compatible and returns `data[].embedding`.
+The rerank endpoint returns ranked `results[]` with `index` and
+`relevance_score`; Fusion Memory restores those scores to the original
+document order before reranking candidates.
+
 ## Memory Service Wiring
 
 ```python

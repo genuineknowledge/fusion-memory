@@ -18,7 +18,7 @@ from fusion_memory.core.models import Candidate, QueryPlan
 from fusion_memory.ingestion.extractors import classify_milestone, classify_milestones, extract_generic_event_facets, extract_milestone_mentions
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
 from fusion_memory.retrieval.evidence_pack import _exact_answer_candidates, _value_context_is_target_goal, _value_mentions
-from fusion_memory.retrieval.mmr import mmr
+from fusion_memory.retrieval.mmr import _similarity, mmr
 from fusion_memory.retrieval.pipeline import RecallResult
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.temporal_pack import temporal_candidate_table, temporal_mentions
@@ -846,6 +846,20 @@ class FusionMemoryTests(unittest.TestCase):
 
         self.assertEqual(selected[0].id, "a")
         self.assertEqual(selected[1].id, "c")
+
+    def test_mmr_similarity_uses_precomputed_token_sets_without_generic_jaccard(self) -> None:
+        left_tokens = frozenset({"budget", "tracker"})
+        right_tokens = frozenset({"budget", "auth"})
+
+        import fusion_memory.retrieval.mmr as mmr_module
+
+        self.assertFalse(hasattr(mmr_module, "jaccard"))
+        score = _similarity(
+            {"tokens": left_tokens, "source_span_ids": frozenset({"s1"})},
+            {"tokens": right_tokens, "source_span_ids": frozenset({"s2"})},
+        )
+
+        self.assertAlmostEqual(score, 1 / 3)
 
     def test_event_ordering_pack_includes_timeline_indices_for_milestones(self) -> None:
         memory = MemoryService()
@@ -1913,6 +1927,68 @@ class FusionMemoryTests(unittest.TestCase):
 
         self.assertIn("6 月 30 日", content)
         self.assertTrue(any(row.get("value") == "6 月 30 日" for row in pack.coverage.get("value_history", [])))
+
+    def test_current_string_slot_value_history_includes_latest_update(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w-slot", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            "For Project Atlas, my preferred vector database is Qdrant.",
+            scope,
+            ts("2026-05-01T09:00:00+00:00"),
+        )
+        memory.add(
+            "Correction: for Atlas, the current vector database should be pgvector, not Qdrant.",
+            scope,
+            ts("2026-05-03T09:00:00+00:00"),
+        )
+
+        pack = memory.answer_context(
+            "What is my current vector database for Atlas?",
+            scope,
+            budget={"mode": "benchmark", "query_type_hint": "knowledge_update", "limit": 8},
+        )
+
+        values = [row.get("value") for row in pack.coverage.get("value_history", [])]
+        self.assertIn("pgvector", values)
+        self.assertEqual(pack.coverage["value_history"][0]["value"], "pgvector")
+
+    def test_chinese_temporal_lookup_prioritizes_launch_date_over_gray_release(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w-zh-temporal", user_id="u", agent_id="a", session_id="s")
+        memory.add(
+            "星桥上线日期是8月20日，灰度日期是8月10日。",
+            scope,
+            ts("2026-05-13T09:00:00+00:00"),
+        )
+
+        pack = memory.answer_context(
+            "星桥上线日期是什么时候？",
+            scope,
+            budget={"mode": "benchmark", "query_type_hint": "temporal_reasoning", "limit": 8},
+        )
+
+        candidates = pack.coverage.get("temporal_candidates", [])
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0]["normalized_date"], "2026-08-20")
+
+    def test_structured_benchmark_pack_compresses_preference_source_spans(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w-pack-compress", user_id="u", agent_id="a", session_id="s")
+        for index in range(35):
+            memory.add(
+                f"For Atlas UI option {index}, I prefer compact controls and quiet labels.",
+                scope,
+                ts(f"2026-05-{(index % 28) + 1:02d}T09:00:00+00:00"),
+            )
+
+        pack = memory.answer_context(
+            "What UI preferences did I mention for Atlas?",
+            scope,
+            budget={"mode": "benchmark", "query_type_hint": "preference_following", "limit": 50},
+        )
+
+        self.assertLessEqual(len(pack.source_spans), 24)
+        self.assertGreater(pack.coverage["source_span_compression"]["input_count"], len(pack.source_spans))
 
     def test_multi_session_pack_marks_history_order_for_aggregation(self) -> None:
         memory = MemoryService()

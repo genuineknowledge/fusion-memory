@@ -207,6 +207,7 @@ TEMPORAL_MONTH_RE = re.compile(
     r")\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+20\d{2})?\b",
     re.I,
 )
+TEMPORAL_CJK_MONTH_RE = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日(?!\d)")
 YEAR_RE = re.compile(r"\b(20\d{2})\b")
 EXPLICIT_MONTH_DAY_YEAR_RE = re.compile(
     r"\b("
@@ -288,10 +289,10 @@ def temporal_mentions(query: str, content: str, span_timestamp: object = None) -
     query_lower = query.lower()
     default_year_value = default_year(span_timestamp)
     mentions: list[dict[str, object]] = []
-    for match in list(TEMPORAL_DATE_RE.finditer(content)) + list(TEMPORAL_MONTH_RE.finditer(content)):
+    for match in list(TEMPORAL_DATE_RE.finditer(content)) + list(TEMPORAL_MONTH_RE.finditer(content)) + list(TEMPORAL_CJK_MONTH_RE.finditer(content)):
         text = match.group(0)
         context = mention_context(content, match.start(), match.end())
-        role_text = role_context(content, match.start(), match.end())
+        role_text = cjk_date_role_context(content, match.start(), match.end()) if TEMPORAL_CJK_MONTH_RE.fullmatch(text) else role_context(content, match.start(), match.end())
         endpoint = range_endpoint(content, match.start(), match.end())
         role, confidence = temporal_role(query_lower, role_text.lower(), endpoint)
         normalized_date = normalize_date_text(text, infer_year_for_match(content, match.start(), match.end(), default_year_value))
@@ -1595,14 +1596,26 @@ def mention_context(content: str, start: int, end: int, *, radius: int = 140) ->
 def role_context(content: str, start: int, end: int) -> str:
     sentence = sentence_window(content, start, end)
     text = str(sentence["text"]).strip()
-    if len(list(TEMPORAL_DATE_RE.finditer(text))) + len(list(TEMPORAL_MONTH_RE.finditer(text))) > 1:
+    if len(list(TEMPORAL_DATE_RE.finditer(text))) + len(list(TEMPORAL_MONTH_RE.finditer(text))) + len(list(TEMPORAL_CJK_MONTH_RE.finditer(text))) > 1:
         return mention_context(content, start, end, radius=60)
     if len(text) <= 260:
         return text
     return mention_context(content, start, end, radius=90)
 
 
+def cjk_date_role_context(content: str, start: int, end: int) -> str:
+    left = max(content.rfind(mark, 0, start) for mark in ("，", "。", "！", "？", "\n", ";", "；"))
+    right_candidates = [content.find(mark, end) for mark in ("，", "。", "！", "？", "\n", ";", "；")]
+    right_candidates = [value for value in right_candidates if value != -1]
+    right = min(right_candidates) if right_candidates else len(content)
+    return content[left + 1 : right].strip() or mention_context(content, start, end, radius=40)
+
+
 def temporal_role(query_lower: str, context_lower: str, range_endpoint: str | None = None) -> tuple[str, float]:
+    if re.search(r"(?:上线|发布|生产|投产)", context_lower):
+        return "deployment_deadline", 0.94 if re.search(r"(?:上线|发布|生产|投产)", query_lower) else 0.78
+    if re.search(r"(?:灰度|预发|测试环境)", context_lower):
+        return "staging_date", 0.72
     explicit_deadline = has_any(context_lower, {"deadline", "deadlines", "due", "target date"})
     deadline = explicit_deadline or (
         has_any(context_lower, DEPLOYMENT_TERMS) and has_any(context_lower, {"by ", "before", "no later"})
@@ -1664,6 +1677,11 @@ def normalize_date_text(text: str, default_year_value: int | None) -> str | None
     if iso:
         year, month, day = map(int, iso.groups())
         return safe_iso_date(year, month, day)
+    cjk = re.fullmatch(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", text.strip())
+    if cjk:
+        if not default_year_value:
+            return None
+        return safe_iso_date(default_year_value, int(cjk.group(1)), int(cjk.group(2)))
     match = re.fullmatch(
         r"(?i)(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d{2}))?",
         text.strip(),
@@ -1801,8 +1819,8 @@ def query_context_overlap(query_lower: str, context_lower: str) -> bool:
 
 
 def query_context_overlap_score(query_lower: str, context_lower: str) -> int:
-    query_tokens = {normalize_token(token) for token in tokenize(query_lower)}
-    context_tokens = {normalize_token(token) for token in tokenize(context_lower)}
+    query_tokens = {normalize_token(token) for token in tokenize(query_lower)} | cjk_temporal_tokens(query_lower)
+    context_tokens = {normalize_token(token) for token in tokenize(context_lower)} | cjk_temporal_tokens(context_lower)
     query_tokens = {
         token
         for token in query_tokens
@@ -1824,9 +1842,20 @@ def normalize_token(token: str) -> str:
     return token
 
 
+def cjk_temporal_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+        tokens.add(chunk)
+        for size in (2, 3, 4):
+            tokens.update(chunk[index : index + size] for index in range(0, max(0, len(chunk) - size + 1)))
+    return {token for token in tokens if token not in {"什么", "时候", "日期", "时间"}}
+
+
 def temporal_target_roles(query: str) -> list[str]:
     query_lower = query.lower()
     roles: list[str] = []
+    if re.search(r"(?:上线|发布|生产|投产)", query):
+        roles.append("deployment_deadline")
     if has_any(query_lower, {"sprint"}) and has_any(query_lower, {"end", "ends", "ending"}):
         roles.append("sprint_end_date")
     if has_any(query_lower, FEATURE_TERMS) and has_any(query_lower, COMPLETION_TERMS | {"finish", "finishing"}):
@@ -1881,15 +1910,15 @@ def nearby_year(content: str, start: int, end: int, *, radius: int = 600) -> int
 
 def temporal_summary(query: str, content: str, limit: int) -> str:
     normalized = re.sub(r"\s+", " ", content).strip()
-    if len(normalized) <= limit:
+    matches = list(TEMPORAL_DATE_RE.finditer(content)) + list(TEMPORAL_MONTH_RE.finditer(content)) + list(TEMPORAL_CJK_MONTH_RE.finditer(content))
+    if len(normalized) <= limit and len(matches) <= 1:
         return normalized
-    matches = list(TEMPORAL_DATE_RE.finditer(content)) + list(TEMPORAL_MONTH_RE.finditer(content))
     if not matches:
         return compact_summary(content, limit)
     query_lower = query.lower()
     windows: list[tuple[float, int, int]] = []
     for match in matches:
-        context = role_context(content, match.start(), match.end())
+        context = cjk_date_role_context(content, match.start(), match.end()) if TEMPORAL_CJK_MONTH_RE.fullmatch(match.group(0)) else role_context(content, match.start(), match.end())
         role, _ = temporal_role(query_lower, context.lower(), range_endpoint(content, match.start(), match.end()))
         score = 1.0
         if role != "mentioned_date":
@@ -1898,9 +1927,17 @@ def temporal_summary(query: str, content: str, limit: int) -> str:
             score += 3.0
         if query_context_overlap(query_lower, context.lower()):
             score += 1.0
-        left = max(0, match.start() - 170)
-        right = min(len(content), match.end() + 170)
+        if TEMPORAL_CJK_MONTH_RE.fullmatch(match.group(0)):
+            left = content.find(context)
+            right = left + len(context) if left >= 0 else match.end()
+            left = max(0, left if left >= 0 else match.start() - 40)
+        else:
+            left = max(0, match.start() - 170)
+            right = min(len(content), match.end() + 170)
         windows.append((score, left, right))
+    if any(TEMPORAL_CJK_MONTH_RE.fullmatch(match.group(0)) for match in matches) and temporal_target_roles(query):
+        _score, left, right = sorted(windows, key=lambda item: (-item[0], item[1]))[0]
+        return compact_summary(content[left:right].strip(), limit)
     selected: list[tuple[int, int]] = []
     used = 0
     for _, left, right in sorted(windows, key=lambda item: (-item[0], item[1])):

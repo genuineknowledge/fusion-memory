@@ -48,6 +48,7 @@ class HTTPReranker:
     Supported response shapes:
     - `{"scores": [0.1, ...]}`
     - `{"data": [{"score": 0.1}, ...]}`
+    - DashScope rerank style `{"results": [{"index": 0, "relevance_score": 0.1}, ...]}`
     """
 
     def __init__(
@@ -69,7 +70,7 @@ class HTTPReranker:
         started = time.perf_counter()
         payload = {"model": self.model, "query": query, "documents": docs}
         data = _post_json(self.endpoint, payload, api_key=self.api_key, timeout_seconds=self.timeout_seconds)
-        scores = _extract_scores(data)
+        scores = _extract_scores(data, expected_count=len(docs))
         if len(scores) != len(docs):
             raise ValueError("reranker endpoint returned a different number of scores than requested docs")
         self.calls.append(
@@ -191,9 +192,29 @@ def _post_json(endpoint: str, payload: dict, *, api_key: str | None, timeout_sec
     return data
 
 
-def _extract_scores(data: dict) -> list[float]:
+def _extract_scores(data: dict, *, expected_count: int | None = None) -> list[float]:
     if isinstance(data.get("scores"), list):
         return [float(item) for item in data["scores"]]
     if isinstance(data.get("data"), list):
         return [float(item["score"]) for item in data["data"] if isinstance(item, dict) and "score" in item]
+    if isinstance(data.get("results"), list):
+        results = data["results"]
+        count = expected_count
+        if count is None:
+            indexes = [int(item["index"]) for item in results if isinstance(item, dict) and "index" in item]
+            count = max(indexes) + 1 if indexes else 0
+        scores = [0.0] * count
+        for item in results:
+            if not isinstance(item, dict) or "index" not in item:
+                continue
+            if "relevance_score" in item:
+                score = item["relevance_score"]
+            elif "score" in item:
+                score = item["score"]
+            else:
+                continue
+            index = int(item["index"])
+            if 0 <= index < count:
+                scores[index] = float(score)
+        return scores
     raise ValueError("reranker endpoint did not return scores")

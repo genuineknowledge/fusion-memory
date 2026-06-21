@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fusion_memory.core.models import Candidate
-from fusion_memory.core.text import jaccard, tokenize
+from fusion_memory.core.text import tokenize
 
 
 def mmr(candidates: list[Candidate], limit: int, lambda_: float = 0.72) -> list[Candidate]:
@@ -34,4 +34,11 @@ def mmr(candidates: list[Candidate], limit: int, lambda_: float = 0.72) -> list[
 def _similarity(a: dict[str, object], b: dict[str, object]) -> float:
     if a["source_span_ids"] & b["source_span_ids"]:
         return 1.0
-    return jaccard(set(a["tokens"]), set(b["tokens"]))
+    left = a["tokens"]
+    right = b["tokens"]
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    intersection = len(left & right)
+    return intersection / max(1, len(left) + len(right) - intersection)

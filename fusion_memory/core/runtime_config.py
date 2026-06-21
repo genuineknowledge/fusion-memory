@@ -75,6 +75,8 @@ def _build_embedder() -> Any | None:
             api_key=_optional_env("FUSION_MEMORY_EMBEDDING_API_KEY"),
             model=os.getenv("FUSION_MEMORY_EMBEDDING_MODEL", "local-embedding"),
             timeout_seconds=_float_env("FUSION_MEMORY_EMBEDDING_TIMEOUT_SECONDS", 30.0),
+            dimensions=_optional_int_env("FUSION_MEMORY_EMBEDDING_DIMENSION"),
+            encoding_format=_optional_env("FUSION_MEMORY_EMBEDDING_ENCODING_FORMAT"),
         )
     raise ValueError(f"unsupported FUSION_MEMORY_EMBEDDING_PROVIDER: {provider}")
 
@@ -185,6 +187,11 @@ def _required_env(name: str) -> str:
 def _int_env(name: str, default: int) -> int:
     value = _optional_env(name)
     return int(value) if value is not None else default
+
+
+def _optional_int_env(name: str) -> int | None:
+    value = _optional_env(name)
+    return int(value) if value is not None else None
 
 
 def _float_env(name: str, default: float) -> float:

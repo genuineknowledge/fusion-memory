@@ -345,6 +345,10 @@ def query_targeted_value_mentions(query: str, content: str) -> list[dict[str, An
     query_lower = query.lower()
     content_lower = content.lower()
     units: list[tuple[str, str]] = []
+    if "slot_value" in value_history_target_type_priority(query):
+        slot_rows = _query_targeted_slot_value_mentions(query, content)
+        if slot_rows:
+            return dedupe_value_mentions(slot_rows)
     if re.search(r"\bcommits?\b", query_lower):
         units.append(("commits", r"commits?"))
     if re.search(r"\b(?:women|mentees?)\b", query_lower):
@@ -392,6 +396,37 @@ def query_targeted_value_mentions(query: str, content: str) -> list[dict[str, An
                 if len(rows) >= 8:
                     return dedupe_value_mentions(rows)
     return dedupe_value_mentions(rows)
+
+
+def _query_targeted_slot_value_mentions(query: str, content: str) -> list[dict[str, Any]]:
+    if not _query_targets_named_slot(query.lower(), query):
+        return []
+    rows: list[dict[str, Any]] = []
+    patterns = [
+        r"\b(?:current|currently|latest|updated|new|preferred)?\s*(?:vector\s+database|database|model|provider|tool|engine|framework|library|reranker|embedding)\s+(?:is|are|should\s+be|uses?|using|changed\s+to|switched\s+to|migrated\s+to)\s+([A-Za-z][A-Za-z0-9_.+-]{1,50})\b",
+        r"\b(?:changed|switched|migrated|updated)\s+(?:the\s+)?(?:vector\s+database|database|model|provider|tool|engine|framework|library|reranker|embedding)\s+(?:to|from\s+[A-Za-z][A-Za-z0-9_.+-]{1,50}\s+to)\s+([A-Za-z][A-Za-z0-9_.+-]{1,50})\b",
+        r"(?:当前|现在|最新|改成|改为|更新为|切换为|使用的?)(?:[^。！？\n]{0,24})(?:向量库|数据库|模型|工具|框架|引擎|服务商)(?:[^。！？\n]{0,12})(?:是|为|成|使用)?\s*([A-Za-z][A-Za-z0-9_.+-]{1,50})",
+        r"(?:向量库|数据库|模型|工具|框架|引擎|服务商)(?:[^。！？\n]{0,12})(?:改成|改为|更新为|切换为|是|为|使用)\s*([A-Za-z][A-Za-z0-9_.+-]{1,50})",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, content, flags=re.I):
+            value = str(match.group(1) or "").strip().strip(".,;:，。；：")
+            if not value or value.lower() in {"not", "the", "current", "now", "new", "updated"}:
+                continue
+            context = mention_context(content, match.start(1), match.end(1))
+            rows.append(
+                {
+                    "type": "slot_value",
+                    "text": value,
+                    "context": compact_summary(context, 220),
+                    "start": match.start(1),
+                    "end": match.end(1),
+                    "update_marker_strength": value_update_marker_strength(query.lower(), context.lower(), value),
+                }
+            )
+            if len(rows) >= 8:
+                return rows
+    return rows
 
 
 def dedupe_value_mentions(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -522,6 +557,13 @@ def value_history_value_role(query: str, context: str, value_text: str, value_ty
         rf"\b(?:new|updated|adjusted|revised|increased|raised|changed)\b[^.?!]{{0,100}}{value}",
         value_window,
     ):
+        return "current"
+    if value_type == "slot_value" and value and re.search(
+        rf"\b(?:current|currently|latest|new|updated|preferred|should\s+be|is|are|changed\s+to|switched\s+to|migrated\s+to)\b[^.?!]{{0,120}}{value}",
+        value_window,
+    ):
+        return "current"
+    if value_type == "slot_value" and re.search(r"(?:当前|现在|最新|改成|改为|更新为|切换为|不再用|不再是)", context):
         return "current"
     if value and re.search(
         rf"{value}[^.?!]{{0,100}}\b(?:new|updated|adjusted|revised|increase|quota|budget|target)\b",
@@ -829,7 +871,25 @@ def value_history_target_type_priority(query: str) -> list[str]:
         out.append("version")
     if re.search(r"\b(?:latency|response\s+time|ms|seconds?)\b", lower):
         out.append("latency")
+    if _query_targets_named_slot(lower, query):
+        out.append("slot_value")
     return list(dict.fromkeys(out))
+
+
+def _query_targets_named_slot(lower: str, query: str) -> bool:
+    has_current_intent = bool(
+        re.search(r"\b(?:current|currently|latest|updated|new|preferred|using|use|what\s+is|which)\b", lower)
+        or re.search(r"(?:当前|现在|最新|使用|用的|是什么|哪一个|哪个)", query)
+    )
+    if not has_current_intent:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:vector\s+database|database|model|provider|tool|engine|framework|library|reranker|embedding)\b",
+            lower,
+        )
+        or re.search(r"(?:向量库|数据库|模型|工具|框架|引擎|服务商)", query)
+    )
 
 
 def value_update_marker_strength(query_lower: str, text_lower: str, value_text: str) -> float:

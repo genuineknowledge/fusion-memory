@@ -258,6 +258,16 @@ class EvidencePackBuilder:
             instruction_constraints = _instruction_constraints(query)
             if instruction_constraints:
                 coverage["instruction_constraints"] = instruction_constraints
+        compression = _compress_structured_source_spans(plan.query_type, spans)
+        if compression:
+            spans = compression["spans"]
+            estimated_tokens = sum(len(tokenize(str(span.get("content") or ""))) for span in spans)
+            coverage["source_span_compression"] = {
+                "input_count": compression["input_count"],
+                "output_count": len(spans),
+                "limit": compression["limit"],
+                "strategy": "preserve_ranked_structured_evidence",
+            }
         answer_policy = "answer_with_evidence_or_abstain"
         if plan.query_type == "abstention" or coverage.get("coverage_insufficient"):
             answer_policy = "abstain_if_not_supported"
@@ -628,6 +638,22 @@ def _span_record_for_model_view(span: Any) -> dict[str, Any]:
         "content": str(getattr(span, "content", "") or ""),
         "topic_group": _span_group_key(getattr(span, "source_uri", None), getattr(span, "turn_id", None)),
     }
+
+
+def _compress_structured_source_spans(query_type: str, spans: list[dict[str, Any]]) -> dict[str, Any] | None:
+    limits = {
+        "knowledge_update": 24,
+        "preference": 24,
+        "instruction": 24,
+        "temporal_lookup": 24,
+        "multi_session_reasoning": 32,
+        "factual_exact": 24,
+        "assistant_reference": 24,
+    }
+    limit = limits.get(query_type)
+    if not limit or len(spans) <= limit:
+        return None
+    return {"spans": spans[:limit], "input_count": len(spans), "limit": limit}
 
 
 def _event_ordering_chronology_rescue_score(query: str, text: str, speaker: str | None) -> float:
