@@ -10,6 +10,37 @@ from pathlib import Path
 from typing import Any
 
 
+_SAFE_DIMENSION_IDENTIFIERS = {
+    "views",
+    "selected",
+    "rescued",
+    "filtered",
+    "dropped",
+    "misranked",
+    "event_ordering_coverage",
+    "l3_current_view",
+    "l0_raw_hybrid",
+    "l1_fact_hybrid",
+    "event_ordering_timeline",
+    "event_ordering_episode_recall",
+    "timeline",
+    "taxonomy",
+    "hybrid",
+}
+
+_SAFE_DIMENSION_PATTERNS = (
+    re.compile(r"l[0-9]+_[a-z0-9_]+"),
+    re.compile(r"event_ordering_[a-z0-9_]+"),
+    re.compile(r"source_[a-z0-9_]+"),
+)
+
+_PROTECTED_RULE_REASONS = {
+    "current_value.stale_history_marker": "high_precision_current_value",
+    "exact_match.cjk_phrase": "chinese_recall_precision",
+    "event_ordering.legacy_rescue": "legacy_event_ordering_fallback",
+}
+
+
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -48,9 +79,20 @@ def _safe_string(value: Any) -> str | None:
 def _is_safe_identifier(value: str) -> bool:
     if len(value) > 128:
         return False
-    if re.search(r"\s|[\u4e00-\u9fff]", value):
+    if value != value.strip() or re.search(r"\s|[\u4e00-\u9fff]", value):
         return False
-    return bool(re.fullmatch(r"[A-Za-z0-9_.:/@+\-]*", value))
+    if value in _SAFE_DIMENSION_IDENTIFIERS:
+        return True
+    return any(pattern.fullmatch(value) for pattern in _SAFE_DIMENSION_PATTERNS)
+
+
+def _protected_governance_for_rule(rule_id: str) -> tuple[bool, str]:
+    protected_reason = _PROTECTED_RULE_REASONS.get(rule_id)
+    if protected_reason is not None:
+        return True, protected_reason
+    if rule_id.startswith("event_ordering.legacy"):
+        return True, "legacy_event_ordering_fallback"
+    return False, ""
 
 
 def _lifecycle_records_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
@@ -100,10 +142,10 @@ def _ability_for_hit(hit: dict[str, Any]) -> str | None:
 def _recommendation_for_rule(rule_id: str, hit_count: int, contribution_count: int, categories: set[str]) -> str:
     if rule_id.startswith("event_ordering.legacy"):
         return "legacy_shadow"
-    if hit_count == 0 or contribution_count == 0:
-        return "delete_candidate"
     if ".domain_label" in rule_id or "taxonomy_candidate" in categories:
         return "migrate_to_taxonomy"
+    if hit_count == 0 or contribution_count == 0:
+        return "delete_candidate"
     return "keep"
 
 
@@ -113,17 +155,20 @@ def _cleanup_classification(
     contribution_count: int,
     recommendation: str,
     duplicate_of: str | None,
+    protected: bool,
 ) -> tuple[str, str, bool]:
     if rule_id.startswith("event_ordering.legacy"):
         cleanup_action = "keep_shadow"
+    elif protected:
+        cleanup_action = "keep_protected"
+    elif recommendation == "migrate_to_taxonomy":
+        cleanup_action = "migrate_to_taxonomy"
     elif duplicate_of is not None:
         cleanup_action = "delete_duplicate"
     elif hit_count == 0:
         cleanup_action = "delete_no_hits"
     elif contribution_count == 0:
         cleanup_action = "delete_no_contribution"
-    elif recommendation == "migrate_to_taxonomy":
-        cleanup_action = "migrate_to_taxonomy"
     else:
         cleanup_action = "keep"
 
@@ -145,7 +190,7 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
         lifecycle_by_candidate_id = {
             candidate_id: lifecycle_record
             for lifecycle_record in _lifecycle_records_for_record(record)
-            if (candidate_id := _safe_string(lifecycle_record.get("candidate_id"))) is not None
+            if isinstance((candidate_id := lifecycle_record.get("candidate_id")), str) and candidate_id
         }
 
         for hit in _rule_hits_for_record(record):
@@ -168,8 +213,6 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                     "provider_ids": set(),
                     "lifecycle_stages": set(),
                     "lifecycle_reasons": set(),
-                    "protected": False,
-                    "protected_reason": "",
                 },
             )
             row["hit_count"] += 1
@@ -232,12 +275,14 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
         categories = set(row["categories"])
         recommendation = _recommendation_for_rule(rule_id, hit_count, contribution_count, categories)
         duplicate_of = row["duplicate_of"] if isinstance(row["duplicate_of"], str) else None
+        protected, protected_reason = _protected_governance_for_rule(rule_id)
         cleanup_phase, cleanup_action, safe_to_delete = _cleanup_classification(
             rule_id,
             hit_count,
             contribution_count,
             recommendation,
             duplicate_of,
+            protected,
         )
         audit_rows.append(
             {
@@ -254,8 +299,8 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                 "lifecycle_stages": sorted(row["lifecycle_stages"]),
                 "lifecycle_reasons": sorted(row["lifecycle_reasons"]),
                 "recommendation": recommendation,
-                "protected": bool(row["protected"]),
-                "protected_reason": row["protected_reason"] if isinstance(row["protected_reason"], str) else "",
+                "protected": protected,
+                "protected_reason": protected_reason,
                 "duplicate_of": duplicate_of,
                 "cleanup_phase": cleanup_phase,
                 "cleanup_action": cleanup_action,
