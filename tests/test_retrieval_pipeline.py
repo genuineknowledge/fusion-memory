@@ -15,6 +15,7 @@ from fusion_memory.retrieval.pipeline import QueryUnderstandingResult
 from fusion_memory.retrieval.pipeline import RecallOrchestrator
 from fusion_memory.retrieval.pipeline import RecallResult
 from fusion_memory.retrieval.pipeline import RetrievalExecutionContext
+from fusion_memory.retrieval.pipeline import RetrievalTraceRecorder
 from fusion_memory.retrieval.pipeline import build_pipeline_record
 from fusion_memory.retrieval.pipeline import selected_temporal_relation_summary
 from fusion_memory.retrieval.raw_evidence_quota import QuotaResult
@@ -277,6 +278,42 @@ class RetrievalPipelineTests(unittest.TestCase):
         data = record.to_dict()
 
         self.assertEqual(data["pipeline_layers"]["TemporalRelations"]["relation_count"], 2)
+
+    def test_retrieval_trace_recorder_flushes_sanitized_pipeline_layers(self) -> None:
+        raw_query_text = "Which private token zinc-sparrow-17 happened before the deadline?"
+        recalled = [
+            Candidate("c1", "event", "raw secret zinc-sparrow-17 first", "l0_raw", {"utility_score": 0.8}, ["s1"], {}),
+            Candidate("c2", "event", "raw secret zinc-sparrow-17 second", "graph", {"utility_score": 0.7}, ["s2"], {}),
+        ]
+        selected = [recalled[0]]
+        kwargs = {
+            "language": "en",
+            "intent": "event_ordering",
+            "features": ["temporal"],
+            "recalled": recalled,
+            "selected": selected,
+            "dropped_count": 1,
+            "source_span_count": 1,
+            "coverage_insufficient": False,
+            "temporal_relation_summary": {
+                "relation_count": 1,
+                "relation_types": ["before"],
+                "role_labels": ["earlier_event"],
+                "reason_codes": ["explicit_order_marker"],
+                "source_span_count": 1,
+                "source_span_ids": ["s1"],
+            },
+        }
+        expected = build_pipeline_record("event_ordering", "benchmark", **kwargs).to_dict()
+
+        payload = RetrievalTraceRecorder(build_pipeline_record("event_ordering", "benchmark", **kwargs)).flush()
+
+        self.assertEqual(set(payload), set(expected))
+        self.assertEqual(payload, expected)
+        self.assertIn("TemporalRelations", payload["pipeline_layers"])
+        self.assertNotIn(raw_query_text, repr(payload))
+        self.assertNotIn("zinc-sparrow-17", repr(payload))
+        self.assertNotIn("raw secret", repr(payload))
 
     def test_selected_temporal_relation_summary_merges_summary_and_safe_records(self) -> None:
         candidates = [

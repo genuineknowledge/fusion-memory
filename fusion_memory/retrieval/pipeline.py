@@ -363,6 +363,14 @@ class RetrievalPipelineRecord:
         }
 
 
+class RetrievalTraceRecorder:
+    def __init__(self, record: RetrievalPipelineRecord) -> None:
+        self._record = record
+
+    def flush(self) -> dict[str, Any]:
+        return self._record.to_dict()
+
+
 def build_pipeline_record(
     query_type: str,
     mode: str,
@@ -404,6 +412,21 @@ def build_pipeline_record(
             else None
         ),
     )
+
+
+class EvidencePackAssembler:
+    def update_pipeline_output(
+        self,
+        value: Any,
+        *,
+        source_span_count: int,
+        coverage_insufficient: bool,
+    ) -> dict[str, Any]:
+        return update_pipeline_evidence_output(
+            value,
+            source_span_count=source_span_count,
+            coverage_insufficient=coverage_insufficient,
+        )
 
 
 def update_pipeline_evidence_output(

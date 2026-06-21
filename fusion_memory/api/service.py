@@ -53,12 +53,13 @@ from fusion_memory.retrieval.aggregation_keys import (
 from fusion_memory.retrieval.mmr import mmr
 from fusion_memory.retrieval.pipeline import (
     CandidateFusionEngine,
+    EvidencePackAssembler,
     RecallResult,
     RetrievalExecutionContext,
+    RetrievalTraceRecorder,
     build_pipeline_record,
     query_understanding_result_from_plan,
     selected_temporal_relation_summary,
-    update_pipeline_evidence_output,
 )
 from fusion_memory.retrieval.query_planner import QueryPlanner
 from fusion_memory.retrieval.raw_evidence_quota import RawEvidenceQuota
@@ -595,7 +596,7 @@ class MemoryService:
             coverage_insufficient=quota_result.coverage_insufficient,
             temporal_relation_summary=selected_temporal_relation_summary(selected),
         )
-        pipeline_trace = pipeline_record.to_dict()
+        pipeline_trace = RetrievalTraceRecorder(pipeline_record).flush()
         coverage["pipeline_trace"] = pipeline_trace
         trace = {
             "operation": "search",
@@ -728,7 +729,7 @@ class MemoryService:
             token_budget=token_budget,
         )
         if "pipeline_trace" in pack.coverage:
-            pack.coverage["pipeline_trace"] = update_pipeline_evidence_output(
+            pack.coverage["pipeline_trace"] = EvidencePackAssembler().update_pipeline_output(
                 pack.coverage["pipeline_trace"],
                 source_span_count=len(pack.source_spans),
                 coverage_insufficient=bool(pack.coverage.get("coverage_insufficient", False)),
