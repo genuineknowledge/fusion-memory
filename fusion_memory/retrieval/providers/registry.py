@@ -5,6 +5,26 @@ from typing import Any
 
 from fusion_memory.core.models import Candidate
 from fusion_memory.retrieval.providers.base import RecallContext, RecallProvider, provider_applies_to_query_type
+from fusion_memory.retrieval.providers.raw import (
+    AggregationCoverageProvider,
+    BroadRawProvider,
+    ContradictionClaimProvider,
+    EventOrderingCoverageProvider,
+    EventOrderingEpisodeProvider,
+    EventOrderingTimelineProvider,
+    RawSpanProvider,
+    ScentTrailProvider,
+    TemporalCoverageProvider,
+    TopicScopedRawProvider,
+)
+from fusion_memory.retrieval.providers.structured import (
+    CurrentViewProvider,
+    EntityProfileProvider,
+    EntityProvider,
+    EventProvider,
+    ExactProvider,
+    FactProvider,
+)
 
 
 class ProviderRegistry:
@@ -64,3 +84,26 @@ def _source_counts(candidates: list[Candidate]) -> dict[str, int]:
         source = str(candidate.source)
         counts[source] = counts.get(source, 0) + 1
     return counts
+
+
+def default_provider_registry() -> ProviderRegistry:
+    return ProviderRegistry(
+        [
+            RawSpanProvider(),
+            TopicScopedRawProvider(),
+            BroadRawProvider(),
+            ScentTrailProvider(),
+            ContradictionClaimProvider(),
+            TemporalCoverageProvider(),
+            AggregationCoverageProvider(),
+            EventOrderingCoverageProvider(),
+            EventOrderingEpisodeProvider(),
+            EventOrderingTimelineProvider(),
+            FactProvider(),
+            EventProvider(),
+            CurrentViewProvider(),
+            EntityProfileProvider(),
+            ExactProvider(),
+            EntityProvider(),
+        ]
+    )

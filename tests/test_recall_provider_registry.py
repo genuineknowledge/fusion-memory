@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from fusion_memory.api.service import MemoryService
 from fusion_memory.core.models import Candidate, QueryPlan, Scope
+from fusion_memory.retrieval.candidate_provider import build_candidate_lists
+from fusion_memory.retrieval.event_graph_selection import _event_milestone_group
 from fusion_memory.retrieval.providers.base import RecallContext
 from fusion_memory.retrieval.providers.registry import ProviderRegistry
 from fusion_memory.retrieval.providers.structured import (
@@ -29,6 +32,17 @@ from fusion_memory.retrieval.providers.raw import (
     TemporalCoverageProvider,
     TopicScopedRawProvider,
 )
+
+
+def _candidate_signature(candidate: Candidate) -> tuple[Any, ...]:
+    return (
+        candidate.id,
+        candidate.type,
+        candidate.source,
+        tuple(candidate.source_span_ids),
+        tuple(sorted((str(key), repr(value)) for key, value in candidate.scores.items())),
+        tuple(sorted((str(key), repr(value)) for key, value in candidate.metadata.items())),
+    )
 
 
 @dataclass(frozen=True)
@@ -114,6 +128,72 @@ class RecallProviderRegistryTests(unittest.TestCase):
         self.assertEqual(summary[0]["source_family"], "raw")
         self.assertEqual(summary[0]["output_count"], 1)
         self.assertNotIn("raw private query", repr(summary))
+
+
+class CandidateProviderFacadeParityTests(unittest.TestCase):
+    def test_facade_returns_expected_source_order_for_mixed_memory(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-provider-parity", user_id="u", agent_id="a")
+        try:
+            memory.add("I prefer PostgreSQL for Atlas retrieval. I also mentioned Qdrant as a backup.", scope)
+            plan = memory.planner.plan("What retrieval database do I currently prefer?")
+            lists = build_candidate_lists(
+                memory,
+                "What retrieval database do I currently prefer?",
+                scope,
+                plan,
+                per_source_limit=6,
+                event_milestone_group=_event_milestone_group,
+            )
+        finally:
+            memory.close()
+
+        sources = [[candidate.source for candidate in items] for items in lists]
+        self.assertTrue(any("l0_raw_hybrid" in group for group in sources))
+        self.assertTrue(any("l1_fact_hybrid" in group for group in sources))
+        self.assertTrue(any("l3_current_view" in group for group in sources))
+
+    def test_facade_enabled_sources_keeps_exact_source_filtering(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-provider-enabled", user_id="u", agent_id="a")
+        try:
+            memory.add("I prefer PostgreSQL for Atlas retrieval.", scope)
+            plan = memory.planner.plan("What does Atlas retrieval use?")
+            lists = build_candidate_lists(
+                memory,
+                "What does Atlas retrieval use?",
+                scope,
+                plan,
+                per_source_limit=6,
+                enabled_sources={"facts"},
+                event_milestone_group=_event_milestone_group,
+            )
+        finally:
+            memory.close()
+
+        self.assertTrue(lists)
+        self.assertTrue(all(candidate.source == "l1_fact_hybrid" for items in lists for candidate in items))
+
+    def test_facade_default_event_ordering_excludes_graph_candidates(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-provider-event-ordering", user_id="u", agent_id="a")
+        try:
+            memory.add("First I planned Atlas. Then I implemented raw recall. Finally I reviewed graph ordering.", scope)
+            plan = memory.planner.plan("What happened in order for Atlas?", query_type_hint="event_ordering")
+            lists = build_candidate_lists(
+                memory,
+                "What happened in order for Atlas?",
+                scope,
+                plan,
+                per_source_limit=8,
+                event_milestone_group=_event_milestone_group,
+            )
+        finally:
+            memory.close()
+
+        sources = [candidate.source for items in lists for candidate in items]
+        self.assertNotIn("event_ordering_persisted_graph", sources)
+        self.assertFalse(any(source.startswith("event_ordering_graph") for source in sources))
 
 
 class StructuredProviderTests(unittest.TestCase):
