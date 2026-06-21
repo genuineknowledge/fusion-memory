@@ -8,6 +8,11 @@ from typing import Any
 from fusion_memory.core.models import Candidate, MemoryEvent
 from fusion_memory.core.text import compact_summary, keyword_score, tokenize
 from fusion_memory.retrieval.structured_annotations import select_event_ordering_timeline
+from fusion_memory.retrieval.temporal_relations import (
+    safe_temporal_relation_records,
+    temporal_relation_summary_from_safe_records,
+    temporal_relations_for_text,
+)
 
 
 @dataclass(frozen=True)
@@ -187,6 +192,13 @@ def _graph_candidates(query: str, graph: ChronologyGraph, events: list[MemoryEve
         if event is None:
             continue
         text = event.description
+        temporal_relations = safe_temporal_relation_records(
+            temporal_relations_for_text(
+                node.label,
+                query=query,
+                source_span_id=node.source_span_id,
+            )
+        )
         graph_score = node.confidence + keyword_score(query, f"{node.label} {node.topic or ''}")
         graph_score += min(0.25, 0.05 * edge_count_by_node.get(node.node_id, 0))
         if node.timestamp is not None:
@@ -212,6 +224,8 @@ def _graph_candidates(query: str, graph: ChronologyGraph, events: list[MemoryEve
                 "graph_topic": node.topic,
                 "timeline_index": index,
                 "event_id": event.event_id,
+                "temporal_relations": temporal_relations,
+                "temporal_relation_summary": temporal_relation_summary_from_safe_records(temporal_relations),
             },
         )
         ranked.append((graph_score, index, candidate))

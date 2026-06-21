@@ -39,6 +39,29 @@ class RetrievalPipelineTests(unittest.TestCase):
         self.assertEqual(payload["pipeline_layers"]["CandidateFusion"]["selected_sources"], ["l3_current_view"])
         self.assertNotIn("raw secret text", repr(payload))
 
+    def test_build_pipeline_record_can_include_temporal_relation_summary(self) -> None:
+        record = build_pipeline_record(
+            "temporal_lookup",
+            "default",
+            language="en",
+            intent="temporal_lookup",
+            features=["temporal_terms"],
+            recalled=[],
+            selected=[],
+            dropped_count=0,
+            source_span_count=0,
+            coverage_insufficient=False,
+            temporal_relation_summary={
+                "relation_count": 2,
+                "relation_types": ["deadline"],
+                "source_span_count": 1,
+            },
+        )
+
+        data = record.to_dict()
+
+        self.assertEqual(data["pipeline_layers"]["TemporalRelations"]["relation_count"], 2)
+
     def test_search_attaches_pipeline_trace_without_raw_text(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="ws-pipeline", user_id="u", agent_id="a")

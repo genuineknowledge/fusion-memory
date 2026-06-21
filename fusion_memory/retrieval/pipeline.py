@@ -53,6 +53,37 @@ class EvidencePackBuilderRecord:
 
 
 @dataclass(frozen=True)
+class TemporalRelationsRecord:
+    relation_count: int
+    relation_types: tuple[str, ...]
+    role_labels: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    source_span_count: int = 0
+    source_span_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> TemporalRelationsRecord:
+        return cls(
+            relation_count=int(value.get("relation_count") or 0),
+            relation_types=tuple(str(item) for item in (value.get("relation_types") or []) if item),
+            role_labels=tuple(str(item) for item in (value.get("role_labels") or []) if item),
+            reason_codes=tuple(str(item) for item in (value.get("reason_codes") or []) if item),
+            source_span_count=int(value.get("source_span_count") or 0),
+            source_span_ids=tuple(str(item) for item in (value.get("source_span_ids") or []) if item),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "relation_count": int(self.relation_count),
+            "relation_types": list(self.relation_types),
+            "role_labels": list(self.role_labels),
+            "reason_codes": list(self.reason_codes),
+            "source_span_count": int(self.source_span_count),
+            "source_span_ids": list(self.source_span_ids),
+        }
+
+
+@dataclass(frozen=True)
 class RetrievalPipelineRecord:
     query_type: str
     mode: str
@@ -60,14 +91,18 @@ class RetrievalPipelineRecord:
     candidate_recall: CandidateRecallRecord
     candidate_fusion: CandidateFusionRecord
     evidence_output: EvidencePackBuilderRecord
+    temporal_relations: TemporalRelationsRecord | None = None
 
     def pipeline_layers(self) -> dict[str, Any]:
-        return {
+        layers = {
             "QueryUnderstanding": self.query_understanding.to_dict(),
             "CandidateRecall": self.candidate_recall.to_dict(),
             "CandidateFusion": self.candidate_fusion.to_dict(),
             "EvidencePackBuilder": self.evidence_output.to_dict(),
         }
+        if self.temporal_relations is not None:
+            layers["TemporalRelations"] = self.temporal_relations.to_dict()
+        return layers
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +128,7 @@ def build_pipeline_record(
     dropped_count: int,
     source_span_count: int,
     coverage_insufficient: bool,
+    temporal_relation_summary: dict[str, object] | None = None,
 ) -> RetrievalPipelineRecord:
     source_counts: dict[str, int] = {}
     for candidate in recalled:
@@ -114,6 +150,11 @@ def build_pipeline_record(
         evidence_output=EvidencePackBuilderRecord(
             source_span_count=source_span_count,
             coverage_insufficient=coverage_insufficient,
+        ),
+        temporal_relations=(
+            TemporalRelationsRecord.from_dict(temporal_relation_summary)
+            if temporal_relation_summary is not None
+            else None
         ),
     )
 

@@ -55,6 +55,27 @@ class EventOrderingGraphTests(unittest.TestCase):
         self.assertTrue(candidates[0].source.startswith("event_ordering_graph"))
         self.assertNotIn("event_ordering_graph_fallback", candidates[0].source)
 
+    def test_graph_candidates_include_temporal_relation_shadow_metadata(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w-rel", user_id="u", agent_id="a", session_id="s")
+        memory.add("I first prepared the initial workspace foundation.", scope, ts("2026-06-01T10:00:00+00:00"))
+        memory.add("Then I implemented the second workflow step.", scope, ts("2026-06-02T10:00:00+00:00"))
+
+        spans = memory.store.list_spans(scope)
+        events = memory.store.list_events(scope)
+        candidates = select_graph_first_event_ordering_candidates(
+            "Can you walk me through the order of the workspace work across our conversations?",
+            spans,
+            events,
+            limit=4,
+        )
+
+        self.assertTrue(candidates)
+        relation_candidates = [candidate for candidate in candidates if candidate.metadata.get("temporal_relations")]
+        self.assertTrue(relation_candidates)
+        self.assertIn("temporal_relation_summary", relation_candidates[0].metadata)
+        self.assertNotIn("text", relation_candidates[0].metadata["temporal_relations"][0])
+
     def test_sparse_graph_uses_legacy_fallback_without_high_confidence_edges(self) -> None:
         scope = Scope(workspace_id="w-sparse", user_id="u", agent_id="a", session_id="s")
         spans: list[object] = []
