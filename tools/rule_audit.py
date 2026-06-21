@@ -48,6 +48,8 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "packed",
     "profiles",
     "quality_fallback",
+    "raw",
+    "l0_raw",
     "raw_provider",
     "raw_scent_trail",
     "raw_span",
@@ -61,7 +63,9 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "temporal_coverage_raw",
     "timeline",
     "topic_scope",
+    "topic_scope_raw",
     "topic_scoped_raw",
+    "graph",
     "unspecified",
     "views",
 }

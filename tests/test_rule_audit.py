@@ -188,6 +188,37 @@ class RuleAuditTests(unittest.TestCase):
         self.assertNotIn("private question", output_text)
         self.assertNotIn("candidate text", output_text)
 
+    def test_build_provider_audit_keeps_raw_source_family_readable(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "_audit_input": "replay.json",
+                "pipeline_trace": {
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "provider_summary": [
+                                {
+                                    "provider_id": "raw_span",
+                                    "source_family": "raw",
+                                    "output_count": 2,
+                                    "output_source_counts": {"l0_raw": 1, "topic_scope_raw": 1},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        ]
+
+        audit = self._build_provider_audit(records)
+
+        self.assertEqual(audit[0]["provider_id"], "raw_span")
+        self.assertEqual(audit[0]["source_family"], "raw")
+        self.assertEqual(audit[0]["output_source_counts"], {"l0_raw": 1, "topic_scope_raw": 1})
+
     def test_cli_writes_provider_json_and_csv_without_changing_rule_outputs(self) -> None:
         payload = {
             "records": [

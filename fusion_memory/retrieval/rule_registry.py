@@ -80,12 +80,17 @@ _PLAINTEXT_METADATA_STRINGS = {
     "legacy_fallback",
     "observed",
     "preserve_language_exact_match",
+    "raw",
+    "raw_span",
+    "recalled",
     "retrieval",
     "search_filter",
     "selected",
     "span_1",
     "suppress",
     "test_exception_cleanup",
+    "topic_scope_raw",
+    "graph",
     "views",
 }
 _PLAINTEXT_METADATA_KEY_VALUES = {

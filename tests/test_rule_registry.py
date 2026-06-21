@@ -156,6 +156,24 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(hit.metadata["stage"], "search_filter")
         self.assertNotIn("zinc-sparrow-17", repr(hit.metadata))
 
+    def test_record_rule_hit_keeps_raw_and_graph_structural_dimensions(self) -> None:
+        hit = record_rule_hit(
+            "current_value.stale_history_marker",
+            query="user asks current value",
+            text="candidate text",
+            stage="filter",
+            provider_id="raw_span",
+            lifecycle_stage="recalled",
+            lifecycle_reason="topic_scope_raw",
+            metadata={"source_family": "raw", "graph_policy": "graph"},
+        )
+
+        self.assertEqual(hit.provider_id, "raw_span")
+        self.assertEqual(hit.lifecycle_stage, "recalled")
+        self.assertEqual(hit.lifecycle_reason, "topic_scope_raw")
+        self.assertEqual(hit.metadata["source_family"], "raw")
+        self.assertEqual(hit.metadata["graph_policy"], "graph")
+
     def test_record_rule_hit_preserves_positional_metadata(self) -> None:
         metadata = {"decision": "drop_stale_history", "source": "candidate_1"}
 
