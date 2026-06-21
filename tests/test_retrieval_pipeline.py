@@ -122,3 +122,24 @@ class RetrievalPipelineTests(unittest.TestCase):
 
         evidence_layer = pack.coverage["pipeline_trace"]["pipeline_layers"]["EvidencePackBuilder"]
         self.assertEqual(evidence_layer["source_span_count"], len(pack.source_spans))
+
+    def test_search_coverage_includes_candidate_lifecycle_without_raw_text(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-lifecycle", user_id="u", agent_id="a")
+        raw_memory_text = "Remember private token violet-river-42 for lifecycle tracing."
+        raw_query_text = "Which private token did I ask you to remember for lifecycle tracing?"
+        try:
+            memory.add({"role": "user", "content": raw_memory_text}, scope)
+            result = memory.search(raw_query_text, scope)
+            trace = memory.debug_trace(result.trace_id, scope)
+        finally:
+            memory.close()
+
+        lifecycle = result.coverage["candidate_lifecycle"]
+        self.assertGreater(lifecycle["stage_counts"].get("recalled", 0), 0)
+        self.assertGreater(lifecycle["stage_counts"].get("selected", 0), 0)
+        self.assertIn("candidate_lifecycle_trace", trace)
+        self.assertNotIn(raw_memory_text, repr(lifecycle))
+        self.assertNotIn(raw_query_text, repr(lifecycle))
+        self.assertNotIn(raw_memory_text, repr(trace["candidate_lifecycle_trace"]))
+        self.assertNotIn(raw_query_text, repr(trace["candidate_lifecycle_trace"]))

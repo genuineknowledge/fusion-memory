@@ -31,6 +31,7 @@ from fusion_memory.ingestion.views import ViewBuilder
 from fusion_memory.ingestion.window_builder import build_session_summary_span
 from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
 from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
+from fusion_memory.retrieval.candidate_lifecycle import CandidateLifecycleRecorder
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
@@ -364,6 +365,7 @@ class MemoryService:
         precomputed_plan = options.get("_plan")
         plan = precomputed_plan or self.planner.plan(query, query_type_hint=options.get("query_type_hint"))
         intent_telemetry = options.get("_intent_telemetry") if precomputed_plan else self.planner.last_intent_telemetry
+        lifecycle = CandidateLifecycleRecorder()
         query_language = "zh" if re.search(r"[\u4e00-\u9fff]", query) else "en"
         query_features = [
             feature
@@ -382,11 +384,14 @@ class MemoryService:
             enabled_sources=options.get("enabled_sources"),
             include_session=include_session,
         )
+        for items in candidate_lists:
+            lifecycle.extend(items, "recalled", "candidate_provider")
         fused = reciprocal_rank_fusion(candidate_lists, k=self.config.rrf_k)
         scored = [score_candidate(candidate, plan) for candidate in fused]
         quota_result = self.quota.enforce(plan, scope, scored, include_session=include_session)
         marked = self._mark_quota_selected(quota_result.candidates, quota_result.selected_span_ids)
         scored_again = [score_candidate(candidate, plan) for candidate in marked]
+        lifecycle.extend(scored_again, "scored", "utility_scoring")
         scored_again.sort(key=lambda candidate: candidate.scores.get("utility_score", 0.0), reverse=True)
         mode = options.get("mode", "fast")
         limit = options.get("limit", self.config.retrieval_output_n)
@@ -461,6 +466,12 @@ class MemoryService:
             )
             dropped_high_signal.extend(scope_dropped_high_signal)
         for candidate in selected:
+            lifecycle.record(candidate, "selected", "final_selection", contributed=True)
+        for dropped in dropped_high_signal:
+            candidate = dropped.get("candidate") if isinstance(dropped, dict) else None
+            if isinstance(candidate, Candidate):
+                lifecycle.record(candidate, "filtered", "high_signal_drop", contributed=False)
+        for candidate in selected:
             self.store.insert_utility_example(utility_example(trace_id, query, plan, candidate))
         shadow_ranking = self.utility_scorer.rank_shadow(selected, plan) if self.utility_scorer.trained else []
         coverage = {
@@ -487,6 +498,8 @@ class MemoryService:
                 )
         if intent_telemetry:
             coverage["query_intent_telemetry"] = intent_telemetry
+        coverage["candidate_lifecycle"] = lifecycle.summary()
+        lifecycle_trace = lifecycle.to_trace()
         pipeline_record = build_pipeline_record(
             plan.query_type,
             str(mode),
@@ -510,6 +523,7 @@ class MemoryService:
             "coverage": coverage,
             "pipeline_trace": pipeline_trace,
             "retrieval_trace": pipeline_trace,
+            "candidate_lifecycle_trace": lifecycle_trace,
             "mode": mode,
             "enabled_sources": options.get("enabled_sources"),
             "allow_cross_session": allow_cross_session,
