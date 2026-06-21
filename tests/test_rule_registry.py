@@ -4,6 +4,7 @@ import hashlib
 import unittest
 from datetime import datetime, timezone
 from types import MethodType
+from unittest.mock import patch
 
 from fusion_memory import MemoryService, Scope
 from fusion_memory.api.service import _event_ordering_legacy_candidate
@@ -573,9 +574,7 @@ class RuleInstrumentationTests(unittest.TestCase):
             {"source_uri": "zh1"},
         )
 
-        original_candidate_lists = memory._candidate_lists
-
-        def failing_candidate_lists(*args, **kwargs):
+        def failing_recall(*args, **kwargs):
             record_rule_hit(
                 "exact_match.cjk_phrase",
                 query="我的默认数据库是什么？",
@@ -585,11 +584,10 @@ class RuleInstrumentationTests(unittest.TestCase):
             )
             raise RuntimeError("candidate generation failed")
 
-        memory._candidate_lists = failing_candidate_lists
-        with self.assertRaises(RuntimeError):
-            memory.search("我的默认数据库是什么？", scope, {"mode": "fast", "limit": 5})
+        with patch("fusion_memory.retrieval.pipeline.RecallOrchestrator.run", side_effect=failing_recall):
+            with self.assertRaises(RuntimeError):
+                memory.search("我的默认数据库是什么？", scope, {"mode": "fast", "limit": 5})
 
-        memory._candidate_lists = original_candidate_lists
         result = memory.search("plain unmatched query", scope, {"mode": "fast", "limit": 1})
         trace = memory.debug_trace(result.trace_id, scope)
 

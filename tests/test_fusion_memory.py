@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fusion_memory import MemoryService, Scope
 from fusion_memory.api.service import (
@@ -18,6 +19,7 @@ from fusion_memory.ingestion.extractors import classify_milestone, classify_mile
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
 from fusion_memory.retrieval.evidence_pack import _exact_answer_candidates, _value_context_is_target_goal, _value_mentions
 from fusion_memory.retrieval.mmr import mmr
+from fusion_memory.retrieval.pipeline import RecallResult
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.temporal_pack import temporal_candidate_table, temporal_mentions
 from fusion_memory.retrieval.value_history_pack import build_value_history_table
@@ -1173,16 +1175,21 @@ class FusionMemoryTests(unittest.TestCase):
         try:
             service.add({"role": "user", "content": "First I created the schema. Then I implemented transaction CRUD."}, scope)
             service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [graph_candidate]
-            service._candidate_lists = lambda *args, **kwargs: [[graph_candidate]]
+            service._candidate_lists = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy candidate lists should not run"))
 
-            result = service.search(
-                "What order did I describe the work?",
-                scope,
-                {"query_type_hint": "event_ordering", "limit": 5},
-            )
+            with patch(
+                "fusion_memory.retrieval.pipeline.RecallOrchestrator.run",
+                return_value=RecallResult(candidate_lists=[[graph_candidate]], recalled_candidates=[graph_candidate]),
+            ) as recall_run:
+                result = service.search(
+                    "What order did I describe the work?",
+                    scope,
+                    {"query_type_hint": "event_ordering", "limit": 5},
+                )
         finally:
             service.close()
 
+        recall_run.assert_called_once()
         temporal_layer = result.coverage["pipeline_trace"]["pipeline_layers"]["TemporalRelations"]
         self.assertEqual(temporal_layer["relation_count"], 1)
         self.assertEqual(temporal_layer["relation_types"], ["before"])

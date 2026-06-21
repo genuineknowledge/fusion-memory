@@ -54,11 +54,11 @@ from fusion_memory.retrieval.mmr import mmr
 from fusion_memory.retrieval.pipeline import (
     CandidateFusionEngine,
     EvidencePackAssembler,
-    RecallResult,
+    QueryUnderstandingEngine,
+    RecallOrchestrator,
     RetrievalExecutionContext,
     RetrievalTraceRecorder,
     build_pipeline_record,
-    query_understanding_result_from_plan,
     selected_temporal_relation_summary,
 )
 from fusion_memory.retrieval.query_planner import QueryPlanner
@@ -372,36 +372,10 @@ class MemoryService:
         )
         model_call_marks = self._model_call_marks()
         trace_id = new_id("trace")
-        precomputed_plan = options.get("_plan")
-        plan = precomputed_plan or self.planner.plan(query, query_type_hint=options.get("query_type_hint"))
-        intent_telemetry = options.get("_intent_telemetry") if precomputed_plan else self.planner.last_intent_telemetry
+        query_understanding = QueryUnderstandingEngine().run(query, scope, options, self.planner)
+        plan = query_understanding.plan
+        intent_telemetry = query_understanding.intent_telemetry
         lifecycle = CandidateLifecycleRecorder()
-        query_language = "zh" if re.search(r"[\u4e00-\u9fff]", query) else "en"
-        query_features = [
-            feature
-            for feature, enabled in {
-                "current_value": bool(getattr(plan, "current_value", False)),
-                "multi_condition": bool(getattr(plan, "constraints", None)),
-                "temporal": plan.query_type in {"temporal_lookup", "event_ordering"},
-            }.items()
-            if enabled
-        ]
-        candidate_lists = self._candidate_lists(
-            query,
-            scope,
-            plan,
-            per_source_limit=options.get("per_source_limit", self.config.retrieval_top_k_per_source),
-            enabled_sources=options.get("enabled_sources"),
-            include_session=include_session,
-        )
-        for items in candidate_lists:
-            lifecycle.extend(items, "recalled", "candidate_provider")
-        query_understanding = query_understanding_result_from_plan(
-            plan=plan,
-            query=query,
-            intent_telemetry=intent_telemetry,
-            precomputed=precomputed_plan is not None,
-        )
         retrieval_context = RetrievalExecutionContext(
             service=self,
             query=query,
@@ -416,10 +390,10 @@ class MemoryService:
             rerank_top_n=options.get("rerank_top_n") or 0,
             event_milestone_group=_event_milestone_group,
         )
-        recall_result = RecallResult(
-            candidate_lists=candidate_lists,
-            recalled_candidates=[candidate for items in candidate_lists for candidate in items],
-        )
+        recall_result = RecallOrchestrator().run(retrieval_context)
+        candidate_lists = recall_result.candidate_lists
+        for items in candidate_lists:
+            lifecycle.extend(items, "recalled", "candidate_provider")
         fusion_result = CandidateFusionEngine().run(retrieval_context, recall_result)
         fused = fusion_result.fused
         scored = fusion_result.scored
@@ -586,10 +560,10 @@ class MemoryService:
         pipeline_record = build_pipeline_record(
             plan.query_type,
             str(mode),
-            language=query_language,
-            intent=plan.query_type,
-            features=query_features,
-            recalled=[candidate for items in candidate_lists for candidate in items],
+            language=query_understanding.language,
+            intent=query_understanding.intent,
+            features=list(query_understanding.features),
+            recalled=recall_result.recalled_candidates,
             selected=selected,
             dropped_count=len(dropped_high_signal),
             source_span_count=len(quota_result.selected_span_ids),
