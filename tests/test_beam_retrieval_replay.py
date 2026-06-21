@@ -242,6 +242,42 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertNotIn("query", payload["records"][0])
         self.assertEqual(service.answer_context.call_args.args[0], "What is my current IDE?")
 
+    def test_run_replay_writes_sanitized_candidate_lifecycle(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="What is my private token?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "s1"}],
+            coverage={
+                "coverage_insufficient": False,
+                "candidate_lifecycle": {
+                    "record_count": 2,
+                    "stage_counts": {"recalled": 1, "selected": 1},
+                    "source_counts": {"l0_raw_hybrid": 2},
+                    "reason_counts": {"candidate_provider": 1, "final_selection": 1},
+                    "raw_text": "do not persist",
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        lifecycle = payload["records"][0]["candidate_lifecycle"]
+        self.assertEqual(lifecycle["stage_counts"]["recalled"], 1)
+        self.assertEqual(lifecycle["source_counts"]["l0_raw_hybrid"], 2)
+        self.assertNotIn("raw_text", lifecycle)
+        self.assertNotIn("do not persist", json.dumps(payload, ensure_ascii=False))
+
     def test_run_replay_sanitizes_rule_hits_before_writing(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         raw_rule_hits = [

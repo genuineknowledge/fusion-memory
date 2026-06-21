@@ -132,6 +132,9 @@ def run_replay(
             "coverage_insufficient": bool(coverage.get("coverage_insufficient", False)),
             "pipeline_trace": _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or []),
         }
+        lifecycle = _sanitize_candidate_lifecycle(coverage.get("candidate_lifecycle"))
+        if lifecycle:
+            record["candidate_lifecycle"] = lifecycle
         if "rule_hits" in coverage:
             record["rule_hits"] = _sanitize_rule_hits(coverage["rule_hits"])
         records.append(record)
@@ -258,6 +261,22 @@ def _pipeline_trace_from_pack(coverage: dict[str, Any], debug_trace: Any) -> lis
     if coverage_trace:
         return [coverage_trace]
     return _sanitize_pipeline_trace(debug_trace)
+
+
+def _sanitize_candidate_lifecycle(value: Any) -> dict[str, Any]:
+    data = _object_dict(value)
+    if not data:
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("record_count", "contributed_count", "packed_source_span_count"):
+        count = _sanitize_count_value(data.get(key))
+        if count is not None:
+            out[key] = count
+    for key in ("stage_counts", "source_counts", "reason_counts"):
+        mapping = _sanitize_count_mapping(data.get(key))
+        if mapping:
+            out[key] = mapping
+    return out
 
 
 def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
