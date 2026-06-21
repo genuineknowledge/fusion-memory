@@ -6,8 +6,19 @@ from typing import Any, Callable
 from fusion_memory.core.models import MemoryEvent
 from fusion_memory.core.text import keyword_score
 from fusion_memory.retrieval.event_chronology_graph import build_event_chronology_graph, select_graph_first_event_ordering_candidates
-from fusion_memory.retrieval.rule_registry import record_rule_hit, register_rule
+from fusion_memory.retrieval.rule_registry import RuleDefinition, record_rule_hit, register_rule
 from fusion_memory.retrieval.taxonomy import taxonomy_alias_hits
+
+
+register_rule(
+    RuleDefinition(
+        rule_id="taxonomy.alias_match",
+        module=__name__,
+        purpose="Observe taxonomy alias matching without changing retrieval behavior.",
+        category="taxonomy_candidate",
+        ability="zh_recall",
+    )
+)
 
 
 SOFTWARE_ASPECT_TERMS = {
@@ -409,6 +420,14 @@ def _event_group_query_fit(query_lower: str, group: str | None, description: str
         return 0.0
     overlap = len(query_tokens.intersection(event_tokens.union(group_tokens))) / max(1, len(query_tokens))
     taxonomy_hits = taxonomy_alias_hits(description)
+    if taxonomy_hits:
+        record_rule_hit(
+            "taxonomy.alias_match",
+            query=query_lower,
+            text=description,
+            stage="search_filter",
+            metadata={"decision": "observed", "source": "taxonomy", "match_count": len(taxonomy_hits)},
+        )
     salient_hits = sum(1 for token in event_tokens.union(group_tokens) if token in SOFTWARE_ASPECT_TERMS)
     salient_hits += len(taxonomy_hits)
     action_hits = sum(1 for token in event_tokens if token in EVENT_ACTION_TERMS)

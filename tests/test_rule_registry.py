@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import subprocess
+import sys
 import unittest
 from datetime import datetime, timezone
 from types import MethodType
@@ -523,12 +526,13 @@ class RuleInstrumentationTests(unittest.TestCase):
 
         self.assertIn("默认数据", matches)
         hits = drain_rule_hits()
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0].rule_id, "zh_recall.cjk_exact_match")
-        self.assertEqual(hits[0].metadata["decision"], "observed")
-        self.assertEqual(hits[0].metadata["match_count"], len(matches))
-        self.assertEqual(hits[0].metadata["source"], "cjk_exact")
-        self.assertNotIn("默认数据库", str(hits[0].metadata))
+        self.assertEqual({hit.rule_id for hit in hits}, {"exact_match.cjk_phrase", "zh_recall.cjk_exact_match"})
+        for hit in hits:
+            self.assertEqual(hit.metadata["match_count"], len(matches))
+            self.assertNotIn("默认数据库", str(hit.metadata))
+        observed = next(hit for hit in hits if hit.rule_id == "zh_recall.cjk_exact_match")
+        self.assertEqual(observed.metadata["decision"], "observed")
+        self.assertEqual(observed.metadata["source"], "cjk_exact")
 
     def test_multi_condition_match_emits_observation_only_rule_hit(self) -> None:
         from fusion_memory.api.service_helpers import _matched_query_conditions
@@ -545,27 +549,59 @@ class RuleInstrumentationTests(unittest.TestCase):
         self.assertFalse(any("OpenClaw" in str(hit.__dict__) for hit in hits))
         self.assertFalse(any("beginner friendly" in str(hit.__dict__) for hit in hits))
 
-    def test_taxonomy_alias_match_emits_observation_only_rule_hit(self) -> None:
-        from fusion_memory.core.models import MemoryEvent, Scope
-        from fusion_memory.retrieval.event_graph_selection import _event_ordering_event_relevance
+    def test_taxonomy_alias_match_emits_observation_only_rule_hit_without_service_import_side_effects(self) -> None:
+        script = """
+import importlib
+import json
+import pathlib
+import types
+import sys
 
-        score = _event_ordering_event_relevance(
-            "walk me through the deployment work",
-            MemoryEvent(
-                event_id="evt-1",
-                scope=Scope(workspace_id="ws"),
-                event_type="milestone",
-                description="Configured Render deployment and Gunicorn server settings.",
-                participants=[],
-                source_span_ids=[],
-            ),
+repo_root = pathlib.Path.cwd()
+package = types.ModuleType("fusion_memory")
+package.__path__ = [str(repo_root / "fusion_memory")]
+sys.modules["fusion_memory"] = package
+
+from fusion_memory.retrieval.rule_registry import collect_rule_hits
+from fusion_memory.core.models import MemoryEvent, Scope
+
+event_graph_selection = importlib.import_module("fusion_memory.retrieval.event_graph_selection")
+
+with collect_rule_hits() as collector:
+    score = event_graph_selection._event_ordering_event_relevance(
+        "walk me through the deployment work",
+        MemoryEvent(
+            event_id="evt-1",
+            scope=Scope(workspace_id="ws"),
+            event_type="milestone",
+            description="Configured Render deployment and Gunicorn server settings.",
+            participants=[],
+            source_span_ids=[],
+        ),
+    )
+    hits = [hit.__dict__ for hit in collector.drain()]
+
+print(json.dumps({"score": score, "hits": hits}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd="/public/home/wwb/memory/.worktrees/rule-telemetry-coverage",
         )
+        payload = json.loads(result.stdout)
 
-        self.assertGreater(score, 0.0)
-        hits = drain_rule_hits()
-        self.assertTrue(any(hit.rule_id == "taxonomy.alias_match" for hit in hits))
-        self.assertFalse(any("deployment" in str(hit.__dict__) for hit in hits))
-        self.assertFalse(any("Render" in str(hit.__dict__) for hit in hits))
+        self.assertGreater(payload["score"], 0.0)
+        taxonomy_hits = [hit for hit in payload["hits"] if hit["rule_id"] == "taxonomy.alias_match"]
+        self.assertEqual(len(taxonomy_hits), 1)
+        taxonomy_hit = taxonomy_hits[0]
+        self.assertRegex(taxonomy_hit["query"], r"^[0-9a-f]{12}$")
+        self.assertNotEqual(taxonomy_hit["query"], "")
+        self.assertEqual(taxonomy_hit["metadata"]["decision"], "observed")
+        self.assertEqual(taxonomy_hit["metadata"]["source"], "taxonomy")
+        self.assertFalse(any("deployment" in json.dumps(hit, ensure_ascii=False) for hit in payload["hits"]))
+        self.assertFalse(any("Render" in json.dumps(hit, ensure_ascii=False) for hit in payload["hits"]))
 
     def test_search_trace_attaches_rule_hits(self) -> None:
         memory = MemoryService()
