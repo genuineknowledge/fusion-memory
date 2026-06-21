@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import MethodType
 
@@ -158,17 +159,11 @@ class RetrievalPipelineTests(unittest.TestCase):
         self.assertEqual(len(result.candidate_lists), 2)
         self.assertEqual([candidate.id for candidate in result.recalled_candidates], ["c1", "c2", "c3"])
         self.assertEqual(result.safe_record()["source_counts"], {"l0_raw": 2, "l1_fact": 1})
-        self.assertEqual(
-            result.safe_record()["provider_summary"],
-            [
-                {
-                    "provider_id": "fake_raw",
-                    "source_family": "raw",
-                    "output_count": 3,
-                    "output_source_counts": {"l0_raw": 2, "l1_fact": 1},
-                }
-            ],
-        )
+        provider_record = result.safe_record()["provider_summary"][0]
+        self.assertEqual(len(provider_record["provider_id"]), 12)
+        self.assertEqual(provider_record["source_family"], "raw")
+        self.assertEqual(provider_record["output_count"], 3)
+        self.assertEqual(provider_record["output_source_counts"], {"l0_raw": 2, "l1_fact": 1})
         self.assertEqual(registry.contexts[0].enabled_sources, {"raw"})
         self.assertTrue(registry.contexts[0].include_session)
         self.assertNotIn("zinc-sparrow-17", repr(result.safe_record()))
@@ -288,24 +283,83 @@ class RetrievalPipelineTests(unittest.TestCase):
         )
         payload = record.to_dict()
 
-        self.assertEqual(
-            payload["pipeline_layers"]["CandidateRecall"]["provider_summary"],
-            [
-                {
-                    "provider_id": "raw_exact",
-                    "source_family": "raw",
-                    "output_count": 1,
-                    "output_source_counts": {"l0_raw": 1},
-                    "production_default": True,
-                    "shadow_only": False,
-                    "graph_related": False,
-                }
-            ],
-        )
+        provider_record = payload["pipeline_layers"]["CandidateRecall"]["provider_summary"][0]
+        self.assertEqual(len(provider_record["provider_id"]), 12)
+        self.assertEqual(provider_record["source_family"], "raw")
+        self.assertEqual(provider_record["output_count"], 1)
+        self.assertEqual(provider_record["output_source_counts"], {"l0_raw": 1})
+        self.assertTrue(provider_record["production_default"])
+        self.assertFalse(provider_record["shadow_only"])
+        self.assertFalse(provider_record["graph_related"])
         self.assertEqual(payload["candidate_recall"], payload["pipeline_layers"]["CandidateRecall"])
         self.assertNotIn("sample_text", repr(payload))
         self.assertNotIn("raw_query", repr(payload))
         self.assertNotIn("zinc-sparrow-17", repr(payload))
+
+    def test_provider_summary_dimension_fields_do_not_emit_raw_strings(self) -> None:
+        secret = "secret-token-123"
+        provider_summary = [
+            {
+                "provider_id": f"private provider {secret}",
+                "source_family": f"custom source {secret}",
+                "output_count": "1",
+                "output_source_counts": {f"candidate text {secret}": "1"},
+                "production_default": True,
+                "shadow_only": False,
+                "graph_related": False,
+            }
+        ]
+        recalled = [
+            Candidate("c1", "span", f"raw candidate {secret}", "l0_raw", {"utility_score": 0.8}, ["s1"], {}),
+        ]
+
+        record_payload = build_pipeline_record(
+            "fact_lookup",
+            "benchmark",
+            language="en",
+            intent="fact_lookup",
+            features=[],
+            recalled=recalled,
+            selected=[],
+            dropped_count=0,
+            source_span_count=1,
+            coverage_insufficient=False,
+            provider_summary=provider_summary,
+        ).to_dict()
+        recall_payload = RecallResult(
+            candidate_lists=[recalled],
+            recalled_candidates=recalled,
+            provider_summary=provider_summary,
+        ).safe_record()
+
+        for payload in (record_payload, recall_payload):
+            serialized = json.dumps(payload, sort_keys=True)
+            self.assertNotIn(secret, repr(payload))
+            self.assertNotIn(secret, serialized)
+
+    def test_provider_summary_invalid_counts_are_coerced_safely(self) -> None:
+        provider_summary = [
+            {
+                "provider_id": "raw_span",
+                "source_family": "raw",
+                "output_count": "invalid",
+                "output_source_counts": {"l0_raw": "invalid"},
+            }
+        ]
+
+        payload = RecallResult(provider_summary=provider_summary, candidate_lists=[], recalled_candidates=[]).safe_record()
+
+        self.assertEqual(
+            payload["provider_summary"],
+            [
+                {
+                    "provider_id": "raw_span",
+                    "source_family": "raw",
+                    "output_count": 0,
+                    "output_source_counts": {"l0_raw": 0},
+                }
+            ],
+        )
 
     def test_build_pipeline_record_can_include_temporal_relation_summary(self) -> None:
         record = build_pipeline_record(

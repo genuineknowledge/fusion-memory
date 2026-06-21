@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -11,6 +13,67 @@ from fusion_memory.retrieval.providers import default_provider_registry
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
 from fusion_memory.retrieval.scoring import score_candidate
 from fusion_memory.retrieval.temporal_relations import temporal_relation_summary_from_safe_records
+
+
+_SAFE_PROVIDER_DIMENSION_IDENTIFIERS = {
+    "aggregation_context_support",
+    "aggregation_coverage",
+    "aggregation_coverage_raw",
+    "broad_raw",
+    "broad_raw_recall",
+    "contradiction_claim",
+    "contradiction_claim_negative",
+    "contradiction_claim_positive",
+    "contradiction_claim_uncertain",
+    "entities",
+    "entity_graph",
+    "event_ordering_coverage",
+    "event_ordering_coverage_support",
+    "event_ordering_episode",
+    "event_ordering_episode_recall",
+    "event_ordering_timeline",
+    "event_timeline_graph",
+    "events",
+    "exact",
+    "exact_answer",
+    "facts",
+    "filtered",
+    "final_selection",
+    "graph",
+    "high_precision_current_value",
+    "hybrid",
+    "l0_raw",
+    "l0_raw_hybrid",
+    "l1_fact",
+    "l1_fact_hybrid",
+    "l2_event_graph",
+    "l3_current_view",
+    "l3_entity_profile",
+    "legacy_event_ordering_fallback",
+    "legacy_fallback",
+    "misranked",
+    "packed",
+    "profiles",
+    "quality_fallback",
+    "raw",
+    "raw_provider",
+    "raw_scent_trail",
+    "raw_span",
+    "recalled",
+    "rescued",
+    "scent_trail",
+    "scored",
+    "selected",
+    "taxonomy",
+    "temporal_coverage",
+    "temporal_coverage_raw",
+    "timeline",
+    "topic_scope",
+    "topic_scope_raw",
+    "topic_scoped_raw",
+    "unspecified",
+    "views",
+}
 
 
 @dataclass(frozen=True)
@@ -242,6 +305,32 @@ def _candidate_source_counts(candidates: list[Candidate]) -> dict[str, int]:
     return source_counts
 
 
+def _safe_provider_dimension(value: Any) -> str:
+    text = value if isinstance(value, str) else str(value)
+    if _is_safe_provider_identifier(text):
+        return text
+    return hashlib.sha1(repr(value).encode("utf-8")).hexdigest()[:12]
+
+
+def _is_safe_provider_identifier(value: str) -> bool:
+    if len(value) > 128:
+        return False
+    if value != value.strip():
+        return False
+    if any(char.isspace() or "\u4e00" <= char <= "\u9fff" for char in value):
+        return False
+    return value in _SAFE_PROVIDER_DIMENSION_IDENTIFIERS
+
+
+def _safe_provider_count(value: Any) -> int:
+    try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _safe_provider_summary(summary: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key in (
@@ -257,13 +346,16 @@ def _safe_provider_summary(summary: dict[str, Any]) -> dict[str, Any]:
             continue
         value = summary[key]
         if key == "output_source_counts" and isinstance(value, dict):
-            safe[key] = {str(source): int(count) for source, count in value.items()}
+            safe[key] = {
+                _safe_provider_dimension(source): _safe_provider_count(count)
+                for source, count in value.items()
+            }
         elif key == "output_count":
-            safe[key] = int(value)
+            safe[key] = _safe_provider_count(value)
         elif key in {"production_default", "shadow_only", "graph_related"}:
             safe[key] = bool(value)
         else:
-            safe[key] = str(value)
+            safe[key] = _safe_provider_dimension(value)
     return safe
 
 
