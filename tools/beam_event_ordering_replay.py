@@ -352,7 +352,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                 },
             },
-            "records": records,
+            "records": _sanitize_records_for_artifact(records),
         }
         if getattr(args, "gate", False):
             report["gate"] = evaluate_gate(report["summary"])
@@ -843,6 +843,70 @@ def _active_paths(mode: str) -> set[str]:
         "hybrid": {"hybrid"},
     }
     return mapping.get(mode, set(REPLAY_PATHS))
+
+
+def _sanitize_records_for_artifact(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_sanitize_record_for_artifact(record) for record in records]
+
+
+def _sanitize_record_for_artifact(record: dict[str, Any]) -> dict[str, Any]:
+    reference = [str(item) for item in record.get("reference", []) if str(item).strip()]
+    sanitized: dict[str, Any] = {
+        "query_id": record.get("query_id"),
+        "query_hash": record.get("query_hash"),
+        "query_length": record.get("query_length"),
+        "reference_count": len(reference),
+        "reference_hashes": [stable_hash(item) for item in reference],
+        "bucket": record.get("bucket"),
+        "graph_fallback": bool(record.get("graph_fallback")),
+        "coverage": record.get("coverage", {}),
+        "paths": {
+            path: _sanitize_path_for_artifact(path_info)
+            for path, path_info in (record.get("paths") or {}).items()
+            if isinstance(path_info, dict)
+        },
+    }
+    for key in (
+        "topic_drift_count",
+        "duplicate_label_count",
+        "graph_empty",
+        "dropped_high_signal_candidate_count",
+        "over_abstract_label_count",
+    ):
+        if key in record:
+            sanitized[key] = record[key]
+    return sanitized
+
+
+def _sanitize_path_for_artifact(path_info: dict[str, Any]) -> dict[str, Any]:
+    items = [str(item) for item in path_info.get("items", []) if str(item).strip()]
+    sanitized: dict[str, Any] = {
+        "active": bool(path_info.get("active")),
+        "item_count": len(items),
+        "item_hashes": [stable_hash(item) for item in items],
+        "sources": [str(source) for source in path_info.get("sources", []) if str(source).strip()],
+    }
+    if path_info.get("inactive"):
+        sanitized["inactive"] = True
+    if "metrics" in path_info:
+        sanitized["metrics"] = _sanitize_metrics_for_artifact(path_info.get("metrics", {}))
+    if "coverage" in path_info:
+        sanitized["coverage"] = path_info.get("coverage", {})
+    return sanitized
+
+
+def _sanitize_metrics_for_artifact(metrics: Any) -> dict[str, Any]:
+    if not isinstance(metrics, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in metrics.items():
+        if key == "aligned":
+            aligned = [str(item) for item in value if str(item).strip()] if isinstance(value, list) else []
+            sanitized["aligned_count"] = len(aligned)
+            sanitized["aligned_hashes"] = [stable_hash(item) for item in aligned]
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 def _build_record_paths(

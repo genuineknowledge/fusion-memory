@@ -224,8 +224,11 @@ Observed:
 - Provider audit row count was `15`.
 - Combined rule audit included `current_value.stale_history_marker`, `event_ordering.legacy_rescue`, `multi_condition.query_token_match`, and `taxonomy.alias_match`.
 - `zh_recall.cjk_exact_match` did not appear in this bounded smoke because the replay output for the two built-in `zh_recall` probes did not emit that rule id in these runs.
-- Retrieval replay artifacts (`current_value`, `multi_condition`, `zh_recall`) and both audit outputs stayed free of the checked plaintext query/candidate/traceback markers.
-- `event_ordering.json` still contains large plaintext `reference` and `paths.*.items` strings, so the strict "no raw text in replay JSON" expectation is not currently met for that tool. This task documented the issue and did not change production replay behavior outside the task brief ownership.
+- Initial `event_ordering.json` smoke exposed plaintext `reference`, `paths.*.items`, and `metrics.aligned` strings.
+- Fixed `tools/beam_event_ordering_replay.py` so persisted replay records keep `reference_count`, `reference_hashes`, `item_count`, `item_hashes`, `aligned_count`, and `aligned_hashes` instead of raw ordering text. Metrics and audit-relevant coverage are preserved.
+- Re-ran event_ordering smoke to `.runtime/task3-smoke/event_ordering_sanitized_v2.json`; `reference`, path `items`, and `metrics.aligned` are absent from persisted records.
+- Checked plaintext markers including `I'm Craig`, `personal budget tracker`, `Flask 2.3.1`, `SQLite 3.39`, `Core functionality`, and `Transaction error handling`; none appeared in the sanitized v2 event_ordering replay artifact.
+- Re-ran `tools/rule_audit.py` against sanitized v2 event_ordering plus the bounded retrieval replay artifacts. Provider audit remained at `15` rows and combined rule audit included `current_value.stale_history_marker`, `event_ordering.legacy_rescue`, `multi_condition.query_token_match`, and `taxonomy.alias_match`.
 
 - [x] **Step 4: Commit**
 
