@@ -584,7 +584,7 @@ class RuleInstrumentationTests(unittest.TestCase):
             )
             raise RuntimeError("candidate generation failed")
 
-        with patch("fusion_memory.retrieval.pipeline.RecallOrchestrator.run", side_effect=failing_recall):
+        with patch.object(memory, "_recall_candidates", side_effect=failing_recall):
             with self.assertRaises(RuntimeError):
                 memory.search("我的默认数据库是什么？", scope, {"mode": "fast", "limit": 5})
 

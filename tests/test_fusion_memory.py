@@ -1177,8 +1177,9 @@ class FusionMemoryTests(unittest.TestCase):
             service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [graph_candidate]
             service._candidate_lists = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy candidate lists should not run"))
 
-            with patch(
-                "fusion_memory.retrieval.pipeline.RecallOrchestrator.run",
+            with patch.object(
+                service,
+                "_recall_candidates",
                 return_value=RecallResult(candidate_lists=[[graph_candidate]], recalled_candidates=[graph_candidate]),
             ) as recall_run:
                 result = service.search(

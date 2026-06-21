@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -691,6 +692,11 @@ class BeamReplayModeTests(unittest.TestCase):
         self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
         self.assertFalse(report["records"][0]["paths"]["legacy"]["active"])
         self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
+        serialized_report = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("rank the work", serialized_report)
+        self.assertNotIn("query", report["records"][0])
+        self.assertEqual(report["records"][0]["query_hash"], replay.stable_hash("rank the work"))
+        self.assertEqual(report["records"][0]["query_length"], len("rank the work"))
 
     def test_run_replay_graph_only_gate_fails_with_insufficient_active_paths(self) -> None:
         query = SimpleNamespace(

@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from fusion_memory import Scope  # noqa: E402
 from fusion_memory.core.models import Candidate  # noqa: E402
 from fusion_memory.core.runtime_config import memory_service_from_env  # noqa: E402
+from fusion_memory.core.text import stable_hash  # noqa: E402
 from fusion_memory.eval.beam_adapter import (  # noqa: E402
     BeamAdapter,
     _align_order_items,
@@ -298,7 +299,8 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                 _with_record_diagnostics(
                     {
                         "query_id": query.id,
-                        "query": query.query,
+                        "query_hash": stable_hash(query.query),
+                        "query_length": len(query.query),
                         "reference": reference,
                         "bucket": _event_ordering_bucket(query.query, reference),
                         "graph_fallback": graph_fallback,

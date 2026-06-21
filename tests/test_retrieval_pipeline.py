@@ -524,8 +524,8 @@ class RetrievalPipelineTests(unittest.TestCase):
             {},
         )
 
-        def fake_candidate_lists(*args, **kwargs):
-            return [[base, rescue]]
+        def fake_recall_candidates(context):
+            return RecallResult(candidate_lists=[[base, rescue]], recalled_candidates=[base, rescue])
 
         def fake_enforce(plan, search_scope, candidates, *, include_session=False):
             return QuotaResult(candidates=list(candidates), selected_span_ids=["base"], required=1, coverage_insufficient=False, backfilled=0)
@@ -536,7 +536,7 @@ class RetrievalPipelineTests(unittest.TestCase):
         def fake_preserve_scent(candidates, selected, limit):
             return [rescue, base][:limit]
 
-        memory._candidate_lists = fake_candidate_lists
+        memory._recall_candidates = fake_recall_candidates
         memory.quota.enforce = fake_enforce
         memory.planner.plan = lambda query, query_type_hint=None: QueryPlan(query=query, query_type="fact_lookup", entities=[], time_constraints=[])
         memory._preserve_high_signal_exact = fake_mmr_selected

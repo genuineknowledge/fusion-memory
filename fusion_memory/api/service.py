@@ -390,7 +390,7 @@ class MemoryService:
             rerank_top_n=options.get("rerank_top_n") or 0,
             event_milestone_group=_event_milestone_group,
         )
-        recall_result = RecallOrchestrator().run(retrieval_context)
+        recall_result = self._recall_candidates(retrieval_context)
         candidate_lists = recall_result.candidate_lists
         for items in candidate_lists:
             lifecycle.extend(items, "recalled", "candidate_provider")
@@ -1598,6 +1598,9 @@ class MemoryService:
             include_session=include_session,
             event_milestone_group=_event_milestone_group,
         )
+
+    def _recall_candidates(self, context: RetrievalExecutionContext) -> RecallResult:
+        return RecallOrchestrator().run(context)
 
     def _event_ordering_graph_selector_candidates(
         self,
