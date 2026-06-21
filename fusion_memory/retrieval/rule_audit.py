@@ -108,6 +108,8 @@ def _cleanup_classification(
     category: str,
     hit_count: int,
     contribution_count: int,
+    observation_count: int,
+    negative_impact_count: int,
     duplicate_of: str | None,
     protected: bool,
     protected_reason: str,
@@ -127,6 +129,9 @@ def _cleanup_classification(
         cleanup_action = "delete_duplicate"
     elif hit_count == 0:
         cleanup_action = "delete_no_hits"
+    elif observation_count == hit_count and contribution_count == 0 and negative_impact_count == 0:
+        cleanup_action = "keep_observation"
+        cleanup_blockers.append("observation_only_rule")
     elif contribution_count == 0:
         cleanup_action = "delete_no_contribution"
     else:
@@ -156,6 +161,7 @@ def build_rule_audit(
         negative_impact_count = sum(
             1 for hit in rule_hits if hit.get("impact") in {"filtered", "dropped", "misranked"}
         )
+        observation_count = sum(1 for hit in rule_hits if hit.get("impact") == "observed")
         evidence_inputs = sorted(
             {
                 audit_input
@@ -172,6 +178,8 @@ def build_rule_audit(
             rule.category,
             len(rule_hits),
             contribution_count,
+            observation_count,
+            negative_impact_count,
             duplicate_of,
             rule.protected,
             rule.protected_reason,

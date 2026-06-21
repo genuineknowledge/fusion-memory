@@ -451,6 +451,35 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(zero_hit["cleanup_action"], "delete_no_hits")
         self.assertTrue(zero_hit["safe_to_delete"])
 
+    def test_registered_rule_audit_keeps_observation_only_rules(self) -> None:
+        rules = [
+            RuleDefinition(
+                rule_id="multi_condition.query_token_match",
+                module="fusion_memory.api.service_helpers",
+                purpose="observe multi-condition matching",
+                category="multi_condition",
+                ability="multi_condition",
+            ),
+            RuleDefinition(
+                rule_id="zh_recall.cjk_exact_match",
+                module="fusion_memory.api.service_helpers",
+                purpose="observe CJK exact matching",
+                category="zh_recall",
+                ability="zh_recall",
+            ),
+        ]
+        hits = [
+            {"rule_id": "multi_condition.query_token_match", "impact": "observed"},
+            {"rule_id": "zh_recall.cjk_exact_match", "impact": "observed"},
+        ]
+
+        audit = build_rule_audit(rules, hits)
+
+        for row in audit:
+            self.assertEqual(row["cleanup_action"], "keep_observation")
+            self.assertEqual(row["cleanup_blockers"], ["observation_only_rule"])
+            self.assertFalse(row["safe_to_delete"])
+
     def test_registered_rule_audit_keeps_zero_hit_legacy_shadow_rules(self) -> None:
         rules = [
             RuleDefinition(
