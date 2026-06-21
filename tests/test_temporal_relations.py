@@ -38,8 +38,39 @@ class TemporalRelationTests(unittest.TestCase):
             source_span_id="span-2",
         )
 
-        self.assertIn("deadline", {relation.relation_type for relation in relations})
-        self.assertIn("decision_at", {relation.relation_type for relation in relations})
+        relation_by_type = {relation.relation_type: relation for relation in relations}
+
+        self.assertIn("deadline", relation_by_type)
+        self.assertIn("decision_at", relation_by_type)
+        self.assertEqual(relation_by_type["observed_at"].normalized_date, "2026-07-01")
+        self.assertIsNone(relation_by_type["deadline"].normalized_date)
+        self.assertIsNone(relation_by_type["decision_at"].normalized_date)
+
+    def test_query_only_current_phrasing_does_not_emit_update_relations(self) -> None:
+        relations = temporal_relations_for_text(
+            "My budget is $35.",
+            query="what is my current budget?",
+            value_text="$35",
+            value_type="money",
+            source_span_id="span-4",
+        )
+
+        relation_types = {relation.relation_type for relation in relations}
+        self.assertNotIn("changed_to", relation_types)
+        self.assertNotIn("supersedes", relation_types)
+
+    def test_does_not_infer_range_endpoints_from_previous_marker_and_date_alone(self) -> None:
+        relations = temporal_relations_for_text(
+            "The previous budget was $20 on June 1, 2026.",
+            query="what changed?",
+            value_text="$20",
+            value_type="money",
+            source_span_id="span-5",
+        )
+
+        relation_types = {relation.relation_type for relation in relations}
+        self.assertNotIn("valid_from", relation_types)
+        self.assertNotIn("valid_to", relation_types)
 
     def test_summary_counts_relation_types_and_sources(self) -> None:
         relations = temporal_relations_for_text(

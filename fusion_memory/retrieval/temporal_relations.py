@@ -73,7 +73,7 @@ def temporal_relations_for_text(
 ) -> list[TemporalRelation]:
     del value_type
     lower_text = text.lower()
-    lower_query = query.lower()
+    del query
     has_value = bool(value_text)
     source_ids = (source_span_id,) if source_span_id else ()
 
@@ -111,7 +111,7 @@ def temporal_relations_for_text(
             )
         )
 
-    if has_value and (_UPDATE_RE.search(lower_text) or any(token in lower_query for token in ("current", "latest", "now", "new value", "what is my"))):
+    if has_value and _UPDATE_RE.search(lower_text):
         relations.append(
             _relation(
                 "changed_to",
@@ -139,7 +139,6 @@ def temporal_relations_for_text(
                 reason_code="deadline_marker",
                 role_labels=("deadline",),
                 source_span_ids=source_ids,
-                normalized_date=normalized_date,
             )
         )
 
@@ -151,7 +150,6 @@ def temporal_relations_for_text(
                 reason_code="decision_marker",
                 role_labels=("decision_point",),
                 source_span_ids=source_ids,
-                normalized_date=normalized_date,
             )
         )
 
@@ -164,26 +162,6 @@ def temporal_relations_for_text(
                 role_labels=("normalized_date",),
                 source_span_ids=source_ids,
                 normalized_date=normalized_date,
-            )
-        )
-
-    if has_value and _DATE_RE.search(lower_text) and _SOURCE_VALUE_RE.search(lower_text):
-        relations.append(
-            _relation(
-                "valid_from",
-                confidence=0.58,
-                reason_code="range_endpoint",
-                role_labels=("range_start",),
-                source_span_ids=source_ids,
-            )
-        )
-        relations.append(
-            _relation(
-                "valid_to",
-                confidence=0.58,
-                reason_code="range_endpoint",
-                role_labels=("range_end",),
-                source_span_ids=source_ids,
             )
         )
 
