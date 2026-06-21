@@ -41,6 +41,7 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "packed",
     "profiles",
     "quality_fallback",
+    "raw",
     "raw_provider",
     "raw_scent_trail",
     "raw_span",
@@ -54,7 +55,9 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "temporal_coverage_raw",
     "timeline",
     "topic_scope",
+    "topic_scope_raw",
     "topic_scoped_raw",
+    "graph",
     "views",
 }
 
@@ -105,6 +108,8 @@ def _cleanup_classification(
     category: str,
     hit_count: int,
     contribution_count: int,
+    observation_count: int,
+    negative_impact_count: int,
     duplicate_of: str | None,
     protected: bool,
     protected_reason: str,
@@ -117,6 +122,9 @@ def _cleanup_classification(
         cleanup_blockers.append(f"protected:{protected_reason or 'unspecified'}")
     elif rule_id.startswith("event_ordering.legacy"):
         cleanup_action = "keep_shadow"
+    elif hit_count > 0 and observation_count == hit_count and contribution_count == 0 and negative_impact_count == 0:
+        cleanup_action = "keep_observation"
+        cleanup_blockers.append("observation_only_rule")
     elif domain_label_or_taxonomy:
         cleanup_action = "migrate_to_taxonomy"
         cleanup_blockers.append("domain_label_taxonomy_migration_required")
@@ -153,6 +161,7 @@ def build_rule_audit(
         negative_impact_count = sum(
             1 for hit in rule_hits if hit.get("impact") in {"filtered", "dropped", "misranked"}
         )
+        observation_count = sum(1 for hit in rule_hits if hit.get("impact") == "observed")
         evidence_inputs = sorted(
             {
                 audit_input
@@ -169,6 +178,8 @@ def build_rule_audit(
             rule.category,
             len(rule_hits),
             contribution_count,
+            observation_count,
+            negative_impact_count,
             duplicate_of,
             rule.protected,
             rule.protected_reason,

@@ -188,6 +188,37 @@ class RuleAuditTests(unittest.TestCase):
         self.assertNotIn("private question", output_text)
         self.assertNotIn("candidate text", output_text)
 
+    def test_build_provider_audit_keeps_raw_source_family_readable(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "_audit_input": "replay.json",
+                "pipeline_trace": {
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "provider_summary": [
+                                {
+                                    "provider_id": "raw_span",
+                                    "source_family": "raw",
+                                    "output_count": 2,
+                                    "output_source_counts": {"l0_raw": 1, "topic_scope_raw": 1},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        ]
+
+        audit = self._build_provider_audit(records)
+
+        self.assertEqual(audit[0]["provider_id"], "raw_span")
+        self.assertEqual(audit[0]["source_family"], "raw")
+        self.assertEqual(audit[0]["output_source_counts"], {"l0_raw": 1, "topic_scope_raw": 1})
+
     def test_cli_writes_provider_json_and_csv_without_changing_rule_outputs(self) -> None:
         payload = {
             "records": [
@@ -726,6 +757,30 @@ class RuleAuditTests(unittest.TestCase):
         self.assertEqual(row["cleanup_action"], "delete_duplicate")
         self.assertEqual(row["cleanup_phase"], "first_pass")
         self.assertTrue(row["safe_to_delete"])
+
+    def test_cleanup_gate_keeps_observation_only_rules(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {"rule_id": "multi_condition.query_token_match", "impact": "observed"},
+                    {"rule_id": "zh_recall.cjk_exact_match", "impact": "observed"},
+                    {
+                        "rule_id": "taxonomy.alias_match",
+                        "impact": "observed",
+                        "metadata": {"category": "taxonomy_candidate"},
+                    },
+                ],
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        by_rule = {row["rule_id"]: row for row in audit}
+
+        for rule_id in ("multi_condition.query_token_match", "zh_recall.cjk_exact_match", "taxonomy.alias_match"):
+            self.assertEqual(by_rule[rule_id]["cleanup_action"], "keep_observation")
+            self.assertEqual(by_rule[rule_id]["cleanup_blockers"], ["observation_only_rule"])
+            self.assertFalse(by_rule[rule_id]["safe_to_delete"])
 
     def test_cleanup_gate_migrates_domain_label_rules_even_when_duplicate(self) -> None:
         records = [

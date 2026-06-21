@@ -12,6 +12,7 @@ from tools.beam_event_ordering_replay import (
     _compact_coverage,
     _dual_graph_legacy_items,
     _hybrid_items,
+    _sanitize_records_for_artifact,
     _summary_for_stdout,
     _graph_items,
     _record_diagnostics,
@@ -42,6 +43,54 @@ class BeamReplaySummaryTests(unittest.TestCase):
         self.assertTrue(summary["dual_vs_legacy_passed"])
         self.assertEqual(summary["dual_lift_over_legacy_f1"], 0.03)
         self.assertEqual(summary["cluster_expanded_query_count"], 1)
+
+
+class BeamReplayArtifactSanitizationTests(unittest.TestCase):
+    def test_sanitize_records_for_artifact_hashes_reference_and_path_items(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "query_hash": "query-hash",
+                "query_length": 17,
+                "reference": ["first private setup step", "second private deployment step"],
+                "bucket": "explicit_order",
+                "graph_fallback": False,
+                "coverage": {"rule_hits": [{"rule_id": "event_ordering.legacy_rescue"}]},
+                "paths": {
+                    "graph": {
+                        "active": True,
+                        "items": ["first private setup step"],
+                        "sources": ["event_ordering_persisted_graph"],
+                        "metrics": {"f1": 1.0},
+                    },
+                    "legacy": {
+                        "active": True,
+                        "items": ["raw user request about private budget tracking"],
+                        "sources": ["event_ordering_timeline"],
+                        "metrics": {"f1": 0.5, "aligned": ["raw user request about private budget tracking"]},
+                    },
+                    "dual": {"active": False, "items": [], "sources": [], "inactive": True},
+                    "hybrid": {"active": False, "items": [], "sources": [], "inactive": True},
+                },
+            }
+        ]
+
+        sanitized = _sanitize_records_for_artifact(records)
+        serialized = json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+        record = sanitized[0]
+
+        self.assertNotIn("reference", record)
+        self.assertEqual(record["reference_count"], 2)
+        self.assertEqual(len(record["reference_hashes"]), 2)
+        self.assertEqual(record["paths"]["graph"]["item_count"], 1)
+        self.assertEqual(len(record["paths"]["graph"]["item_hashes"]), 1)
+        self.assertNotIn("items", record["paths"]["graph"])
+        self.assertNotIn("aligned", record["paths"]["legacy"]["metrics"])
+        self.assertEqual(record["paths"]["legacy"]["metrics"]["aligned_count"], 1)
+        self.assertEqual(len(record["paths"]["legacy"]["metrics"]["aligned_hashes"]), 1)
+        self.assertNotIn("first private setup step", serialized)
+        self.assertNotIn("raw user request", serialized)
+        self.assertNotIn("private budget", serialized)
 
 
 class BeamEventOrderingReplayTests(unittest.TestCase):
@@ -664,7 +713,9 @@ class BeamReplayModeTests(unittest.TestCase):
         self.assertTrue(report["records"][0]["paths"]["legacy"]["active"])
         self.assertTrue(report["records"][0]["paths"]["dual"]["active"])
         self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
-        self.assertEqual(report["records"][0]["paths"]["dual"]["items"], ["first step", "second step"])
+        self.assertNotIn("items", report["records"][0]["paths"]["dual"])
+        self.assertEqual(report["records"][0]["paths"]["dual"]["item_count"], 2)
+        self.assertEqual(len(report["records"][0]["paths"]["dual"]["item_hashes"]), 2)
         self.assertEqual(report["summary"]["dual"]["count"], 1)
         self.assertEqual(report["summary"]["hybrid"]["count"], 0)
 
@@ -720,8 +771,11 @@ class BeamReplayModeTests(unittest.TestCase):
         self.assertTrue(report["records"][0]["paths"]["graph"]["active"])
         self.assertTrue(report["records"][0]["paths"]["legacy"]["active"])
         self.assertFalse(report["records"][0]["paths"]["hybrid"]["active"])
-        self.assertEqual(report["records"][0]["paths"]["graph"]["items"], ["first step"])
-        self.assertEqual(report["records"][0]["paths"]["legacy"]["items"], ["first step", "second step"])
+        self.assertNotIn("reference", report["records"][0])
+        self.assertNotIn("items", report["records"][0]["paths"]["graph"])
+        self.assertNotIn("items", report["records"][0]["paths"]["legacy"])
+        self.assertEqual(report["records"][0]["paths"]["graph"]["item_count"], 1)
+        self.assertEqual(report["records"][0]["paths"]["legacy"]["item_count"], 2)
         self.assertEqual(report["summary"]["hybrid"]["count"], 0)
 
     def test_run_replay_graph_only_excludes_inactive_paths_from_summaries(self) -> None:

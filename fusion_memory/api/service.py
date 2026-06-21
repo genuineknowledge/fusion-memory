@@ -166,7 +166,6 @@ register_rule(
     )
 )
 
-
 class MemoryService:
     def __init__(
         self,

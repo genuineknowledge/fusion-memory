@@ -48,6 +48,8 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "packed",
     "profiles",
     "quality_fallback",
+    "raw",
+    "l0_raw",
     "raw_provider",
     "raw_scent_trail",
     "raw_span",
@@ -61,7 +63,9 @@ _SAFE_DIMENSION_IDENTIFIERS = {
     "temporal_coverage_raw",
     "timeline",
     "topic_scope",
+    "topic_scope_raw",
     "topic_scoped_raw",
+    "graph",
     "unspecified",
     "views",
 }
@@ -209,9 +213,18 @@ def _ability_for_hit(hit: dict[str, Any]) -> str | None:
     return None
 
 
-def _recommendation_for_rule(rule_id: str, hit_count: int, contribution_count: int, categories: set[str]) -> str:
+def _recommendation_for_rule(
+    rule_id: str,
+    hit_count: int,
+    contribution_count: int,
+    observation_count: int,
+    negative_impact_count: int,
+    categories: set[str],
+) -> str:
     if rule_id.startswith("event_ordering.legacy"):
         return "legacy_shadow"
+    if hit_count > 0 and observation_count == hit_count and contribution_count == 0 and negative_impact_count == 0:
+        return "keep_observation"
     if ".domain_label" in rule_id or "taxonomy_candidate" in categories:
         return "migrate_to_taxonomy"
     if hit_count == 0 or contribution_count == 0:
@@ -236,6 +249,9 @@ def _cleanup_classification(
         cleanup_blockers.append(f"protected:{protected_reason or 'unspecified'}")
     elif rule_id.startswith("event_ordering.legacy"):
         cleanup_action = "keep_shadow"
+    elif recommendation == "keep_observation":
+        cleanup_action = "keep_observation"
+        cleanup_blockers.append("observation_only_rule")
     elif domain_label_or_taxonomy:
         cleanup_action = "migrate_to_taxonomy"
         cleanup_blockers.append("domain_label_taxonomy_migration_required")
@@ -280,6 +296,7 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                     "query_ids": set(),
                     "ability": None,
                     "contribution_count": 0,
+                    "observation_count": 0,
                     "negative_impact_count": 0,
                     "dropped_count": 0,
                     "candidate_sources": set(),
@@ -313,6 +330,8 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
             )
             if contributed:
                 row["contribution_count"] += 1
+            if hit.get("impact") == "observed":
+                row["observation_count"] += 1
             if hit.get("impact") in {"filtered", "dropped", "misranked"}:
                 row["negative_impact_count"] += 1
             if isinstance(contributed_candidate_id, str) and contributed_candidate_id:
@@ -355,8 +374,17 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
         row = stats[rule_id]
         hit_count = int(row["hit_count"])
         contribution_count = int(row["contribution_count"])
+        negative_impact_count = int(row["negative_impact_count"])
+        observation_count = int(row.get("observation_count", 0))
         categories = set(row["categories"])
-        recommendation = _recommendation_for_rule(rule_id, hit_count, contribution_count, categories)
+        recommendation = _recommendation_for_rule(
+            rule_id,
+            hit_count,
+            contribution_count,
+            observation_count,
+            negative_impact_count,
+            categories,
+        )
         duplicate_of = row["duplicate_of"] if isinstance(row["duplicate_of"], str) else None
         explicit_protected, explicit_protected_reason = _explicit_protected_governance(row)
         fallback_protected, fallback_protected_reason = _protected_governance_for_rule(rule_id)
