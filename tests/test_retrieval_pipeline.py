@@ -143,3 +143,17 @@ class RetrievalPipelineTests(unittest.TestCase):
         self.assertNotIn(raw_query_text, repr(lifecycle))
         self.assertNotIn(raw_memory_text, repr(trace["candidate_lifecycle_trace"]))
         self.assertNotIn(raw_query_text, repr(trace["candidate_lifecycle_trace"]))
+
+    def test_answer_context_lifecycle_reports_packed_source_spans(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws-lifecycle-pack", user_id="u", agent_id="a")
+        try:
+            memory.add({"role": "user", "content": "Remember private token silver-forest-77 for packed lifecycle."}, scope)
+            pack = memory.answer_context("Which private token did I ask you to remember for packed lifecycle?", scope)
+        finally:
+            memory.close()
+
+        lifecycle = pack.coverage["candidate_lifecycle"]
+        self.assertEqual(lifecycle["stage_counts"].get("packed", 0), len(pack.source_spans))
+        self.assertEqual(lifecycle["packed_source_span_count"], len(pack.source_spans))
+        self.assertNotIn("silver-forest-77", repr(lifecycle))

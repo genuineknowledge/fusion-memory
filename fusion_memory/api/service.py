@@ -649,6 +649,12 @@ class MemoryService:
                 source_span_count=len(pack.source_spans),
                 coverage_insufficient=bool(pack.coverage.get("coverage_insufficient", False)),
             )
+        lifecycle = dict(pack.coverage.get("candidate_lifecycle") or {})
+        stage_counts = dict(lifecycle.get("stage_counts") or {})
+        stage_counts["packed"] = len(pack.source_spans)
+        lifecycle["stage_counts"] = stage_counts
+        lifecycle["packed_source_span_count"] = len(pack.source_spans)
+        pack.coverage["candidate_lifecycle"] = lifecycle
         pack_rule_hits = [hit.__dict__ for hit in rule_hits.drain()]
         if pack_rule_hits:
             seen_hit_keys = {
