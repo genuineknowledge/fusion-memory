@@ -272,6 +272,66 @@ class RuleAuditTests(unittest.TestCase):
             self.assertEqual(csv_rows[0]["output_source_counts"], "l0_raw_hybrid:2")
             self.assertEqual(csv_rows[0]["evidence_inputs"], str(input_path))
 
+    def test_cli_provider_output_coerces_non_finite_numeric_counts_without_traceback(self) -> None:
+        payload = """
+{
+  "records": [
+    {
+      "query_id": "q1",
+      "pipeline_trace": {
+        "pipeline_layers": {
+          "CandidateRecall": {
+            "provider_summary": [
+              {
+                "provider_id": "raw_provider",
+                "source_family": "raw_provider",
+                "output_count": 1e309,
+                "output_source_counts": {"l0_raw_hybrid": 1e309},
+                "production_default": true,
+                "shadow_only": false,
+                "graph_related": false
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "replay.json"
+            rule_output = tmp / "rule-audit.json"
+            provider_output = tmp / "provider-audit.json"
+            input_path.write_text(payload, encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(rule_output),
+                    "--provider-output",
+                    str(provider_output),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            combined_output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, msg=combined_output)
+            self.assertNotIn("Traceback", combined_output)
+            self.assertNotIn("OverflowError", combined_output)
+            provider_rows = json.loads(provider_output.read_text(encoding="utf-8"))
+            self.assertEqual(provider_rows[0]["output_count"], 0)
+            self.assertEqual(provider_rows[0]["output_source_counts"], {"l0_raw_hybrid": 0})
+
     def test_build_rule_audit_counts_hits_contribution_and_drops(self) -> None:
         records = [
             {

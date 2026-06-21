@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -109,8 +110,10 @@ def _safe_string(value: Any) -> str | None:
 
 def _safe_int(value: Any) -> int:
     try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
