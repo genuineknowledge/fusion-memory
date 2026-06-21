@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,35 @@ def _rule_hits_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
         combined_hits.append(item)
 
     return combined_hits
+
+
+def _safe_string(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _is_safe_identifier(value):
+        return value
+    return hashlib.sha1(repr(value).encode("utf-8")).hexdigest()[:12]
+
+
+def _is_safe_identifier(value: str) -> bool:
+    if len(value) > 128:
+        return False
+    if re.search(r"\s|[\u4e00-\u9fff]", value):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:/@+\-]*", value))
+
+
+def _lifecycle_records_for_record(record: dict[str, object]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for container in (
+        _as_dict(record.get("candidate_lifecycle")),
+        _as_dict(_as_dict(record.get("coverage")).get("candidate_lifecycle")),
+        _as_dict(_as_dict(record.get("pipeline_trace")).get("candidate_lifecycle")),
+    ):
+        for item in _as_list(container.get("records")):
+            if isinstance(item, dict):
+                records.append(item)
+    return records
 
 
 def _candidate_sources_for_record(record: dict[str, object]) -> list[str]:
@@ -111,6 +142,11 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
         query_key = query_id if isinstance(query_id, str) else None
         candidate_sources = _candidate_sources_for_record(record)
         dropped_candidate_ids = _dropped_candidate_ids(record)
+        lifecycle_by_candidate_id = {
+            candidate_id: lifecycle_record
+            for lifecycle_record in _lifecycle_records_for_record(record)
+            if (candidate_id := _safe_string(lifecycle_record.get("candidate_id"))) is not None
+        }
 
         for hit in _rule_hits_for_record(record):
             rule_id = hit.get("rule_id")
@@ -129,6 +165,11 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                     "evidence_inputs": set(),
                     "categories": set(),
                     "duplicate_of": None,
+                    "provider_ids": set(),
+                    "lifecycle_stages": set(),
+                    "lifecycle_reasons": set(),
+                    "protected": False,
+                    "protected_reason": "",
                 },
             )
             row["hit_count"] += 1
@@ -156,6 +197,24 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
             if isinstance(contributed_candidate_id, str) and contributed_candidate_id:
                 if contributed_candidate_id in dropped_candidate_ids:
                     row["dropped_count"] += 1
+                lifecycle_record = lifecycle_by_candidate_id.get(contributed_candidate_id)
+                if lifecycle_record is not None:
+                    lifecycle_stage = _safe_string(lifecycle_record.get("stage"))
+                    if lifecycle_stage is not None:
+                        row["lifecycle_stages"].add(lifecycle_stage)
+                    lifecycle_reason = _safe_string(lifecycle_record.get("reason_code"))
+                    if lifecycle_reason is not None:
+                        row["lifecycle_reasons"].add(lifecycle_reason)
+
+            provider_id = _safe_string(hit.get("provider_id"))
+            if provider_id is not None:
+                row["provider_ids"].add(provider_id)
+            lifecycle_stage = _safe_string(hit.get("lifecycle_stage"))
+            if lifecycle_stage is not None:
+                row["lifecycle_stages"].add(lifecycle_stage)
+            lifecycle_reason = _safe_string(hit.get("lifecycle_reason"))
+            if lifecycle_reason is not None:
+                row["lifecycle_reasons"].add(lifecycle_reason)
 
             metadata = _as_dict(hit.get("metadata"))
             category = metadata.get("category")
@@ -191,7 +250,12 @@ def build_rule_audit(records: list[dict[str, object]]) -> list[dict[str, object]
                 "dropped_count": int(row["dropped_count"]),
                 "candidate_sources": sorted(row["candidate_sources"]),
                 "evidence_inputs": sorted(row["evidence_inputs"]),
+                "provider_ids": sorted(row["provider_ids"]),
+                "lifecycle_stages": sorted(row["lifecycle_stages"]),
+                "lifecycle_reasons": sorted(row["lifecycle_reasons"]),
                 "recommendation": recommendation,
+                "protected": bool(row["protected"]),
+                "protected_reason": row["protected_reason"] if isinstance(row["protected_reason"], str) else "",
                 "duplicate_of": duplicate_of,
                 "cleanup_phase": cleanup_phase,
                 "cleanup_action": cleanup_action,
@@ -227,7 +291,12 @@ def _write_csv(csv_path: Path, audit_rows: list[dict[str, object]]) -> None:
         "dropped_count",
         "candidate_sources",
         "evidence_inputs",
+        "provider_ids",
+        "lifecycle_stages",
+        "lifecycle_reasons",
         "recommendation",
+        "protected",
+        "protected_reason",
         "duplicate_of",
         "cleanup_phase",
         "cleanup_action",
@@ -240,6 +309,9 @@ def _write_csv(csv_path: Path, audit_rows: list[dict[str, object]]) -> None:
             csv_row = dict(row)
             csv_row["candidate_sources"] = ";".join(row["candidate_sources"])
             csv_row["evidence_inputs"] = ";".join(row["evidence_inputs"])
+            csv_row["provider_ids"] = ";".join(row["provider_ids"])
+            csv_row["lifecycle_stages"] = ";".join(row["lifecycle_stages"])
+            csv_row["lifecycle_reasons"] = ";".join(row["lifecycle_reasons"])
             writer.writerow(csv_row)
 
 

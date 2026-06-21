@@ -110,6 +110,78 @@ class RuleAuditTests(unittest.TestCase):
         self.assertEqual(legacy_row["cleanup_action"], "keep_shadow")
         self.assertFalse(legacy_row["safe_to_delete"])
 
+    def test_build_rule_audit_includes_provider_and_lifecycle_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "current_value.stale_history_marker",
+                        "contributed_candidate_id": "c1",
+                        "provider_id": "views",
+                        "lifecycle_stage": "selected",
+                        "lifecycle_reason": "views",
+                        "impact": "selected",
+                    }
+                ],
+                "candidate_lifecycle": {
+                    "records": [
+                        {
+                            "candidate_id": "c1",
+                            "candidate_source": "l3_current_view",
+                            "stage": "selected",
+                            "reason_code": "views",
+                        }
+                    ]
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "current_value.stale_history_marker")
+
+        self.assertEqual(row["provider_ids"], ["views"])
+        self.assertEqual(row["lifecycle_stages"], ["selected"])
+        self.assertEqual(row["lifecycle_reasons"], ["views"])
+
+    def test_build_rule_audit_hashes_unsafe_provider_and_lifecycle_dimensions(self) -> None:
+        records = [
+            {
+                "query_id": "q1",
+                "rule_hits": [
+                    {
+                        "rule_id": "current_value.stale_history_marker",
+                        "contributed_candidate_id": "c1",
+                        "provider_id": "private provider PostgreSQL",
+                        "lifecycle_stage": "数据库 selected",
+                        "lifecycle_reason": "current database is PostgreSQL",
+                        "impact": "selected",
+                    }
+                ],
+                "pipeline_trace": {
+                    "candidate_lifecycle": {
+                        "records": [
+                            {
+                                "candidate_id": "c1",
+                                "stage": "selected from private text",
+                                "reason_code": "raw reason PostgreSQL",
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+
+        audit = build_rule_audit(records)
+        row = next(item for item in audit if item["rule_id"] == "current_value.stale_history_marker")
+
+        self.assertTrue(all(len(item) == 12 for item in row["provider_ids"]))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_stages"] if item != "selected"))
+        self.assertTrue(all(len(item) == 12 for item in row["lifecycle_reasons"]))
+        self.assertNotIn("PostgreSQL", repr(row))
+        self.assertNotIn("数据库", repr(row))
+        self.assertNotIn("private text", repr(row))
+
     def test_build_rule_audit_marks_event_ordering_legacy_rules_as_legacy_shadow(self) -> None:
         records = [
             {
@@ -225,7 +297,12 @@ class RuleAuditTests(unittest.TestCase):
                         "dropped_count",
                         "candidate_sources",
                         "evidence_inputs",
+                        "provider_ids",
+                        "lifecycle_stages",
+                        "lifecycle_reasons",
                         "recommendation",
+                        "protected",
+                        "protected_reason",
                         "duplicate_of",
                         "cleanup_phase",
                         "cleanup_action",
@@ -237,6 +314,55 @@ class RuleAuditTests(unittest.TestCase):
             self.assertEqual([row["rule_id"] for row in rows], ["rule.alpha", "rule.beta"])
             self.assertEqual(rows[0]["candidate_sources"], "source_a;source_b")
             self.assertEqual(rows[0]["evidence_inputs"], str(input_path))
+
+    def test_cli_csv_includes_rule_governance_columns(self) -> None:
+        payload = {
+            "records": [
+                {
+                    "query_id": "q1",
+                    "rule_hits": [
+                        {
+                            "rule_id": "event_ordering.legacy_rescue",
+                            "provider_id": "event_ordering_coverage",
+                            "lifecycle_stage": "rescued",
+                            "lifecycle_reason": "event_ordering_coverage",
+                        }
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "replay.json"
+            output_path = tmp / "audit.json"
+            csv_path = tmp / "audit.csv"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/rule_audit.py",
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--csv",
+                    str(csv_path),
+                ],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                self.assertIn("provider_ids", reader.fieldnames)
+                self.assertIn("lifecycle_stages", reader.fieldnames)
+                self.assertIn("lifecycle_reasons", reader.fieldnames)
+                self.assertIn("protected", reader.fieldnames)
+                self.assertIn("protected_reason", reader.fieldnames)
 
     def test_cli_merges_multiple_replay_inputs_and_marks_evidence_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
