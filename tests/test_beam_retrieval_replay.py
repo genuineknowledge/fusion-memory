@@ -366,6 +366,90 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertNotIn("raw content", payload_text)
         self.assertEqual(report["records"][0]["temporal_relation_summary"], record["temporal_relation_summary"])
 
+    def test_run_replay_derives_temporal_relation_summary_from_pipeline_trace_layer(self) -> None:
+        fake_query = SimpleNamespace(id="q1", query="What happened before the launch?", category="knowledge_update")
+        fake_pack = SimpleNamespace(
+            source_spans=[{"span_id": "span-graph-trace"}],
+            coverage={
+                "coverage_insufficient": False,
+                "pipeline_trace": {
+                    "query_type": "event_ordering",
+                    "mode": "benchmark",
+                    "pipeline_layers": {
+                        "CandidateRecall": {"source_counts": {"l2_event_graph": 1}},
+                        "CandidateFusion": {"selected_sources": ["l2_event_graph"]},
+                        "EvidencePackBuilder": {
+                            "source_span_count": 1,
+                            "coverage_insufficient": False,
+                        },
+                        "TemporalRelations": {
+                            "relation_count": 1,
+                            "relation_types": ["before"],
+                            "role_labels": ["earlier_event"],
+                            "reason_codes": ["explicit_order_marker"],
+                            "source_span_count": 1,
+                            "source_span_ids": ["span-graph-trace"],
+                            "query": "What happened before the launch?",
+                            "content": "The migration happened before the launch.",
+                        },
+                    },
+                },
+            },
+            debug_trace=[],
+        )
+        service = MagicMock()
+        service.answer_context.return_value = fake_pack
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
+            out = Path(tmp) / "replay.json"
+            report = replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=out,
+                query_limit=None,
+            )
+            payload = json.loads(out.read_text(encoding="utf-8"))
+
+        record = payload["records"][0]
+        self.assertEqual(
+            record["temporal_relation_summary"],
+            {
+                "relation_count": 1,
+                "relation_types": ["before"],
+                "role_labels": ["earlier_event"],
+                "reason_codes": ["explicit_order_marker"],
+                "source_span_count": 1,
+                "source_span_ids": ["span-graph-trace"],
+            },
+        )
+        self.assertEqual(
+            record["pipeline_trace"],
+            [
+                {
+                    "layer": "retrieval",
+                    "query_type": "event_ordering",
+                    "mode": "benchmark",
+                    "source_counts": {"l2_event_graph": 1},
+                    "selected_sources": [{"source": "l2_event_graph"}],
+                    "source_span_count": 1,
+                    "coverage_insufficient": False,
+                    "temporal_relation_summary": {
+                        "relation_count": 1,
+                        "relation_types": ["before"],
+                        "role_labels": ["earlier_event"],
+                        "reason_codes": ["explicit_order_marker"],
+                        "source_span_count": 1,
+                        "source_span_ids": ["span-graph-trace"],
+                    },
+                }
+            ],
+        )
+        payload_text = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("What happened before the launch?", payload_text)
+        self.assertNotIn("The migration happened before the launch.", payload_text)
+        self.assertEqual(report["records"][0]["temporal_relation_summary"], record["temporal_relation_summary"])
+
     def test_run_replay_output_preserves_rule_audit_dimensions(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         fake_pack = SimpleNamespace(

@@ -49,6 +49,8 @@ _TEMPORAL_RELATION_SAFE_KEYS = (
     "value_type",
     "value_hash",
     "normalized_date",
+    "role_labels",
+    "source_span_ids",
 )
 
 _SAFE_DIMENSION_IDENTIFIERS = {
@@ -248,7 +250,7 @@ def run_replay(
             "coverage_insufficient": bool(coverage.get("coverage_insufficient", False)),
             "pipeline_trace": _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or []),
         }
-        temporal_relation_summary = _sanitize_temporal_relation_summary(coverage.get("temporal_relation_summary"))
+        temporal_relation_summary = _temporal_relation_summary_from_coverage(coverage)
         if temporal_relation_summary:
             record["temporal_relation_summary"] = temporal_relation_summary
         lifecycle = _sanitize_candidate_lifecycle(coverage.get("candidate_lifecycle"))
@@ -388,6 +390,15 @@ def _pipeline_trace_from_pack(coverage: dict[str, Any], debug_trace: Any) -> lis
     return _sanitize_pipeline_trace(debug_trace)
 
 
+def _temporal_relation_summary_from_coverage(coverage: dict[str, Any]) -> dict[str, Any]:
+    summary = _sanitize_temporal_relation_summary(coverage.get("temporal_relation_summary"))
+    if summary:
+        return summary
+    pipeline_trace = _object_dict(coverage.get("pipeline_trace"))
+    layers = _object_dict(pipeline_trace.get("pipeline_layers"))
+    return _sanitize_temporal_relation_summary(layers.get("TemporalRelations"))
+
+
 def _sanitize_candidate_lifecycle(value: Any) -> dict[str, Any]:
     data = _object_dict(value)
     if not data:
@@ -448,6 +459,7 @@ def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
     recall = _object_dict(layers.get("CandidateRecall"))
     fusion = _object_dict(layers.get("CandidateFusion"))
     evidence = _object_dict(layers.get("EvidencePackBuilder"))
+    temporal_relations = _sanitize_temporal_relation_summary(layers.get("TemporalRelations"))
     entry: dict[str, Any] = {"layer": "retrieval"}
     for key in ("query_type", "mode"):
         if key in record:
@@ -466,6 +478,8 @@ def _sanitize_pipeline_record(value: Any) -> dict[str, Any]:
             entry["source_span_count"] = value
     if "coverage_insufficient" in evidence:
         entry["coverage_insufficient"] = bool(evidence["coverage_insufficient"])
+    if temporal_relations:
+        entry["temporal_relation_summary"] = temporal_relations
     return entry if len(entry) > 1 else {}
 
 
@@ -498,6 +512,10 @@ def _sanitize_pipeline_trace_entry(entry: dict[str, Any]) -> dict[str, Any]:
             sanitized["source_span_count"] = value
     if "coverage_insufficient" in entry:
         sanitized["coverage_insufficient"] = bool(entry["coverage_insufficient"])
+    if "temporal_relation_summary" in entry:
+        temporal_relation_summary = _sanitize_temporal_relation_summary(entry["temporal_relation_summary"])
+        if temporal_relation_summary:
+            sanitized["temporal_relation_summary"] = temporal_relation_summary
     rule_hit_count = _rule_hit_count(entry)
     if rule_hit_count is not None:
         sanitized["rule_hit_count"] = rule_hit_count
@@ -539,6 +557,9 @@ def _sanitize_temporal_relation_summary(value: Any) -> dict[str, Any]:
     reason_codes = _sanitize_identifier_list(summary.get("reason_codes"))
     if reason_codes:
         sanitized["reason_codes"] = reason_codes
+    role_labels = _sanitize_identifier_list(summary.get("role_labels"))
+    if role_labels:
+        sanitized["role_labels"] = role_labels
     source_span_ids = _sanitize_identifier_list(summary.get("source_span_ids"))
     if source_span_ids:
         sanitized["source_span_ids"] = source_span_ids
@@ -557,6 +578,11 @@ def _sanitize_temporal_relations(value: Any) -> list[dict[str, Any]]:
         for key in _TEMPORAL_RELATION_SAFE_KEYS:
             item = relation_dict.get(key)
             if item is None:
+                continue
+            if key in {"role_labels", "source_span_ids"}:
+                identifiers = _sanitize_identifier_list(item)
+                if identifiers:
+                    sanitized[key] = identifiers
                 continue
             if key == "confidence":
                 confidence = _sanitize_count_value(item)
