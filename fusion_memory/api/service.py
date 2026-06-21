@@ -51,7 +51,11 @@ from fusion_memory.retrieval.aggregation_keys import (
     vendor_tool_aggregation_keys,
 )
 from fusion_memory.retrieval.mmr import mmr
-from fusion_memory.retrieval.pipeline import build_pipeline_record, update_pipeline_evidence_output
+from fusion_memory.retrieval.pipeline import (
+    build_pipeline_record,
+    selected_temporal_relation_summary,
+    update_pipeline_evidence_output,
+)
 from fusion_memory.retrieval.query_planner import QueryPlanner
 from fusion_memory.retrieval.raw_evidence_quota import RawEvidenceQuota
 from fusion_memory.retrieval.preservation import annotate_runtime_preservation_candidates, must_preserve_reasons, preserve_required_candidates
@@ -569,6 +573,7 @@ class MemoryService:
             dropped_count=len(dropped_high_signal),
             source_span_count=len(quota_result.selected_span_ids),
             coverage_insufficient=quota_result.coverage_insufficient,
+            temporal_relation_summary=selected_temporal_relation_summary(selected),
         )
         pipeline_trace = pipeline_record.to_dict()
         coverage["pipeline_trace"] = pipeline_trace

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fusion_memory.core.models import Candidate
+from fusion_memory.retrieval.temporal_relations import temporal_relation_summary_from_safe_records
 
 
 @dataclass(frozen=True)
@@ -178,3 +179,40 @@ def update_pipeline_evidence_output(
     if "evidence_output" in updated:
         updated["evidence_output"] = evidence
     return updated
+
+
+def selected_temporal_relation_summary(candidates: list[Candidate]) -> dict[str, object] | None:
+    safe_records: list[dict[str, object]] = []
+    relation_count = 0
+    relation_types: set[str] = set()
+    role_labels: set[str] = set()
+    reason_codes: set[str] = set()
+    source_span_ids: set[str] = set()
+
+    for candidate in candidates:
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        summary = metadata.get("temporal_relation_summary")
+        if isinstance(summary, dict):
+            relation_count += int(summary.get("relation_count") or 0)
+            relation_types.update(str(item) for item in (summary.get("relation_types") or []) if item)
+            role_labels.update(str(item) for item in (summary.get("role_labels") or []) if item)
+            reason_codes.update(str(item) for item in (summary.get("reason_codes") or []) if item)
+            source_span_ids.update(str(item) for item in (summary.get("source_span_ids") or []) if item)
+            continue
+
+        relations = metadata.get("temporal_relations")
+        if isinstance(relations, list):
+            safe_records.extend(item for item in relations if isinstance(item, dict))
+
+    if relation_count > 0:
+        return {
+            "relation_count": relation_count,
+            "relation_types": sorted(relation_types),
+            "role_labels": sorted(role_labels),
+            "reason_codes": sorted(reason_codes),
+            "source_span_count": len(source_span_ids),
+            "source_span_ids": sorted(source_span_ids),
+        }
+    if safe_records:
+        return temporal_relation_summary_from_safe_records(safe_records)
+    return None

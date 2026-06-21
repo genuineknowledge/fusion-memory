@@ -1148,6 +1148,51 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertTrue(result.candidates)
         self.assertFalse(any("event_ordering_graph" in candidate.source for candidate in result.candidates))
 
+    def test_event_ordering_search_pipeline_trace_includes_temporal_relations_layer_for_graph_candidate(self) -> None:
+        service = MemoryService()
+        scope = Scope(workspace_id="ws-graph-pipeline-trace", user_id="u", agent_id="a")
+        graph_candidate = Candidate(
+            id="graph-trace-candidate",
+            type="event",
+            text="First I created the schema. Then I implemented transaction CRUD.",
+            source="event_ordering_graph_selector",
+            scores={"score": 10.0, "utility_score": 10.0},
+            source_span_ids=["span-graph-trace"],
+            metadata={
+                "temporal_relations": [
+                    {
+                        "relation_type": "before",
+                        "confidence": 0.72,
+                        "reason_code": "explicit_order_marker",
+                        "role_labels": ["earlier_event"],
+                        "source_span_ids": ["span-graph-trace"],
+                    }
+                ]
+            },
+        )
+        try:
+            service.add({"role": "user", "content": "First I created the schema. Then I implemented transaction CRUD."}, scope)
+            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [graph_candidate]
+            service._candidate_lists = lambda *args, **kwargs: [[graph_candidate]]
+
+            result = service.search(
+                "What order did I describe the work?",
+                scope,
+                {"query_type_hint": "event_ordering", "limit": 5},
+            )
+        finally:
+            service.close()
+
+        temporal_layer = result.coverage["pipeline_trace"]["pipeline_layers"]["TemporalRelations"]
+        self.assertEqual(temporal_layer["relation_count"], 1)
+        self.assertEqual(temporal_layer["relation_types"], ["before"])
+        self.assertEqual(temporal_layer["role_labels"], ["earlier_event"])
+        self.assertEqual(temporal_layer["reason_codes"], ["explicit_order_marker"])
+        self.assertEqual(temporal_layer["source_span_count"], 1)
+        self.assertEqual(temporal_layer["source_span_ids"], ["span-graph-trace"])
+        self.assertNotIn("text", temporal_layer)
+        self.assertNotIn("confidence", temporal_layer)
+
     def test_event_ordering_dual_shadow_reports_fallback_graph_candidates(self) -> None:
         class Flags:
             dual_event_ordering_shadow = True
