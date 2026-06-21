@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tools.beam_event_ordering_replay as replay
+from tools.rule_audit import build_provider_audit
 from tools.beam_event_ordering_replay import (
     _aggregate,
     _compact_coverage,
@@ -244,6 +245,99 @@ class BeamReplayPreflightTests(unittest.TestCase):
             [{"rule_id": "event_ordering.legacy_rescue", "text_hash": "abc123"}],
         )
         self.assertNotIn("unrelated", coverage)
+
+    def test_compact_coverage_preserves_provider_summary_for_provider_audit(self) -> None:
+        coverage = _compact_coverage(
+            {
+                "query_type": "event_ordering",
+                "pipeline_trace": {
+                    "query_type": "event_ordering",
+                    "mode": "benchmark",
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "source_counts": {"event_ordering_timeline": 2},
+                            "provider_summary": [
+                                {
+                                    "provider_id": "event_ordering_timeline",
+                                    "source_family": "timeline",
+                                    "output_count": 2,
+                                    "output_source_counts": {"event_ordering_timeline": 2},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                }
+                            ],
+                        }
+                    },
+                },
+            }
+        )
+
+        provider_summary = coverage["pipeline_trace"]["pipeline_layers"]["CandidateRecall"]["provider_summary"]
+        audit = build_provider_audit([{"query_id": "q1", "coverage": coverage}])
+
+        self.assertEqual(
+            provider_summary,
+            [
+                {
+                    "provider_id": "event_ordering_timeline",
+                    "source_family": "timeline",
+                    "output_count": 2,
+                    "output_source_counts": {"event_ordering_timeline": 2},
+                    "production_default": True,
+                    "shadow_only": False,
+                    "graph_related": False,
+                }
+            ],
+        )
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["provider_id"], "event_ordering_timeline")
+        self.assertEqual(audit[0]["output_count"], 2)
+
+    def test_compact_coverage_hashes_unsafe_provider_summary_without_raw_text(self) -> None:
+        secret = "zinc-sparrow-17"
+
+        coverage = _compact_coverage(
+            {
+                "query_type": "event_ordering",
+                "pipeline_trace": {
+                    "query_type": "event_ordering",
+                    "pipeline_layers": {
+                        "CandidateRecall": {
+                            "provider_summary": [
+                                {
+                                    "provider_id": f"private provider {secret}",
+                                    "source_family": f"private family {secret}",
+                                    "output_count": float("inf"),
+                                    "output_source_counts": {f"candidate text {secret}": "invalid"},
+                                    "production_default": True,
+                                    "shadow_only": False,
+                                    "graph_related": False,
+                                    "sample_text": f"raw candidate text {secret}",
+                                    "raw_query": f"rank mentions {secret}",
+                                }
+                            ],
+                        }
+                    },
+                },
+            }
+        )
+
+        provider_record = coverage["pipeline_trace"]["pipeline_layers"]["CandidateRecall"]["provider_summary"][0]
+        serialized = json.dumps(coverage, sort_keys=True, ensure_ascii=False)
+
+        self.assertEqual(len(provider_record["provider_id"]), 12)
+        self.assertEqual(len(provider_record["source_family"]), 12)
+        self.assertEqual(provider_record["output_count"], 0)
+        self.assertEqual(list(provider_record["output_source_counts"].values()), [0])
+        self.assertTrue(all(len(source) == 12 for source in provider_record["output_source_counts"]))
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("private provider", serialized)
+        self.assertNotIn("private family", serialized)
+        self.assertNotIn("candidate text", serialized)
+        self.assertNotIn("raw candidate text", serialized)
+        self.assertNotIn("sample_text", serialized)
+        self.assertNotIn("raw_query", serialized)
 
     def test_main_preflight_only_writes_preflight_report(self) -> None:
         output_path = "/tmp/beam-replay-preflight-only.json"
