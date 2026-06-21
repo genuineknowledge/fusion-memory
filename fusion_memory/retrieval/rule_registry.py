@@ -106,6 +106,7 @@ _PLAINTEXT_METADATA_KEY_VALUES = {
         "keep",
         "kept",
         "legacy_fallback",
+        "observed",
         "preserve_language_exact_match",
         "selected",
         "suppress",
@@ -122,6 +123,7 @@ _PLAINTEXT_METADATA_KEY_VALUES = {
     "source": {
         "candidate_1",
         "candidate_2",
+        "cjk_exact",
         "event_ordering_coverage",
         "event_ordering_episode_recall",
         "event_ordering_graph_selector",
@@ -130,8 +132,10 @@ _PLAINTEXT_METADATA_KEY_VALUES = {
         "l0_raw_hybrid",
         "l1_fact_hybrid",
         "l3_current_view",
+        "multi_condition",
         "quality_fallback",
         "span_1",
+        "taxonomy",
     },
     "stage": {
         "evidence_pack_filter",

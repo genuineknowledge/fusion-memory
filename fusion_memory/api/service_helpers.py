@@ -5,6 +5,7 @@ from typing import Any
 
 from fusion_memory.core.models import Candidate, EvidenceSpan
 from fusion_memory.retrieval.rule_registry import RuleDefinition, record_rule_hit, register_rule
+from fusion_memory.retrieval.taxonomy import taxonomy_alias_hits as _taxonomy_alias_hits
 from fusion_memory.retrieval.aggregation_keys import (
     combinatorics_aggregation_keys,
     generic_aggregation_keys,
@@ -27,6 +28,26 @@ register_rule(
         ability="zh_recall",
         protected=True,
         protected_reason="chinese_recall_precision",
+    )
+)
+
+register_rule(
+    RuleDefinition(
+        rule_id="taxonomy.alias_match",
+        module=__name__,
+        purpose="Observe taxonomy alias matching without changing retrieval behavior.",
+        category="taxonomy_candidate",
+        ability="zh_recall",
+    )
+)
+
+register_rule(
+    RuleDefinition(
+        rule_id="zh_recall.cjk_exact_match",
+        module=__name__,
+        purpose="Observe CJK exact phrase preservation without storing the phrase.",
+        category="zh_recall",
+        ability="zh_recall",
     )
 )
 
@@ -812,11 +833,11 @@ def _cjk_exact_match_phrases(query: str, text: str, *, min_len: int = 2) -> list
     unique_matches = list(dict.fromkeys(matches))
     if unique_matches:
         record_rule_hit(
-            "exact_match.cjk_phrase",
+            "zh_recall.cjk_exact_match",
             query=query,
             text=text,
             stage="exact_filter",
-            metadata={"decision": "preserve_language_exact_match", "match_count": len(unique_matches), "phrases": unique_matches},
+            metadata={"decision": "observed", "source": "cjk_exact", "match_count": len(unique_matches)},
         )
     return unique_matches
 
@@ -827,7 +848,29 @@ def _matched_query_conditions(query: str, text: str, *, min_len: int = 3) -> lis
         return []
     text_tokens = _expand_topic_tokens(_topic_scope_tokens(text))
     matched = [token for token in query_tokens if token in text_tokens]
-    return list(dict.fromkeys(matched))
+    unique_matches = list(dict.fromkeys(matched))
+    if unique_matches:
+        record_rule_hit(
+            "multi_condition.query_token_match",
+            query=query,
+            text=text,
+            stage="search_filter",
+            metadata={"decision": "observed", "source": "multi_condition", "match_count": len(unique_matches)},
+        )
+    return unique_matches
+
+
+def _instrumented_taxonomy_alias_hits(text: str, entries: list[Any] | None = None) -> set[str]:
+    hits = _taxonomy_alias_hits(text, entries)
+    if hits:
+        record_rule_hit(
+            "taxonomy.alias_match",
+            query="",
+            text=text,
+            stage="search_filter",
+            metadata={"decision": "observed", "source": "taxonomy", "match_count": len(hits)},
+        )
+    return hits
 
 
 def _scent_trail_score(query: str, text: str) -> float:

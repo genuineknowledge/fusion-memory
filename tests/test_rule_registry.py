@@ -524,13 +524,13 @@ class RuleInstrumentationTests(unittest.TestCase):
         self.assertIn("默认数据", matches)
         hits = drain_rule_hits()
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0].rule_id, "exact_match.cjk_phrase")
-        self.assertEqual(hits[0].metadata["decision"], "preserve_language_exact_match")
+        self.assertEqual(hits[0].rule_id, "zh_recall.cjk_exact_match")
+        self.assertEqual(hits[0].metadata["decision"], "observed")
         self.assertEqual(hits[0].metadata["match_count"], len(matches))
-        self.assertRegex(str(hits[0].metadata["phrases"]), r"^[0-9a-f]{12}$")
-        self.assertNotIn("默认数据库", str(hits[0].metadata["phrases"]))
+        self.assertEqual(hits[0].metadata["source"], "cjk_exact")
+        self.assertNotIn("默认数据库", str(hits[0].metadata))
 
-    def test_multi_condition_match_does_not_emit_rule_hit(self) -> None:
+    def test_multi_condition_match_emits_observation_only_rule_hit(self) -> None:
         from fusion_memory.api.service_helpers import _matched_query_conditions
 
         matches = _matched_query_conditions(
@@ -541,9 +541,11 @@ class RuleInstrumentationTests(unittest.TestCase):
         self.assertIn("openclaw", matches)
         self.assertIn("install", matches)
         hits = drain_rule_hits()
-        self.assertEqual(hits, [])
+        self.assertTrue(any(hit.rule_id == "multi_condition.query_token_match" for hit in hits))
+        self.assertFalse(any("OpenClaw" in str(hit.__dict__) for hit in hits))
+        self.assertFalse(any("beginner friendly" in str(hit.__dict__) for hit in hits))
 
-    def test_taxonomy_alias_match_does_not_emit_rule_hit(self) -> None:
+    def test_taxonomy_alias_match_emits_observation_only_rule_hit(self) -> None:
         from fusion_memory.core.models import MemoryEvent, Scope
         from fusion_memory.retrieval.event_graph_selection import _event_ordering_event_relevance
 
@@ -561,7 +563,9 @@ class RuleInstrumentationTests(unittest.TestCase):
 
         self.assertGreater(score, 0.0)
         hits = drain_rule_hits()
-        self.assertEqual(hits, [])
+        self.assertTrue(any(hit.rule_id == "taxonomy.alias_match" for hit in hits))
+        self.assertFalse(any("deployment" in str(hit.__dict__) for hit in hits))
+        self.assertFalse(any("Render" in str(hit.__dict__) for hit in hits))
 
     def test_search_trace_attaches_rule_hits(self) -> None:
         memory = MemoryService()
@@ -580,7 +584,8 @@ class RuleInstrumentationTests(unittest.TestCase):
         rule_hits = trace.get("rule_hits") if trace else None
         self.assertIsInstance(rule_hits, list)
         self.assertFalse(any("默认数据库" in str(hit.get("query")) for hit in rule_hits or []))
-        self.assertFalse(any(hit.get("rule_id") == "multi_condition.query_token_match" for hit in rule_hits or []))
+        self.assertTrue(any(hit.get("rule_id") == "multi_condition.query_token_match" for hit in rule_hits or []))
+        self.assertFalse(any("PostgreSQL" in str(hit) for hit in rule_hits or []))
 
     def test_search_exception_discards_unpersisted_rule_hits(self) -> None:
         memory = MemoryService()

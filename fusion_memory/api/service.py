@@ -33,6 +33,7 @@ from fusion_memory.retrieval.chronology_normalizer import build_chronology_write
 from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
 from fusion_memory.retrieval.candidate_lifecycle import CandidateLifecycleRecorder
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
+import fusion_memory.retrieval.event_graph_selection as _event_graph_selection_module
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
     _event_ordering_milestone_score,
@@ -105,6 +106,7 @@ from fusion_memory.api.service_helpers import (
     _quality_fallback_terms,
     _fallback_salience_score,
     _cjk_exact_match_phrases,
+    _instrumented_taxonomy_alias_hits,
     _matched_query_conditions,
     _aggregation_signal,
     _adjacent_assistant_recommendation_spans,
@@ -165,6 +167,18 @@ register_rule(
         protected_reason="legacy_event_ordering_fallback",
     )
 )
+
+register_rule(
+    RuleDefinition(
+        rule_id="multi_condition.query_token_match",
+        module=__name__,
+        purpose="Observe multi-condition query token matching without changing retrieval behavior.",
+        category="multi_condition",
+        ability="multi_condition",
+    )
+)
+
+_event_graph_selection_module.taxonomy_alias_hits = _instrumented_taxonomy_alias_hits
 
 
 class MemoryService:
