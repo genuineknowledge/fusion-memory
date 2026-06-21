@@ -98,7 +98,7 @@ class TopicScopedRawProvider(_RawProvider):
     meta = _ProviderMeta(
         provider_id="topic_scoped_raw",
         source_family="raw",
-        output_sources=frozenset({"topic_scoped_raw"}),
+        output_sources=frozenset({"topic_scope_raw"}),
     )
 
     def recall(self, context: RecallContext) -> list[Candidate]:
@@ -150,7 +150,13 @@ class ContradictionClaimProvider(_RawProvider):
     meta = _ProviderMeta(
         provider_id="contradiction_claim",
         source_family="raw",
-        output_sources=frozenset({"contradiction_claim_positive"}),
+        output_sources=frozenset(
+            {
+                "contradiction_claim_positive",
+                "contradiction_claim_negative",
+                "contradiction_claim_uncertain",
+            }
+        ),
         supported_query_types=frozenset({"contradiction_resolution"}),
     )
 
@@ -168,7 +174,7 @@ class TemporalCoverageProvider(_RawProvider):
     meta = _ProviderMeta(
         provider_id="temporal_coverage",
         source_family="raw",
-        output_sources=frozenset({"temporal_coverage"}),
+        output_sources=frozenset({"temporal_coverage_raw"}),
         supported_query_types=frozenset({"temporal_lookup"}),
     )
 
@@ -186,7 +192,7 @@ class AggregationCoverageProvider(_RawProvider):
     meta = _ProviderMeta(
         provider_id="aggregation_coverage",
         source_family="raw",
-        output_sources=frozenset({"aggregation_coverage"}),
+        output_sources=frozenset({"aggregation_coverage_raw", "aggregation_context_support"}),
         supported_query_types=frozenset({"multi_session_reasoning"}),
     )
 
@@ -204,7 +210,7 @@ class EventOrderingCoverageProvider(_RawProvider):
     meta = _ProviderMeta(
         provider_id="event_ordering_coverage",
         source_family="raw",
-        output_sources=frozenset({"event_ordering_coverage"}),
+        output_sources=frozenset({"event_ordering_coverage", "event_ordering_coverage_support"}),
         supported_query_types=frozenset({"event_ordering"}),
     )
 

@@ -237,7 +237,7 @@ class RawProviderTests(unittest.TestCase):
             ]
         )
         service._topic_scoped_raw_candidates = lambda *args, **kwargs: [
-            Candidate("topic-1", "span", "topic text", "topic_scoped_raw", {"score": 0.8}, ["topic-1"], {})
+            Candidate("topic-1", "span", "topic text", "topic_scope_raw", {"score": 0.8}, ["topic-1"], {})
         ]
         service._broad_raw_recall_candidates = lambda *args, **kwargs: [
             Candidate("broad-1", "span", "broad text", "broad_raw_recall", {"score": 0.7}, ["broad-1"], {})
@@ -282,7 +282,33 @@ class RawProviderTests(unittest.TestCase):
 
         output = [[candidate.source for candidate in provider.recall(context)] for provider in providers]
 
-        self.assertEqual(output, [["l0_raw_hybrid"], ["topic_scoped_raw"], ["broad_raw_recall"]])
+        self.assertEqual(output, [["l0_raw_hybrid"], ["topic_scope_raw"], ["broad_raw_recall"]])
+
+    def test_raw_provider_metadata_declares_legacy_output_sources(self) -> None:
+        expected_sources = {
+            "topic_scoped_raw": frozenset({"topic_scope_raw"}),
+            "contradiction_claim": frozenset(
+                {
+                    "contradiction_claim_positive",
+                    "contradiction_claim_negative",
+                    "contradiction_claim_uncertain",
+                }
+            ),
+            "temporal_coverage": frozenset({"temporal_coverage_raw"}),
+            "aggregation_coverage": frozenset({"aggregation_coverage_raw", "aggregation_context_support"}),
+            "event_ordering_coverage": frozenset({"event_ordering_coverage", "event_ordering_coverage_support"}),
+        }
+        providers = [
+            TopicScopedRawProvider(),
+            ContradictionClaimProvider(),
+            TemporalCoverageProvider(),
+            AggregationCoverageProvider(),
+            EventOrderingCoverageProvider(),
+        ]
+
+        for provider in providers:
+            with self.subTest(provider=provider.provider_id):
+                self.assertEqual(provider.output_sources, expected_sources[provider.provider_id])
 
     def test_scent_trail_uses_prior_candidates(self) -> None:
         context = self._context()
