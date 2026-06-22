@@ -337,6 +337,25 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertEqual(request_payload["query"], "dense retrieval")
         self.assertEqual(request_payload["documents"], ["dense retrieval notes", "unrelated billing notes"])
 
+    def test_http_reranker_sends_dashscope_options_and_accepts_output_results_shape(self) -> None:
+        with FakeModelServer() as server:
+            reranker = HTTPReranker(
+                server.url("/dashscope-output-rerank"),
+                model="qwen3-rerank",
+                top_n=2,
+                instruct="Given a web search query, retrieve relevant passages that answer the query.",
+            )
+
+            scores = reranker.score("dense retrieval", ["dense retrieval notes", "unrelated billing notes", "third note"])
+
+        self.assertEqual(scores, [0.91, 0.12, 0.0])
+        request_payload = server.requests[-1]["json"]
+        self.assertEqual(request_payload["top_n"], 2)
+        self.assertEqual(
+            request_payload["instruct"],
+            "Given a web search query, retrieve relevant passages that answer the query.",
+        )
+
     def test_runtime_config_wires_http_model_adapters_from_env(self) -> None:
         with FakeModelServer() as server:
             env = {
@@ -347,6 +366,8 @@ class ModelAdapterTests(unittest.TestCase):
                 "FUSION_MEMORY_RERANKER_PROVIDER": "http",
                 "FUSION_MEMORY_RERANKER_ENDPOINT": server.url("/rerank"),
                 "FUSION_MEMORY_RERANKER_MODEL": "env-rerank",
+                "FUSION_MEMORY_RERANKER_TOP_N": "2",
+                "FUSION_MEMORY_RERANKER_INSTRUCT": "Retrieve relevant memory snippets.",
                 "FUSION_MEMORY_EXTRACTOR_MODE": "async",
                 "FUSION_MEMORY_EXTRACTOR_ENDPOINT": server.url("/llm"),
                 "FUSION_MEMORY_EXTRACTOR_MODEL": "env-extractor",
@@ -368,6 +389,10 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertTrue(any(request["json"].get("model") == "env-embed" for request in server.requests))
             self.assertTrue(any(request["json"].get("dimensions") == 1024 for request in server.requests if request["path"] == "/embed"))
             self.assertTrue(any(request["json"].get("model") == "env-rerank" for request in server.requests))
+            self.assertTrue(any(request["json"].get("top_n") == 2 for request in server.requests if request["path"] == "/rerank"))
+            self.assertTrue(
+                any(request["json"].get("instruct") == "Retrieve relevant memory snippets." for request in server.requests if request["path"] == "/rerank")
+            )
             self.assertTrue(any(request["json"].get("model") == "env-extractor" for request in server.requests))
 
     def test_runtime_config_requires_explicit_extractor_mode(self) -> None:
@@ -6120,6 +6145,16 @@ class FakeModelServer:
                             {"index": 1, "relevance_score": 0.12},
                             {"index": 0, "relevance_score": 0.91},
                         ],
+                        "usage": {"total_tokens": 2},
+                    }
+                elif handler_self.path == "/dashscope-output-rerank":
+                    response = {
+                        "output": {
+                            "results": [
+                                {"index": 1, "relevance_score": 0.12},
+                                {"index": 0, "relevance_score": 0.91},
+                            ]
+                        },
                         "usage": {"total_tokens": 2},
                     }
                 elif handler_self.path == "/answer":

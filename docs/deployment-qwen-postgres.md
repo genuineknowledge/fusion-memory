@@ -158,12 +158,15 @@ export FUSION_MEMORY_RERANKER_PROVIDER=http
 export FUSION_MEMORY_RERANKER_ENDPOINT=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
 export FUSION_MEMORY_RERANKER_API_KEY=$DASHSCOPE_API_KEY
 export FUSION_MEMORY_RERANKER_MODEL=qwen3-rerank
+export FUSION_MEMORY_RERANKER_TOP_N=20
+export FUSION_MEMORY_RERANKER_INSTRUCT="Given a memory query, retrieve relevant memory snippets."
 ```
 
 The embedding endpoint is OpenAI-compatible and returns `data[].embedding`.
 The rerank endpoint returns ranked `results[]` with `index` and
-`relevance_score`; Fusion Memory restores those scores to the original
-document order before reranking candidates.
+`relevance_score`; some DashScope rerank APIs wrap that array under
+`output.results`. Fusion Memory accepts both shapes and restores scores to the
+original document order before reranking candidates.
 
 ## Memory Service Wiring
 

@@ -99,6 +99,8 @@ def _build_reranker() -> Any | None:
             api_key=_optional_env("FUSION_MEMORY_RERANKER_API_KEY"),
             model=os.getenv("FUSION_MEMORY_RERANKER_MODEL", "local-reranker"),
             timeout_seconds=_float_env("FUSION_MEMORY_RERANKER_TIMEOUT_SECONDS", 30.0),
+            top_n=_optional_int_env("FUSION_MEMORY_RERANKER_TOP_N"),
+            instruct=_optional_env("FUSION_MEMORY_RERANKER_INSTRUCT"),
         )
     raise ValueError(f"unsupported FUSION_MEMORY_RERANKER_PROVIDER: {provider}")
 

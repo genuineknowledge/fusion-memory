@@ -49,6 +49,7 @@ class HTTPReranker:
     - `{"scores": [0.1, ...]}`
     - `{"data": [{"score": 0.1}, ...]}`
     - DashScope rerank style `{"results": [{"index": 0, "relevance_score": 0.1}, ...]}`
+    - DashScope output wrapper `{"output": {"results": [{"index": 0, "relevance_score": 0.1}, ...]}}`
     """
 
     def __init__(
@@ -58,17 +59,25 @@ class HTTPReranker:
         api_key: str | None = None,
         model: str = "local-reranker",
         timeout_seconds: float = 30.0,
+        top_n: int | None = None,
+        instruct: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.top_n = top_n
+        self.instruct = instruct
         self.calls: list[dict[str, object]] = []
         self.version = f"http-reranker:{model}"
 
     def score(self, query: str, docs: list[str]) -> list[float]:
         started = time.perf_counter()
         payload = {"model": self.model, "query": query, "documents": docs}
+        if self.top_n is not None:
+            payload["top_n"] = self.top_n
+        if self.instruct:
+            payload["instruct"] = self.instruct
         data = _post_json(self.endpoint, payload, api_key=self.api_key, timeout_seconds=self.timeout_seconds)
         scores = _extract_scores(data, expected_count=len(docs))
         if len(scores) != len(docs):
@@ -197,24 +206,29 @@ def _extract_scores(data: dict, *, expected_count: int | None = None) -> list[fl
         return [float(item) for item in data["scores"]]
     if isinstance(data.get("data"), list):
         return [float(item["score"]) for item in data["data"] if isinstance(item, dict) and "score" in item]
+    if isinstance(data.get("output"), dict) and isinstance(data["output"].get("results"), list):
+        return _scores_from_indexed_results(data["output"]["results"], expected_count=expected_count)
     if isinstance(data.get("results"), list):
-        results = data["results"]
-        count = expected_count
-        if count is None:
-            indexes = [int(item["index"]) for item in results if isinstance(item, dict) and "index" in item]
-            count = max(indexes) + 1 if indexes else 0
-        scores = [0.0] * count
-        for item in results:
-            if not isinstance(item, dict) or "index" not in item:
-                continue
-            if "relevance_score" in item:
-                score = item["relevance_score"]
-            elif "score" in item:
-                score = item["score"]
-            else:
-                continue
-            index = int(item["index"])
-            if 0 <= index < count:
-                scores[index] = float(score)
-        return scores
+        return _scores_from_indexed_results(data["results"], expected_count=expected_count)
     raise ValueError("reranker endpoint did not return scores")
+
+
+def _scores_from_indexed_results(results: list, *, expected_count: int | None = None) -> list[float]:
+    count = expected_count
+    if count is None:
+        indexes = [int(item["index"]) for item in results if isinstance(item, dict) and "index" in item]
+        count = max(indexes) + 1 if indexes else 0
+    scores = [0.0] * count
+    for item in results:
+        if not isinstance(item, dict) or "index" not in item:
+            continue
+        if "relevance_score" in item:
+            score = item["relevance_score"]
+        elif "score" in item:
+            score = item["score"]
+        else:
+            continue
+        index = int(item["index"])
+        if 0 <= index < count:
+            scores[index] = float(score)
+    return scores
