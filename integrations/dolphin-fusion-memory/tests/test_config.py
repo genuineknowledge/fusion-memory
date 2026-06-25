@@ -14,6 +14,7 @@ def test_build_memory_config_defaults() -> None:
     cfg = build_memory_config({})
     assert cfg.base_url == "http://127.0.0.1:8700"
     assert cfg.workspace_id == "dolphin"
+    assert cfg.user_id == "user"
     assert cfg.agent_id == "dolphin"
     assert cfg.app_id == "dolphin"
     assert cfg.timeout_seconds == 2.0
@@ -40,3 +41,8 @@ def test_build_memory_config_clamps_timeout_and_scope(monkeypatch) -> None:
         "session_id": "session-7",
         "app_id": "dolphin",
     }
+
+
+def test_build_memory_config_uses_default_timeout_for_non_positive_values() -> None:
+    cfg = build_memory_config({"PSI_MEMORY_TIMEOUT_SECONDS": "0"})
+    assert cfg.timeout_seconds == 2.0
