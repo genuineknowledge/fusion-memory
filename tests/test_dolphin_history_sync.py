@@ -86,6 +86,8 @@ class DolphinHistorySyncTests(unittest.TestCase):
         self.assertEqual(posted[0]["payload"]["scope"]["session_id"], "session-a")
         self.assertTrue(posted[0]["payload"]["metadata"]["auto_persisted"])
         self.assertEqual(posted[0]["payload"]["metadata"]["source"], "dolphin_history_sync")
+        self.assertEqual(posted[0]["payload"]["metadata"]["write_mode"], "history_sync")
+        self.assertEqual(posted[0]["payload"]["input"]["metadata"]["write_mode"], "history_sync")
         self.assertEqual(posted[0]["payload"]["metadata"]["history_index"], 0)
         self.assertEqual(len(state["synced"]), 2)
 

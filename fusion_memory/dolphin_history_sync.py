@@ -195,6 +195,7 @@ def _add_payload(config: DolphinHistorySyncConfig, turn: DolphinHistoryTurn, syn
             "turn_id": f"dolphin_history_{turn.index}",
             "metadata": {
                 "source": "dolphin_history_sync",
+                "write_mode": "history_sync",
                 "session_id": config.session_id,
                 "history_index": turn.index,
                 "history_hash": sync_key,
@@ -204,6 +205,7 @@ def _add_payload(config: DolphinHistorySyncConfig, turn: DolphinHistoryTurn, syn
         "session_time": datetime.now(timezone.utc).isoformat(),
         "metadata": {
             "source": "dolphin_history_sync",
+            "write_mode": "history_sync",
             "session_id": config.session_id,
             "history_index": turn.index,
             "history_hash": sync_key,

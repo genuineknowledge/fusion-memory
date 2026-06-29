@@ -18,8 +18,7 @@ if str(TOOLS_DIR) not in sys.path:
 if str(SYSTEMS_DIR) not in sys.path:
     sys.path.insert(0, str(SYSTEMS_DIR))
 
-from _config import MemoryConfig
-
+MemoryConfig = importlib.import_module("_config").MemoryConfig
 memory_add = importlib.import_module("memory_add")
 memory_search = importlib.import_module("memory_search")
 memory_answer_context = importlib.import_module("memory_answer_context")
@@ -82,6 +81,8 @@ async def test_memory_add_posts_expected_payload(monkeypatch: pytest.MonkeyPatch
         result = await memory_add.memory_add("remember this", source="user-preference")
         assert "\"saved\": true" in result.lower()
         assert seen[0]["metadata"]["source"] == "user-preference"
+        assert seen[0]["metadata"]["write_mode"] == "explicit_tool"
+        assert seen[0]["metadata"]["auto_persisted"] is False
         assert seen[0]["input"]["content"] == "remember this"
     finally:
         await runner.cleanup()
