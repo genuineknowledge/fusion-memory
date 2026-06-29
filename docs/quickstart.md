@@ -138,7 +138,41 @@ set PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 `examples/fusion-memory-workspace`。当前 agent main 通过 workspace tools 接入，
 不需要额外的 agent core memory flag。
 
-## 6. 常见问题
+## 6. 自动持久化 history
+
+默认情况下，workspace tools 只有在 agent 调用 `memory_add` 时才会写入
+Fusion Memory。要让会话 history 持续自动写入，不需要改 agent core；启动
+一个 Fusion Memory 侧的同步进程即可。
+
+读 workspace history 文件：
+
+```bash
+fusion-memory sync-dolphin-history \
+  --workspace /path/to/fusion-memory-workspace \
+  --session-id <session-id>
+```
+
+如果使用 psi-agent gateway，可改读 gateway history API：
+
+```bash
+fusion-memory sync-dolphin-history \
+  --gateway-url http://127.0.0.1:8080 \
+  --session-id <session-id>
+```
+
+一次性回填：
+
+```bash
+fusion-memory sync-dolphin-history \
+  --workspace /path/to/fusion-memory-workspace \
+  --session-id <session-id> \
+  --once --json
+```
+
+同步命令只读取 user/assistant turn，写入 Fusion Memory `/add`，并记录本地
+state 文件，重复运行不会重复写入。
+
+## 7. 常见问题
 
 - 启动失败：先运行 `fusion-memory doctor`
 - 端口被占用：修改本地配置文件里的端口

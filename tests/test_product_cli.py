@@ -77,6 +77,35 @@ class ProductCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn(payload["mode"], {"production", "compromised"})
 
+    def test_sync_dolphin_history_cli_json_runs_once(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        try:
+            sys.argv = [
+                "fusion-memory",
+                "sync-dolphin-history",
+                "--session-id",
+                "session-a",
+                "--workspace",
+                "/tmp/workspace",
+                "--once",
+                "--json",
+            ]
+            sys.stdout = StringIO()
+            with patch("fusion_memory.cli.sync_dolphin_history_once", return_value={"ok": True, "added": 1, "skipped": 0}):
+                main()
+            payload = json.loads(sys.stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+            sys.stdout = old_stdout
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["added"], 1)
+
     def test_install_agent_invalid_target_cli_json_is_beginner_safe(self) -> None:
         from fusion_memory.cli import main
         import sys

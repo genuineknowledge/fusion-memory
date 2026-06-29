@@ -25,6 +25,14 @@ COPY_USAGE_PHRASES = [
     "tools/_config.py",
     "skills/fusion-memory-setup",
 ]
+AUTO_PERSISTENCE_PHRASES = [
+    "Automatic History Persistence",
+    "fusion-memory sync-dolphin-history",
+    "--workspace /path/to/fusion-memory-workspace",
+    "--gateway-url http://127.0.0.1:8080",
+    "only when the agent calls",
+    "without changing",
+]
 FIRST_USE_COMMANDS = [
     "git clone https://github.com/genuineknowledge/fusion-memory.git",
     "sh install.sh",
@@ -63,6 +71,10 @@ def test_psi_agent_fusion_memory_example_documents_copy_paste_usage() -> None:
         assert phrase in agent_readme.read_text()
         assert phrase in memory_readme.read_text()
 
+    for phrase in AUTO_PERSISTENCE_PHRASES:
+        assert phrase in agent_readme.read_text()
+        assert phrase in memory_readme.read_text()
+
 
 def test_fusion_memory_docs_match_workspace_setup_skill() -> None:
     quickstart = (ROOT / "docs" / "quickstart.md").read_text()
@@ -85,6 +97,11 @@ def test_fusion_memory_docs_match_workspace_setup_skill() -> None:
     assert "--memory-enabled" not in quickstart
     assert "--memory-enabled" not in integration_readme
 
+    for text in (quickstart, memory_readme, integration_readme):
+        assert "fusion-memory sync-dolphin-history" in text
+        assert "--gateway-url http://127.0.0.1:8080" in text
+        assert "--session-id <session-id>" in text
+
 
 def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_fallback() -> None:
     skill = (CANONICAL_WORKSPACE / "skills" / "fusion-memory-setup" / "SKILL.md").read_text()
@@ -96,3 +113,5 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "authentication" not in skill.lower()
     assert "compromised" in skill
     assert "DASHSCOPE_API_KEY" in skill
+    assert "fusion-memory sync-dolphin-history" in skill
+    assert "do not automatically write every conversation turn" in skill
