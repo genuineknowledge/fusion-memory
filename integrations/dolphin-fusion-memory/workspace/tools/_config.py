@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8700"
 DEFAULT_TIMEOUT_SECONDS = 2.0

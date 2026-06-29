@@ -558,8 +558,8 @@ class ModelAdapterTests(unittest.TestCase):
 
     def test_qwen_defaults_are_configured_without_required_runtime_dependency(self) -> None:
         self.assertEqual(len(DeterministicEmbedder().embed_text("Atlas")), DEFAULT_EMBEDDING_DIMENSION)
-        self.assertEqual(DEFAULT_EMBEDDING_MODEL, "Qwen/Qwen3-Embedding-0.6B")
-        self.assertEqual(DEFAULT_RERANKER_MODEL, "Qwen/Qwen3-Reranker-0.6B")
+        self.assertTrue(DEFAULT_EMBEDDING_MODEL.endswith("models/Qwen3-Embedding-0.6B"))
+        self.assertTrue(DEFAULT_RERANKER_MODEL.endswith("models/Qwen3-Reranker-0.6B"))
         real_import = __import__
 
         def block_sentence_transformers(name, *args, **kwargs):

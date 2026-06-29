@@ -11,16 +11,15 @@ UNAVAILABLE_MESSAGE = "Fusion Memory request failed"
 async def post_json(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     timeout = aiohttp.ClientTimeout(total=_normalize_timeout_seconds(timeout_seconds))
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload) as response:
-            try:
-                data = await response.json()
-            except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
-                data = {}
-            if response.status >= 400:
-                message = _extract_message(data)
-                raise RuntimeError(message or UNAVAILABLE_MESSAGE)
-            return data if isinstance(data, dict) else {}
+    async with aiohttp.ClientSession(timeout=timeout) as session, session.post(url, json=payload) as response:
+        try:
+            data = await response.json()
+        except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
+            data = {}
+        if response.status >= 400:
+            message = _extract_message(data)
+            raise RuntimeError(message or UNAVAILABLE_MESSAGE)
+        return data if isinstance(data, dict) else {}
 
 
 def format_context_pack(pack: dict[str, Any], limit: int = 8) -> str:

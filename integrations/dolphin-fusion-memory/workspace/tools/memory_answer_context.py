@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from pathlib import Path
+# ruff: noqa: E402
 import sys
+from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from _client import format_context_pack as _format_context_pack, post_json as _post_json
+from _client import format_context_pack as _format_context_pack
+from _client import post_json as _post_json
 from _config import CONFIG
 
 UNAVAILABLE_MESSAGE = (
-    '{"ok": false, "message": "Fusion Memory is not available. Continue without memory, then run fusion-memory doctor."}'
+    '{"ok": false, "message": "Fusion Memory is not available. '
+    'Continue without memory, then run fusion-memory doctor."}'
 )
 
 

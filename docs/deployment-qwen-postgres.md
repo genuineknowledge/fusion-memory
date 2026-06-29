@@ -3,9 +3,9 @@
 Current target:
 
 - Storage: Postgres + pgvector
-- Embedding: `Qwen/Qwen3-Embedding-0.6B`
+- Embedding: repo-local `models/Qwen3-Embedding-0.6B`
 - Embedding dimension: 1024
-- Reranker: `Qwen/Qwen3-Reranker-0.6B`
+- Reranker: repo-local `models/Qwen3-Reranker-0.6B`
 - Extractor: memory-owned configurable LLM extractor
 
 ## Prerequisites
@@ -18,7 +18,9 @@ Current target:
 - Optional GPU for lower local model latency. CPU works for smoke tests but is
   slower.
 
-Use a writable model cache outside the repository:
+The repository includes the default local model directories. Do not download
+model weights during normal install. Use a writable model cache outside the
+repository only when replacing or regenerating the bundled model files:
 
 ```bash
 export FUSION_MEMORY_MODEL_CACHE="$HOME/.cache/fusion-memory/models"
@@ -73,7 +75,9 @@ pip check
 The explicit install sequence avoids the resolver selecting an incompatible
 PyTorch build. Adjust the PyTorch package for your CUDA or CPU runtime.
 
-The model weights were downloaded with:
+The default model weights are committed under `models/` and tracked with Git
+LFS. The following command is only for maintainers who need to replace those
+bundled files:
 
 ```bash
 export FUSION_MEMORY_MODEL_CACHE="$HOME/.cache/fusion-memory/models"
@@ -98,12 +102,11 @@ PY
 ```bash
 cd /path/to/fusion-memory
 conda activate fusion-memory-qwen
-export FUSION_MEMORY_MODEL_CACHE="$HOME/.cache/fusion-memory/models"
 python deploy/qwen_smoke.py \
-  --embedding-model "$FUSION_MEMORY_MODEL_CACHE/Qwen3-Embedding-0.6B" \
-  --reranker-model "$FUSION_MEMORY_MODEL_CACHE/Qwen3-Reranker-0.6B" \
+  --embedding-model "$PWD/models/Qwen3-Embedding-0.6B" \
+  --reranker-model "$PWD/models/Qwen3-Reranker-0.6B" \
   --device "${FUSION_MEMORY_QWEN_DEVICE:-cpu}" \
-  --cache-dir "$FUSION_MEMORY_MODEL_CACHE"
+  --cache-dir "$PWD/models"
 ```
 
 Expected:

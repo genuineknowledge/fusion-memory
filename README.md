@@ -42,13 +42,29 @@ PYTHONDONTWRITEBYTECODE=1 python -m compileall -q fusion_memory tests
 面向新手的默认 SQLite 本地服务：
 
 ```bash
-cd /path/to/fusion-memory
+git clone https://github.com/genuineknowledge/fusion-memory.git
+cd fusion-memory
 sh install.sh
-fusion-memory start
-fusion-memory status
+fusion-memory init --local-test --json
+fusion-memory start --json
+fusion-memory doctor --json
+export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 ```
 
-`install.sh` / `install.ps1` 安装完成后会自动提示初始化数据库、embedding、reranker、extractor/router。默认一路回车即可使用 SQLite + 内置轻量模型；API key 只通过环境变量读取，不写入配置文件。
+If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
+
+仓库自带两个本地向量模型目录：`models/Qwen3-Embedding-0.6B` 和
+`models/Qwen3-Reranker-0.6B`。安装脚本不会从其他地方下载模型；它只检查
+仓库内模型文件和本机 ML 依赖是否可用。条件满足时默认配置会指向这两个
+repo-local 模型。条件不足时安装会 fallback 到 `compromised` 本地模式：
+SQLite + 内置轻量 embedding/reranker 可以继续试用，但检索质量是
+compromised 的。安装完成后会提示提供 API key；推荐阿里云 DashScope，
+例如设置 `DASHSCOPE_API_KEY`，再通过向导或环境变量接入 API provider。
+
+`install.sh` / `install.ps1` 安装完成后会自动运行 `fusion-memory install-check`。
+如需手动配置数据库、embedding、reranker、extractor/router，可设置
+`FUSION_MEMORY_USE_WIZARD=1` 后重新运行安装脚本。API key 只通过环境变量读取，
+不写入配置文件。
 
 常用维护命令：
 

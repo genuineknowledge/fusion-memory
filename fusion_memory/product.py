@@ -19,10 +19,13 @@ from urllib import error, request
 APP_NAME = "Fusion Memory"
 CONFIG_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8700
+PORT_FALLBACK_ATTEMPTS = 20
 DEFAULT_POSTGRES_DSN = "postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory"
-DEFAULT_QWEN_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-DEFAULT_QWEN_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+DEFAULT_QWEN_EMBEDDING_MODEL_NAME = "Qwen3-Embedding-0.6B"
+DEFAULT_QWEN_RERANKER_MODEL_NAME = "Qwen3-Reranker-0.6B"
+DEFAULT_QWEN_EMBEDDING_MODEL = str(Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_EMBEDDING_MODEL_NAME)
+DEFAULT_QWEN_RERANKER_MODEL = str(Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_RERANKER_MODEL_NAME)
 _STARTED_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
@@ -46,6 +49,10 @@ def runtime_status_payload(*, storage_backend: str = "sqlite") -> dict[str, Any]
     }
 
 
+def _qwen_dependency_available() -> bool:
+    return find_spec("sentence_transformers") is not None
+
+
 def product_paths(home: str | Path | None = None) -> ProductPaths:
     root = Path(home).expanduser() if home else _default_home()
     return ProductPaths(
@@ -56,6 +63,63 @@ def product_paths(home: str | Path | None = None) -> ProductPaths:
         pid=root / "fusion-memory.pid",
         backup_dir=root / "backups",
     )
+
+
+def default_local_embedding_model_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_EMBEDDING_MODEL_NAME
+
+
+def default_local_reranker_model_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_RERANKER_MODEL_NAME
+
+
+def install_readiness(home: str | Path | None = None, *, force: bool = False) -> dict[str, Any]:
+    """Initialize the product after install using bundled models when possible.
+
+    The installer must never download model weights. Production mode is selected
+    only when the repository-local embedding/reranker directories and optional
+    ML dependencies are present. Otherwise, it initializes an explicit
+    compromised local mode so a beginner can still try the workspace.
+    """
+
+    embedding_ready = _repository_model_ready(default_local_embedding_model_path())
+    reranker_ready = _repository_model_ready(default_local_reranker_model_path())
+    qwen_dependency_ready = _qwen_dependency_available()
+    if embedding_ready and reranker_ready and qwen_dependency_ready:
+        result = init_home(home, force=force)
+        result.update(
+            {
+                "mode": "production",
+                "compromised": False,
+                "message": "installed with repository-local Qwen embedding and reranker models.",
+            }
+        )
+        return result
+
+    result = init_home(home, force=force, settings=compromised_local_settings(product_paths(home)))
+    missing = []
+    if not embedding_ready:
+        missing.append("repository-local Qwen3 embedding model")
+    if not reranker_ready:
+        missing.append("repository-local Qwen3 reranker model")
+    if not qwen_dependency_ready:
+        missing.append("Qwen ML Python dependencies")
+    result.update(
+        {
+            "mode": "compromised",
+            "compromised": True,
+            "missing": missing,
+            "message": (
+                "installed in compromised local mode because "
+                + ", ".join(missing)
+                + " are not ready. Fusion Memory will use SQLite plus built-in lightweight "
+                "embedding/reranker. To restore full memory quality, provide model/API settings "
+                "after install. Recommended API option: Aliyun DashScope; set DASHSCOPE_API_KEY "
+                "or map it through FUSION_MEMORY_MODEL_API_KEY before enabling API providers."
+            ),
+        }
+    )
+    return result
 
 
 def init_home(
@@ -220,6 +284,14 @@ def doctor(home: str | Path | None = None) -> dict[str, Any]:
         checks.append(_check("home_writable", False, _friendly_os_error(exc)))
 
     config = load_config(home)
+    if bool(config.get("compromised")) or str(config.get("mode")) == "compromised":
+        checks.append(
+            _check(
+                "compromised_mode",
+                True,
+                "Running with built-in lightweight retrieval; provide DASHSCOPE_API_KEY for the recommended Aliyun DashScope API path or restore repository-local Qwen models for full quality.",
+            )
+        )
     if str(config.get("storage_backend")) == "postgres":
         db = str(config.get("db", ""))
         checks.append(_check("postgres_dsn", db.startswith("postgres"), _redact_dsn(db) if db.startswith("postgres") else "missing Postgres DSN"))
@@ -275,11 +347,16 @@ def start_service(home: str | Path | None = None, *, wait_seconds: float = 10.0)
         return {"ok": True, "already_running": True, "url": _base_url(config), "pid": _read_pid(paths.pid)}
 
     if not _port_available(config["host"], int(config["port"])):
-        return {
-            "ok": False,
-            "error": "port_in_use",
-            "message": f"Port {config['port']} is already in use. Change the port in {paths.config}.",
-        }
+        original_port = int(config["port"])
+        fallback_port = _next_available_port(str(config["host"]), original_port + 1)
+        if fallback_port is None:
+            return {
+                "ok": False,
+                "error": "port_in_use",
+                "message": f"Port {config['port']} is already in use. Change the port in {paths.config}.",
+            }
+        config["port"] = fallback_port
+        _write_json(paths.config, config)
 
     log_handle = paths.log.open("ab")
     project_root = _local_project_root()
@@ -317,7 +394,7 @@ def start_service(home: str | Path | None = None, *, wait_seconds: float = 10.0)
     while time.time() < deadline:
         last_health = service_health(config["host"], int(config["port"]))
         if last_health["ok"]:
-            return {"ok": True, "url": _base_url(config), "pid": process.pid, "log": str(paths.log)}
+            return {"ok": True, "url": _base_url(config), "port": int(config["port"]), "pid": process.pid, "log": str(paths.log)}
         if process.poll() is not None:
             _STARTED_PROCESSES.pop(process.pid, None)
             return _startup_failure_result(
@@ -484,14 +561,17 @@ def render_human(result: dict[str, Any]) -> str:
         lines.append(f"Next: {result['next_step']}")
         return "\n".join(lines)
     if result.get("home") and result.get("config") and result.get("db"):
-        return "\n".join(
-            [
-                f"{APP_NAME}: OK",
-                f"- Home: {result['home']}",
-                f"- Config: {result['config']}",
-                f"- Database: {_redact_dsn(str(result['db']))}",
-            ]
-        )
+        lines = [
+            f"{APP_NAME}: OK",
+            f"- Home: {result['home']}",
+            f"- Config: {result['config']}",
+            f"- Database: {_redact_dsn(str(result['db']))}",
+        ]
+        if result.get("message"):
+            lines.append(f"- Message: {result['message']}")
+        if result.get("compromised"):
+            lines.append("- Mode: compromised")
+        return "\n".join(lines)
     if result.get("ok"):
         if result.get("url"):
             state = result.get("message") or ("running" if result.get("running") else "ready")
@@ -553,6 +633,28 @@ def default_product_settings(paths: ProductPaths) -> dict[str, Any]:
         "reranker": {"provider": "qwen", "model": DEFAULT_QWEN_RERANKER_MODEL},
         "extractor": {"provider": "rule"},
         "query_intent": {"provider": "off"},
+    }
+
+
+def compromised_local_settings(paths: ProductPaths) -> dict[str, Any]:
+    return {
+        "version": CONFIG_VERSION,
+        "mode": "compromised",
+        "compromised": True,
+        "host": DEFAULT_HOST,
+        "port": DEFAULT_PORT,
+        "db": str(paths.db),
+        "storage_backend": "sqlite",
+        "log": str(paths.log),
+        "embedding": {"provider": "deterministic"},
+        "reranker": {"provider": "lexical"},
+        "extractor": {"provider": "rule"},
+        "query_intent": {"provider": "off"},
+        "message": (
+            "Compromised local mode uses built-in lightweight retrieval. "
+            "Set DASHSCOPE_API_KEY for the recommended Aliyun DashScope API path "
+            "or restore repository-local Qwen models for full quality."
+        ),
     }
 
 
@@ -834,9 +936,9 @@ def _postgres_readiness(dsn: str) -> dict[str, dict[str, Any]]:
 
 
 def _qwen_dependency_check(label: str) -> dict[str, Any]:
-    ok = find_spec("sentence_transformers") is not None
+    ok = _qwen_dependency_available()
     name = f"{label}_dependency"
-    detail = "Qwen ML dependencies are installed." if ok else "Qwen ML dependencies are missing. Install the qwen extra or use --local-test for a temporary local mode."
+    detail = "Qwen ML dependencies are installed." if ok else "Qwen ML dependencies are missing. Install the qwen extra, configure an API provider, or use compromised/local-test mode temporarily."
     return _check(name, ok, detail)
 
 
@@ -845,12 +947,29 @@ def _qwen_model_readiness_check(label: str, model: str, dependency_ok: bool) -> 
     if not model:
         return _check(name, False, "Qwen model is not configured.")
     if _looks_like_path(model):
-        exists = Path(model).expanduser().exists()
-        return _check(name, exists and dependency_ok, "Qwen model path is ready." if exists and dependency_ok else "Qwen model path or dependencies are not ready.")
+        path = Path(model).expanduser()
+        exists = _repository_model_ready(path)
+        return _check(
+            name,
+            exists and dependency_ok,
+            "Repository-local Qwen model path is ready."
+            if exists and dependency_ok
+            else "Repository-local Qwen model path or dependencies are not ready.",
+        )
     return _check(
         name,
-        dependency_ok,
-        "Qwen model can be loaded by the configured model id." if dependency_ok else "Qwen model cannot load until ML dependencies are installed.",
+        False,
+        "Qwen model must be a repository-local path under models/; this installer does not download model weights.",
+    )
+
+
+def _repository_model_ready(path: Path) -> bool:
+    path = path.expanduser()
+    return (
+        path.is_dir()
+        and (path / "model.safetensors").is_file()
+        and (path / "config.json").is_file()
+        and (path / "tokenizer.json").is_file()
     )
 
 
@@ -960,6 +1079,13 @@ def _port_available(host: str, port: int) -> bool:
             return True
         except OSError:
             return False
+
+
+def _next_available_port(host: str, start_port: int, *, attempts: int = PORT_FALLBACK_ATTEMPTS) -> int | None:
+    for port in range(start_port, start_port + attempts):
+        if _port_available(host, port):
+            return port
+    return None
 
 
 def _friendly_os_error(exc: OSError) -> str:

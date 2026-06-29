@@ -10,14 +10,18 @@ if (-not $Python) {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -e $ScriptDir
-if ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
-    & $Python -m fusion_memory.cli init
-} else {
+if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
     & $Python -m fusion_memory.cli init --wizard
+} elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
+    & $Python -m fusion_memory.cli install-check --force
+} else {
+    & $Python -m fusion_memory.cli install-check --force
 }
 & $Python -m fusion_memory.cli doctor
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."
+Write-Host "Bundled model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
+Write-Host "If the installer reported compromised mode, set DASHSCOPE_API_KEY for the recommended Aliyun API path or restore bundled model/dependency readiness."
 Write-Host "Start it with: fusion-memory start"
 Write-Host "Check it with: fusion-memory status"

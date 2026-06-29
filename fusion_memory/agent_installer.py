@@ -108,7 +108,7 @@ def _smoke_command(target: str) -> list[str]:
         "--target",
         target,
         "--memory-url",
-        "http://127.0.0.1:8765",
+        "http://127.0.0.1:8700",
         "--output",
         f".runtime/agent-smoke-{target}.json",
     ]

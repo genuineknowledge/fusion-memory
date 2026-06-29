@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -19,9 +20,10 @@ DEFAULT_RAW_EVIDENCE_QUOTAS = {
 }
 
 
-DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_MODEL_ROOT = Path(__file__).resolve().parents[2] / "models"
+DEFAULT_EMBEDDING_MODEL = str(DEFAULT_MODEL_ROOT / "Qwen3-Embedding-0.6B")
 DEFAULT_EMBEDDING_DIMENSION = 1024
-DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+DEFAULT_RERANKER_MODEL = str(DEFAULT_MODEL_ROOT / "Qwen3-Reranker-0.6B")
 
 
 @dataclass

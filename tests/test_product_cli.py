@@ -14,8 +14,11 @@ import fusion_memory.product as product
 from fusion_memory.product import (
     backup_data,
     configure_interactive,
+    default_local_embedding_model_path,
+    default_local_reranker_model_path,
     doctor,
     init_home,
+    install_readiness,
     load_config,
     product_paths,
     safe_product_error,
@@ -53,6 +56,26 @@ class ProductCliTests(unittest.TestCase):
             sys.stdout = old_stdout
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["dry_run"])
+
+    def test_install_check_cli_json(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                sys.argv = ["fusion-memory", "install-check", "--home", tmp, "--force", "--json"]
+                sys.stdout = StringIO()
+                main()
+                payload = json.loads(sys.stdout.getvalue())
+            finally:
+                sys.argv = old_argv
+                sys.stdout = old_stdout
+
+        self.assertTrue(payload["ok"])
+        self.assertIn(payload["mode"], {"production", "compromised"})
 
     def test_install_agent_invalid_target_cli_json_is_beginner_safe(self) -> None:
         from fusion_memory.cli import main
@@ -183,9 +206,42 @@ class ProductCliTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(config["storage_backend"], "postgres")
         self.assertEqual(config["embedding"]["provider"], "qwen")
+        self.assertEqual(config["embedding"]["model"], str(default_local_embedding_model_path()))
         self.assertEqual(config["reranker"]["provider"], "qwen")
+        self.assertEqual(config["reranker"]["model"], str(default_local_reranker_model_path()))
         self.assertEqual(config["extractor"]["provider"], "rule")
         self.assertEqual(config["query_intent"]["provider"], "off")
+
+    def test_default_qwen_models_are_repository_local_paths(self) -> None:
+        repo_root = Path(product.__file__).resolve().parents[1]
+
+        embedding_model = default_local_embedding_model_path()
+        reranker_model = default_local_reranker_model_path()
+
+        self.assertEqual(embedding_model, repo_root / "models" / "Qwen3-Embedding-0.6B")
+        self.assertEqual(reranker_model, repo_root / "models" / "Qwen3-Reranker-0.6B")
+
+    def test_install_readiness_falls_back_to_compromised_local_mode_when_models_or_deps_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with (
+                patch("fusion_memory.product.default_local_embedding_model_path", return_value=home / "missing-embedding"),
+                patch("fusion_memory.product.default_local_reranker_model_path", return_value=home / "missing-reranker"),
+                patch("fusion_memory.product._qwen_dependency_available", return_value=False),
+            ):
+                result = install_readiness(home, force=True)
+            config = load_config(home)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "compromised")
+        self.assertTrue(result["compromised"])
+        self.assertEqual(config["mode"], "compromised")
+        self.assertEqual(config["storage_backend"], "sqlite")
+        self.assertEqual(config["embedding"]["provider"], "deterministic")
+        self.assertEqual(config["reranker"]["provider"], "lexical")
+        self.assertIn("DASHSCOPE_API_KEY", result["message"])
+        self.assertIn("Aliyun", result["message"])
+        self.assertIn("compromised", render_human(result))
 
     def test_init_home_local_test_fallback_uses_dependency_free_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -467,11 +523,54 @@ class ProductCliTests(unittest.TestCase):
                 stopped = stop_service(home)
                 self.assertTrue(stopped["ok"], stopped)
 
+    def test_start_service_tries_next_port_when_configured_port_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            busy_port = _free_port()
+            init_home(
+                home,
+                port=busy_port,
+                settings={
+                    "db": str(home / "fusion-memory.sqlite3"),
+                    "storage_backend": "sqlite",
+                    "embedding": {"provider": "deterministic"},
+                    "reranker": {"provider": "lexical"},
+                },
+            )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy_socket:
+                busy_socket.bind(("127.0.0.1", busy_port))
+                busy_socket.listen(1)
+                fake_process = _FakeProcess(pid=4321)
+
+                def fake_health(host: str, port: int, *, timeout: float = 1.0):
+                    return {"ok": port != busy_port, "url": f"http://{host}:{port}/health"}
+
+                with (
+                    patch("fusion_memory.product.subprocess.Popen", return_value=fake_process) as popen,
+                    patch("fusion_memory.product.service_health", side_effect=fake_health),
+                ):
+                    started = start_service(home, wait_seconds=0.1)
+
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(started["port"], busy_port + 1)
+            self.assertEqual(started["url"], f"http://127.0.0.1:{busy_port + 1}")
+            self.assertEqual(load_config(home)["port"], busy_port + 1)
+            self.assertIn("--port", popen.call_args.args[0])
+            self.assertIn(str(busy_port + 1), popen.call_args.args[0])
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+class _FakeProcess:
+    def __init__(self, *, pid: int) -> None:
+        self.pid = pid
+
+    def poll(self):
+        return None
 
 
 if __name__ == "__main__":

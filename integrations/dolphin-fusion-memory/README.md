@@ -10,6 +10,11 @@ Workspace path:
 /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace
 ```
 
+The workspace files under this directory are the canonical Dolphin/Fusion
+Memory adapter. The `psi-agent` repository also carries a beginner-facing copy
+at `examples/fusion-memory-workspace`; keep the Python adapter files in sync so
+the agent example and the memory integration exercise the same HTTP contract.
+
 ## Tools
 
 - `memory_add`: store durable user preferences, project facts, or stable decisions.
@@ -30,6 +35,33 @@ Workspace path:
   clamped to `0.1..5.0`.
 - `FUSION_MEMORY_SMOKE_MEMORY_URL`: smoke-script-only override for the Fusion Memory
   URL.
+
+## First Use Setup
+
+Before using `memory_add`, `memory_search`, or `memory_answer_context` for the
+first time, initialize and start Fusion Memory. The workspace includes
+`skills/fusion-memory-setup/SKILL.md` with the full beginner workflow.
+
+Minimal local setup:
+
+```bash
+git clone https://github.com/genuineknowledge/fusion-memory.git
+cd fusion-memory
+sh install.sh
+fusion-memory init --local-test --json
+fusion-memory start --json
+fusion-memory doctor --json
+export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
+```
+
+If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting this workspace.
+
+The Fusion Memory repository includes `models/Qwen3-Embedding-0.6B` and
+`models/Qwen3-Reranker-0.6B`. The installer does not download model weights from
+other locations. If bundled models or local ML dependencies are not ready, it
+falls back to a compromised local mode with built-in lightweight retrieval and
+prints the API-key next step. Recommended API provider: Aliyun DashScope; set
+`DASHSCOPE_API_KEY` before configuring API-backed providers.
 
 ## Run
 
@@ -63,6 +95,32 @@ uv run psi-agent session \
   --channel-socket ./channel.sock \
   --ai-socket ./ai.sock
 ```
+
+## Copy Into Another Workspace
+
+This workspace is self-contained. To create a new memory-only workspace, copy the
+whole directory:
+
+```bash
+cp -R /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace ./my-memory-workspace
+```
+
+Then start Dolphin-Agent with `--workspace ./my-memory-workspace`.
+
+To add Fusion Memory to an existing workspace, copy the memory tools and merge
+the system prompt instructions:
+
+```bash
+mkdir -p ./my-workspace/tools ./my-workspace/systems ./my-workspace/skills
+cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_client.py ./my-workspace/tools/
+cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_config.py ./my-workspace/tools/
+cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/memory_*.py ./my-workspace/tools/
+cp -R /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/skills/fusion-memory-setup ./my-workspace/skills/
+```
+
+If the target workspace already has `systems/system.py`, add the Fusion Memory
+tool guidance from this workspace's `systems/system.py` into the existing prompt.
+If it does not, copy `workspace/systems/system.py` as-is.
 
 ## Offline Behavior
 

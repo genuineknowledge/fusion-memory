@@ -7,7 +7,8 @@
 Linux / macOS:
 
 ```bash
-cd /path/to/fusion-memory
+git clone https://github.com/genuineknowledge/fusion-memory.git
+cd fusion-memory
 sh install.sh
 ```
 
@@ -18,18 +19,37 @@ cd C:\path\to\memory
 .\install.ps1
 ```
 
-安装完成后会自动进入初始化向导，依次确认：
+安装完成后会自动运行 `fusion-memory install-check`。仓库自带两个本地向量模型：
+`models/Qwen3-Embedding-0.6B` 和 `models/Qwen3-Reranker-0.6B`，安装流程不会从其他
+地方下载模型。它只检查仓库内模型文件和本机 ML 依赖。
+
+条件满足时会配置：
 
 - 数据库：默认 Postgres/pgvector，本地服务地址来自初始化配置；高级用户可显式选择 SQLite 测试模式。
-- Embedding：默认 Qwen3-Embedding-0.6B。
-- Reranker：默认 Qwen3-Reranker-0.6B。
+- Embedding：默认 repo-local `models/Qwen3-Embedding-0.6B`。
+- Reranker：默认 repo-local `models/Qwen3-Reranker-0.6B`。
 - Extractor/router：默认内置规则；高级用户可选 OpenAI-compatible API。
 - Query router：默认关闭；需要复杂查询路由时再开启 API。
+
+如果检测到模型文件或 ML 依赖不足，安装会 fallback 到 `compromised` 本地模式：
+SQLite + 内置轻量 embedding/reranker 可以继续试用，但当前 memory 功能是
+compromised 的。安装完成后需要提供 API key 才能接入更完整的模型能力；推荐
+阿里云 DashScope，设置：
+
+```bash
+export DASHSCOPE_API_KEY=<your-api-key>
+```
 
 API key 不会写入配置文件。向导只保存环境变量名，例如
 `FUSION_MEMORY_MODEL_API_KEY`。启动服务前把真实 key 放到环境变量里即可。
 
-无人值守安装可以跳过向导：
+如需进入手动向导：
+
+```bash
+FUSION_MEMORY_USE_WIZARD=1 sh install.sh
+```
+
+无人值守安装使用默认检测流程：
 
 ```bash
 FUSION_MEMORY_SKIP_WIZARD=1 sh install.sh
@@ -40,22 +60,23 @@ FUSION_MEMORY_SKIP_WIZARD=1 sh install.sh
 Run:
 
 ```bash
-fusion-memory init --json
+fusion-memory init --local-test --json
+fusion-memory start --json
 fusion-memory doctor --json
+export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 ```
+
+If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
+
+Local test mode uses SQLite and built-in lightweight models. It is the
+recommended beginner setup before production dependencies are configured.
 
 The default production setup uses PostgreSQL + pgvector and Qwen 0.6B
-embedding/reranker.
-
-If Postgres or model dependencies are not ready, use local test mode:
+embedding/reranker. Use it after Postgres and model dependencies are ready:
 
 ```bash
-fusion-memory init --local-test --json
-fusion-memory start
+fusion-memory init --json
 ```
-
-Local test mode is dependency-free and is intended for trying the product. It
-is not the recommended production configuration.
 
 ## 2. 启动
 
@@ -98,22 +119,24 @@ fusion-memory doctor
 Linux / macOS:
 
 ```bash
-export PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
+export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:PSI_MEMORY_BASE_URL = "http://127.0.0.1:8765"
+$env:PSI_MEMORY_BASE_URL = "http://127.0.0.1:8700"
 ```
 
 Windows cmd:
 
 ```bat
-set PSI_MEMORY_BASE_URL=http://127.0.0.1:8765
+set PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 ```
 
-然后给 `psi-agent session` 加上 `--memory-enabled`。
+然后使用带 Fusion Memory tools 的 psi-agent workspace，例如
+`examples/fusion-memory-workspace`。当前 agent main 通过 workspace tools 接入，
+不需要额外的 agent core memory flag。
 
 ## 6. 常见问题
 

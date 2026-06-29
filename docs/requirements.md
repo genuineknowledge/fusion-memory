@@ -28,8 +28,8 @@ The currently selected production-oriented configuration is:
 | Primary database | Postgres 16 |
 | Vector extension | pgvector |
 | Vector dimension | 1024 |
-| Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
-| Reranker model | `Qwen/Qwen3-Reranker-0.6B` |
+| Embedding model | repo-local `models/Qwen3-Embedding-0.6B` |
+| Reranker model | repo-local `models/Qwen3-Reranker-0.6B` |
 | Extractor | Memory-owned configurable LLM extractor |
 | Local fallback | SQLite, deterministic 1024-dimensional embedder, rule extractor, lexical reranker |
 | Benchmark answer/judge | Configurable OpenAI-compatible answer and judge models |
@@ -90,7 +90,7 @@ the migration, indexes, and all stored embeddings must be rebuilt.
 
 Embedding:
 
-- Default target: `Qwen/Qwen3-Embedding-0.6B`.
+- Default target: repo-local `models/Qwen3-Embedding-0.6B`.
 - Output dimension: 1024.
 - Must support batch embedding.
 - Must expose model version and call telemetry where possible.
@@ -98,7 +98,7 @@ Embedding:
 
 Reranker:
 
-- Default target: `Qwen/Qwen3-Reranker-0.6B`.
+- Default target: repo-local `models/Qwen3-Reranker-0.6B`.
 - Used in Balanced and Benchmark retrieval modes.
 - Must expose model version and call telemetry where possible.
 - Must support either local adapter or HTTP reranker endpoint.
