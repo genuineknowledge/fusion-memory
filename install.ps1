@@ -9,7 +9,7 @@ if (-not $Python) {
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 & $Python -m pip install --upgrade pip
-& $Python -m pip install -e $ScriptDir
+& $Python -m pip install -e "$ScriptDir[postgres,qwen]"
 if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
     & $Python -m fusion_memory.cli init --wizard
 } elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
@@ -22,6 +22,7 @@ if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
 Write-Host ""
 Write-Host "Fusion Memory is installed."
 Write-Host "Bundled model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
-Write-Host "If the installer reported compromised mode, set DASHSCOPE_API_KEY for the recommended Aliyun API path or restore bundled model/dependency readiness."
+Write-Host "The installer installs full runtime dependencies including Postgres and local Qwen model support."
+Write-Host "If the installer reported compromised mode, this machine could not run the bundled models; set DASHSCOPE_API_KEY for the recommended Aliyun API path."
 Write-Host "Start it with: fusion-memory start"
 Write-Host "Check it with: fusion-memory status"

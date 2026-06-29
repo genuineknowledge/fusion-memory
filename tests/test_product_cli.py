@@ -32,8 +32,16 @@ from fusion_memory.product import (
 
 
 class ProductCliTests(unittest.TestCase):
-    def test_render_human_uses_safe_fallback_for_failed_payloads_without_checks(self) -> None:
-        rendered = render_human({"ok": False, "message": "Could not connect", "next_step": "Run fusion-memory doctor"})
+    def test_render_human_uses_safe_fallback_for_failed_payloads_without_checks(
+        self,
+    ) -> None:
+        rendered = render_human(
+            {
+                "ok": False,
+                "message": "Could not connect",
+                "next_step": "Run fusion-memory doctor",
+            }
+        )
 
         self.assertIn("Could not connect", rendered)
         self.assertIn("Run fusion-memory doctor", rendered)
@@ -47,7 +55,14 @@ class ProductCliTests(unittest.TestCase):
         old_argv = sys.argv
         old_stdout = sys.stdout
         try:
-            sys.argv = ["fusion-memory", "install-agent", "--target", "all", "--dry-run", "--json"]
+            sys.argv = [
+                "fusion-memory",
+                "install-agent",
+                "--target",
+                "all",
+                "--dry-run",
+                "--json",
+            ]
             sys.stdout = StringIO()
             main()
             payload = json.loads(sys.stdout.getvalue())
@@ -65,17 +80,47 @@ class ProductCliTests(unittest.TestCase):
         old_argv = sys.argv
         old_stdout = sys.stdout
         with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
             try:
-                sys.argv = ["fusion-memory", "install-check", "--home", tmp, "--force", "--json"]
+                sys.argv = [
+                    "fusion-memory",
+                    "install-check",
+                    "--home",
+                    tmp,
+                    "--force",
+                    "--json",
+                ]
                 sys.stdout = StringIO()
-                main()
+                with (
+                    patch(
+                        "fusion_memory.product.default_local_embedding_model_path",
+                        return_value=embedding,
+                    ),
+                    patch(
+                        "fusion_memory.product.default_local_reranker_model_path",
+                        return_value=reranker,
+                    ),
+                    patch(
+                        "fusion_memory.product._qwen_dependency_available",
+                        return_value=True,
+                    ),
+                    patch(
+                        "fusion_memory.product._qwen_runtime_smoke",
+                        return_value={"ok": True, "message": "ready"},
+                    ),
+                ):
+                    main()
                 payload = json.loads(sys.stdout.getvalue())
             finally:
                 sys.argv = old_argv
                 sys.stdout = old_stdout
 
         self.assertTrue(payload["ok"])
-        self.assertIn(payload["mode"], {"production", "compromised"})
+        self.assertEqual(payload["mode"], "production")
 
     def test_sync_dolphin_history_cli_json_runs_once(self) -> None:
         from fusion_memory.cli import main
@@ -96,7 +141,10 @@ class ProductCliTests(unittest.TestCase):
                 "--json",
             ]
             sys.stdout = StringIO()
-            with patch("fusion_memory.cli.sync_dolphin_history_once", return_value={"ok": True, "added": 1, "skipped": 0}):
+            with patch(
+                "fusion_memory.cli.sync_dolphin_history_once",
+                return_value={"ok": True, "added": 1, "skipped": 0},
+            ):
                 main()
             payload = json.loads(sys.stdout.getvalue())
         finally:
@@ -114,7 +162,13 @@ class ProductCliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         try:
-            sys.argv = ["fusion-memory", "install-agent", "--target", "bad-agent", "--json"]
+            sys.argv = [
+                "fusion-memory",
+                "install-agent",
+                "--target",
+                "bad-agent",
+                "--json",
+            ]
             with redirect_stdout(stdout), patch("sys.stderr", stderr):
                 main()
             payload = json.loads(stdout.getvalue())
@@ -161,7 +215,15 @@ class ProductCliTests(unittest.TestCase):
         stdout = StringIO()
         try:
             sys.argv = ["fusion-memory", "doctor", "--json"]
-            with redirect_stdout(stdout), patch("fusion_memory.cli.doctor", side_effect=RuntimeError("Traceback (most recent call last): secret stack")):
+            with (
+                redirect_stdout(stdout),
+                patch(
+                    "fusion_memory.cli.doctor",
+                    side_effect=RuntimeError(
+                        "Traceback (most recent call last): secret stack"
+                    ),
+                ),
+            ):
                 exit_code = main()
         finally:
             sys.argv = old_argv
@@ -173,14 +235,22 @@ class ProductCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", payload["message"])
         self.assertNotIn("secret stack", payload["message"])
 
-    def test_install_agent_invalid_target_cli_json_includes_failure_schema(self) -> None:
+    def test_install_agent_invalid_target_cli_json_includes_failure_schema(
+        self,
+    ) -> None:
         from fusion_memory.cli import main
         import sys
 
         old_argv = sys.argv
         stdout = StringIO()
         try:
-            sys.argv = ["fusion-memory", "install-agent", "--target", "bad-agent", "--json"]
+            sys.argv = [
+                "fusion-memory",
+                "install-agent",
+                "--target",
+                "bad-agent",
+                "--json",
+            ]
             with redirect_stdout(stdout):
                 main()
             payload = json.loads(stdout.getvalue())
@@ -199,7 +269,9 @@ class ProductCliTests(unittest.TestCase):
             self.assertTrue(init["ok"])
             self.assertTrue((home / "config.json").exists())
             config = load_config(home)
-            self.assertEqual(init["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory")
+            self.assertEqual(
+                init["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory"
+            )
             self.assertEqual(config["storage_backend"], "postgres")
             self.assertEqual(config["embedding"]["provider"], "qwen")
             self.assertIn("Qwen3-Embedding-0.6B", config["embedding"]["model"])
@@ -213,8 +285,12 @@ class ProductCliTests(unittest.TestCase):
 
             report = doctor(home)
             self.assertTrue(report["checks"])
-            self.assertIn("postgres_connection", {item["name"] for item in report["checks"]})
-            self.assertIn("embedding_dependency", {item["name"] for item in report["checks"]})
+            self.assertIn(
+                "postgres_connection", {item["name"] for item in report["checks"]}
+            )
+            self.assertIn(
+                "embedding_dependency", {item["name"] for item in report["checks"]}
+            )
 
             (home / "fusion-memory.sqlite3").write_text("seed", encoding="utf-8")
             backup = backup_data(home)
@@ -235,9 +311,13 @@ class ProductCliTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(config["storage_backend"], "postgres")
         self.assertEqual(config["embedding"]["provider"], "qwen")
-        self.assertEqual(config["embedding"]["model"], str(default_local_embedding_model_path()))
+        self.assertEqual(
+            config["embedding"]["model"], str(default_local_embedding_model_path())
+        )
         self.assertEqual(config["reranker"]["provider"], "qwen")
-        self.assertEqual(config["reranker"]["model"], str(default_local_reranker_model_path()))
+        self.assertEqual(
+            config["reranker"]["model"], str(default_local_reranker_model_path())
+        )
         self.assertEqual(config["extractor"]["provider"], "rule")
         self.assertEqual(config["query_intent"]["provider"], "off")
 
@@ -250,13 +330,63 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(embedding_model, repo_root / "models" / "Qwen3-Embedding-0.6B")
         self.assertEqual(reranker_model, repo_root / "models" / "Qwen3-Reranker-0.6B")
 
-    def test_install_readiness_falls_back_to_compromised_local_mode_when_models_or_deps_missing(self) -> None:
+    def test_install_readiness_reports_not_ready_when_models_or_deps_missing(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             with (
-                patch("fusion_memory.product.default_local_embedding_model_path", return_value=home / "missing-embedding"),
-                patch("fusion_memory.product.default_local_reranker_model_path", return_value=home / "missing-reranker"),
-                patch("fusion_memory.product._qwen_dependency_available", return_value=False),
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=home / "missing-embedding",
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=home / "missing-reranker",
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=False,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "not_ready")
+        self.assertFalse(result["compromised"])
+        self.assertFalse((home / "config.json").exists())
+        self.assertIn("Install the full runtime dependencies", result["message"])
+        self.assertIn(".[postgres,qwen]", result["message"])
+
+    def test_install_readiness_falls_back_to_compromised_when_model_smoke_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_runtime_smoke",
+                    return_value={
+                        "ok": False,
+                        "message": "CPU lacks required runtime memory",
+                    },
+                ),
             ):
                 result = install_readiness(home, force=True)
             config = load_config(home)
@@ -268,6 +398,7 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(config["storage_backend"], "sqlite")
         self.assertEqual(config["embedding"]["provider"], "deterministic")
         self.assertEqual(config["reranker"]["provider"], "lexical")
+        self.assertIn("hardware or runtime environment", result["message"])
         self.assertIn("DASHSCOPE_API_KEY", result["message"])
         self.assertIn("Aliyun", result["message"])
         self.assertIn("compromised", render_human(result))
@@ -284,7 +415,9 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(config["embedding"]["provider"], "deterministic")
         self.assertEqual(config["reranker"]["provider"], "lexical")
 
-    def test_doctor_local_test_reports_model_dependency_and_readiness_checks(self) -> None:
+    def test_doctor_local_test_reports_model_dependency_and_readiness_checks(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             init_home(home, local_test=True)
@@ -363,7 +496,9 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("backup", plan)
         self.assertIn("rollback", plan)
 
-    def test_upgrade_failure_json_is_beginner_safe_without_raw_subprocess_output(self) -> None:
+    def test_upgrade_failure_json_is_beginner_safe_without_raw_subprocess_output(
+        self,
+    ) -> None:
         import subprocess
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -371,7 +506,7 @@ class ProductCliTests(unittest.TestCase):
             init_home(home, local_test=True)
             raw_output = (
                 "Traceback (most recent call last):\n"
-                "File \"/tmp/pip.py\", line 1, in <module>\n"
+                'File "/tmp/pip.py", line 1, in <module>\n'
                 "RuntimeError: secret internal pip failure\n"
             )
             with patch(
@@ -413,7 +548,9 @@ class ProductCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", result["message"])
         self.assertNotIn("sentence_transformers", result["message"])
 
-    def test_safe_product_error_maps_connection_failure_to_database_guidance(self) -> None:
+    def test_safe_product_error_maps_connection_failure_to_database_guidance(
+        self,
+    ) -> None:
         error = safe_product_error(ConnectionError("connection refused"))
 
         self.assertEqual(error["error"], "database_not_ready")
@@ -421,7 +558,9 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("fusion-memory doctor", error["next_step"])
 
     def test_safe_product_error_hides_traceback_details(self) -> None:
-        error = safe_product_error(RuntimeError("Traceback (most recent call last): secret stack"))
+        error = safe_product_error(
+            RuntimeError("Traceback (most recent call last): secret stack")
+        )
 
         self.assertNotIn("Traceback", error["message"])
         self.assertNotIn("secret stack", error["message"])
@@ -447,7 +586,11 @@ class ProductCliTests(unittest.TestCase):
                 "",  # query router off
             ]
         )
-        with tempfile.TemporaryDirectory() as tmp, patch("builtins.input", lambda _prompt="": next(answers)), redirect_stdout(StringIO()):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("builtins.input", lambda _prompt="": next(answers)),
+            redirect_stdout(StringIO()),
+        ):
             home = Path(tmp)
             result = configure_interactive(home)
             self.assertTrue(result["ok"])
@@ -459,7 +602,9 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(config["extractor"]["provider"], "api")
             self.assertEqual(config["query_intent"]["provider"], "off")
 
-            with patch.dict(os.environ, {"FUSION_MEMORY_MODEL_API_KEY": "secret-value"}):
+            with patch.dict(
+                os.environ, {"FUSION_MEMORY_MODEL_API_KEY": "secret-value"}
+            ):
                 env = _service_env(config)
             self.assertEqual(env["FUSION_MEMORY_EMBEDDING_PROVIDER"], "http")
             self.assertEqual(env["FUSION_MEMORY_EMBEDDING_API_KEY"], "secret-value")
@@ -468,7 +613,9 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(env["FUSION_MEMORY_EXTRACTOR_API_KEY"], "secret-value")
             self.assertEqual(env["FUSION_MEMORY_QUERY_INTENT_MODE"], "off")
 
-    def test_interactive_and_human_output_redact_default_postgres_credentials(self) -> None:
+    def test_interactive_and_human_output_redact_default_postgres_credentials(
+        self,
+    ) -> None:
         answers = iter(
             [
                 "",  # host
@@ -498,7 +645,9 @@ class ProductCliTests(unittest.TestCase):
         ):
             result = configure_interactive(Path(tmp))
 
-        self.assertEqual(result["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory")
+        self.assertEqual(
+            result["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory"
+        )
         self.assertNotIn("fusion:fusion", json.dumps(result))
         rendered = render_human(result)
         self.assertIn("postgresql://***:***@127.0.0.1:55433/fusion_memory", rendered)
@@ -525,7 +674,9 @@ class ProductCliTests(unittest.TestCase):
 
             status = service_status(home)
 
-        self.assertEqual(status["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory")
+        self.assertEqual(
+            status["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory"
+        )
         self.assertNotIn("fusion:secret", json.dumps(status))
 
     def test_start_status_and_stop_service(self) -> None:
@@ -572,11 +723,19 @@ class ProductCliTests(unittest.TestCase):
                 fake_process = _FakeProcess(pid=4321)
 
                 def fake_health(host: str, port: int, *, timeout: float = 1.0):
-                    return {"ok": port != busy_port, "url": f"http://{host}:{port}/health"}
+                    return {
+                        "ok": port != busy_port,
+                        "url": f"http://{host}:{port}/health",
+                    }
 
                 with (
-                    patch("fusion_memory.product.subprocess.Popen", return_value=fake_process) as popen,
-                    patch("fusion_memory.product.service_health", side_effect=fake_health),
+                    patch(
+                        "fusion_memory.product.subprocess.Popen",
+                        return_value=fake_process,
+                    ) as popen,
+                    patch(
+                        "fusion_memory.product.service_health", side_effect=fake_health
+                    ),
                 ):
                     started = start_service(home, wait_seconds=0.1)
 
@@ -586,6 +745,28 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(load_config(home)["port"], busy_port + 1)
             self.assertIn("--port", popen.call_args.args[0])
             self.assertIn(str(busy_port + 1), popen.call_args.args[0])
+
+    def test_install_scripts_install_full_runtime_dependencies(self) -> None:
+        root = Path(product.__file__).resolve().parents[1]
+
+        install_sh = (root / "install.sh").read_text(encoding="utf-8")
+        install_ps1 = (root / "install.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
+        self.assertIn('-e "$ScriptDir[postgres,qwen]"', install_ps1)
+
+    def test_qwen_dependency_available_requires_full_runtime_dependencies(self) -> None:
+        def fake_find_spec(name: str) -> object | None:
+            return object() if name == "sentence_transformers" else None
+
+        with patch("fusion_memory.product.find_spec", side_effect=fake_find_spec):
+            self.assertFalse(product._qwen_dependency_available())
+
+
+def _write_ready_model_dir(path: Path) -> None:
+    path.mkdir(parents=True)
+    for filename in ("model.safetensors", "config.json", "tokenizer.json"):
+        (path / filename).write_text("stub", encoding="utf-8")
 
 
 def _free_port() -> int:

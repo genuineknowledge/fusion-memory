@@ -54,12 +54,16 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
 
 仓库自带两个本地向量模型目录：`models/Qwen3-Embedding-0.6B` 和
-`models/Qwen3-Reranker-0.6B`。安装脚本不会从其他地方下载模型；它只检查
-仓库内模型文件和本机 ML 依赖是否可用。条件满足时默认配置会指向这两个
-repo-local 模型。条件不足时安装会 fallback 到 `compromised` 本地模式：
-SQLite + 内置轻量 embedding/reranker 可以继续试用，但检索质量是
-compromised 的。安装完成后会提示提供 API key；推荐阿里云 DashScope，
-例如设置 `DASHSCOPE_API_KEY`，再通过向导或环境变量接入 API provider。
+`models/Qwen3-Reranker-0.6B`。安装脚本不会从其他地方下载模型；它会安装
+完整运行依赖（`.[postgres,qwen]`），包括 Postgres adapter、本地 Qwen adapter
+以及 PyTorch/Transformers 相关依赖。安装检查会确认仓库内模型文件存在，并运行
+一次最小 Qwen embedding/reranker smoke test。只有当模型文件和依赖都已就绪，
+但当前硬件或运行环境无法加载/运行这两个模型时，安装才会 fallback 到
+`compromised` 本地模式：SQLite + 内置轻量 embedding/reranker 可以继续试用，
+但检索质量是 compromised 的。安装完成后会提示提供 API key；推荐阿里云
+DashScope，例如设置 `DASHSCOPE_API_KEY`，再通过向导或环境变量接入 API provider。
+如果模型文件缺失或依赖安装失败，安装检查会返回 not ready，并提示重新运行
+`pip install -e ".[postgres,qwen]"`。
 
 `install.sh` / `install.ps1` 安装完成后会自动运行 `fusion-memory install-check`。
 如需手动配置数据库、embedding、reranker、extractor/router，可设置

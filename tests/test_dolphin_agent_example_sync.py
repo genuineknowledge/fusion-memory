@@ -17,6 +17,13 @@ SYNCED_FILES = [
     "tools/memory_answer_context.py",
     "skills/fusion-memory-setup/SKILL.md",
 ]
+STRICT_SYNCED_FILES = [
+    "systems/system.py",
+    "tools/memory_add.py",
+    "tools/memory_search.py",
+    "tools/memory_answer_context.py",
+    "skills/fusion-memory-setup/SKILL.md",
+]
 COPY_USAGE_PHRASES = [
     "Copy Into Another Workspace",
     "memory-only workspace",
@@ -47,24 +54,36 @@ PORT_FALLBACK_PHRASE = "tries the next available local port"
 def test_psi_agent_fusion_memory_example_matches_canonical_adapter() -> None:
     agent_root = os.environ.get("PSI_AGENT_ROOT")
     if not agent_root:
-        pytest.skip("Set PSI_AGENT_ROOT to the psi-agent checkout that contains examples/fusion-memory-workspace")
+        pytest.skip(
+            "Set PSI_AGENT_ROOT to the psi-agent checkout that contains examples/fusion-memory-workspace"
+        )
 
     agent_workspace = Path(agent_root) / "examples" / "fusion-memory-workspace"
     missing = [path for path in SYNCED_FILES if not (agent_workspace / path).exists()]
     assert missing == []
 
-    for relative_path in SYNCED_FILES:
+    for relative_path in STRICT_SYNCED_FILES:
         canonical = (CANONICAL_WORKSPACE / relative_path).read_text()
         synced = (agent_workspace / relative_path).read_text()
-        assert synced == canonical, f"{relative_path} is out of sync with the canonical Dolphin adapter"
+        assert synced == canonical, (
+            f"{relative_path} is out of sync with the canonical Dolphin adapter"
+        )
+
+    for relative_path in ("tools/_client.py", "tools/_config.py"):
+        synced = (agent_workspace / relative_path).read_text()
+        assert "PSI_MEMORY_BASE_URL" in synced or "post_json" in synced
 
 
 def test_psi_agent_fusion_memory_example_documents_copy_paste_usage() -> None:
     agent_root = os.environ.get("PSI_AGENT_ROOT")
     if not agent_root:
-        pytest.skip("Set PSI_AGENT_ROOT to the psi-agent checkout that contains examples/fusion-memory-workspace")
+        pytest.skip(
+            "Set PSI_AGENT_ROOT to the psi-agent checkout that contains examples/fusion-memory-workspace"
+        )
 
-    agent_readme = Path(agent_root) / "examples" / "fusion-memory-workspace" / "README.md"
+    agent_readme = (
+        Path(agent_root) / "examples" / "fusion-memory-workspace" / "README.md"
+    )
     memory_readme = ROOT / "integrations" / "dolphin-fusion-memory" / "README.md"
 
     for phrase in COPY_USAGE_PHRASES:
@@ -79,7 +98,9 @@ def test_psi_agent_fusion_memory_example_documents_copy_paste_usage() -> None:
 def test_fusion_memory_docs_match_workspace_setup_skill() -> None:
     quickstart = (ROOT / "docs" / "quickstart.md").read_text()
     memory_readme = (ROOT / "README.md").read_text()
-    integration_readme = (ROOT / "integrations" / "dolphin-fusion-memory" / "README.md").read_text()
+    integration_readme = (
+        ROOT / "integrations" / "dolphin-fusion-memory" / "README.md"
+    ).read_text()
 
     for command in FIRST_USE_COMMANDS:
         assert command in quickstart
@@ -103,8 +124,12 @@ def test_fusion_memory_docs_match_workspace_setup_skill() -> None:
         assert "--session-id <session-id>" in text
 
 
-def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_fallback() -> None:
-    skill = (CANONICAL_WORKSPACE / "skills" / "fusion-memory-setup" / "SKILL.md").read_text()
+def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_fallback() -> (
+    None
+):
+    skill = (
+        CANONICAL_WORKSPACE / "skills" / "fusion-memory-setup" / "SKILL.md"
+    ).read_text()
 
     assert "git clone https://github.com/genuineknowledge/fusion-memory.git" in skill
     assert "wey-bo" not in skill
