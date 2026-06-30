@@ -75,9 +75,9 @@ fusion-memory install-agent --target fusion-agent
 fusion-memory doctor
 ```
 
-Dolphin recovery: verify the Dolphin workspace, then run
-`fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history --workspace <workspace> --session-id <session-id>`
-beside the Dolphin session for passive persistence.
+Haitun recovery: verify the Haitun workspace, then run
+`fusion-memory --db fusion-memory.sqlite3 sync-haitun-history --workspace <workspace> --session-id <session-id>`
+beside the Haitun session for passive persistence.
 
 OpenClaw recovery: reinstall the external OpenClaw plugin, restart OpenClaw, and
 keep the OpenClaw source checkout unchanged.

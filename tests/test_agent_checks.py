@@ -27,7 +27,7 @@ class AgentChecksTests(unittest.TestCase):
         self.assertEqual(report["target"], "dolphin")
         self.assertIn("workspace", report)
         self.assertIn("skill", report)
-        self.assertIn("sync-dolphin-history", report["message"])
+        self.assertIn("sync-haitun-history", report["message"])
 
     def test_hermes_check_uses_installed_destination_under_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

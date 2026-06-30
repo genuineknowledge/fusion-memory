@@ -52,7 +52,7 @@ def _action_for(target: str, *, home: str | Path | None = None) -> dict[str, Any
                 "fusion-memory",
                 "--db",
                 "fusion-memory.sqlite3",
-                "sync-dolphin-history",
+                "sync-haitun-history",
                 "--workspace",
                 str(DOLPHIN_WORKSPACE),
                 "--session-id",
@@ -60,8 +60,8 @@ def _action_for(target: str, *, home: str | Path | None = None) -> dict[str, Any
             ],
             "smoke_command": smoke_command,
             "estimated_time": "under 1 minute",
-            "skip_if": "The Dolphin workspace already exposes memory tools and the fusion-memory-setup skill.",
-            "message": "Use the Dolphin workspace with memory_add, memory_search, memory_answer_context, and sync-dolphin-history.",
+            "skip_if": "The Haitun workspace already exposes memory tools and the fusion-memory-setup skill.",
+            "message": "Use the Haitun workspace with memory_add, memory_search, memory_answer_context, and sync-haitun-history.",
         }
     if target == "openclaw":
         return {
@@ -103,9 +103,9 @@ def _run_action(action: dict[str, Any]) -> dict[str, Any]:
             "target": target,
             "ok": ok,
             "message": (
-                "Dolphin Fusion Memory workspace is ready. Start sync-dolphin-history beside the Dolphin session."
+                "Haitun Fusion Memory workspace is ready. Start sync-haitun-history beside the Haitun session."
                 if ok
-                else "Dolphin Fusion Memory workspace is incomplete. Reinstall Fusion Memory."
+                else "Haitun Fusion Memory workspace is incomplete. Reinstall Fusion Memory."
             ),
         }
     if target == "openclaw":

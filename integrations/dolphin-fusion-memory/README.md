@@ -1,7 +1,7 @@
-# Dolphin-Agent Fusion Memory Integration
+# Haitun-Agent Fusion Memory Integration
 
-This workspace lets Dolphin-Agent use Fusion Memory through HTTP-only workspace tools.
-It does not load `MemoryService`, model code, or database code inside the Dolphin session
+This workspace lets Haitun-Agent use Fusion Memory through HTTP-only workspace tools.
+It does not load `MemoryService`, model code, or database code inside the Haitun session
 process.
 
 Workspace path:
@@ -10,9 +10,9 @@ Workspace path:
 /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace
 ```
 
-The workspace files under this directory are the canonical Dolphin/Fusion
+The workspace files under this directory are the canonical Haitun/Fusion
 Memory adapter. The `psi-agent` repository also carries a beginner-facing copy
-at `examples/fusion-memory-workspace`; keep the Python adapter files in sync so
+at `examples/haitun-workspace`; keep the Python adapter files in sync so
 the agent example and the memory integration exercise the same HTTP contract.
 
 ## Tools
@@ -26,17 +26,13 @@ the agent example and the memory integration exercise the same HTTP contract.
 
 - `PSI_MEMORY_BASE_URL`: Fusion Memory HTTP server URL. Defaults to
   `http://127.0.0.1:8700`.
-- `PSI_MEMORY_WORKSPACE_ID`: memory workspace scope. Defaults to `dolphin`.
+- `PSI_MEMORY_WORKSPACE_ID`: memory workspace scope. Defaults to `haitun`.
 - `PSI_MEMORY_USER_ID`: user scope. Defaults to the current OS user or `user`.
-- `PSI_MEMORY_AGENT_ID`: agent scope. Defaults to `dolphin`.
+- `PSI_MEMORY_AGENT_ID`: agent scope. Defaults to `haitun`.
 - `PSI_MEMORY_SESSION_ID`: optional session scope. When unset, reads allow
   cross-session retrieval.
 - `PSI_MEMORY_TIMEOUT_SECONDS`: request timeout in seconds. Defaults to `2.0` and is
   clamped to `0.1..5.0`.
-- `PSI_AGENT_GATEWAY_URL`: optional Dolphin/psi-agent gateway URL used by
-  automatic history persistence. Example: `http://127.0.0.1:8080`.
-- `PSI_AGENT_WORKSPACE`: optional Dolphin/psi-agent workspace path used by
-  automatic history persistence when no gateway URL is configured.
 - `FUSION_MEMORY_SMOKE_MEMORY_URL`: smoke-script-only override for the Fusion Memory
   URL.
 
@@ -74,7 +70,7 @@ providers.
 
 ## Run
 
-Start Fusion Memory on the Dolphin default port:
+Start Fusion Memory on the Haitun default port:
 
 ```bash
 cd /public/home/wwb/memory
@@ -93,7 +89,7 @@ The smoke writes a unique token with `memory_add`, retrieves it with
 `memory_search`, and asks for `memory_answer_context`. It exits with code `0` only
 when all three steps confirm the token against a live Fusion Memory server.
 
-Start a Dolphin-Agent session with this workspace:
+Start a Haitun-Agent session with this workspace:
 
 ```bash
 PSI_MEMORY_BASE_URL=http://127.0.0.1:8700 \
@@ -108,9 +104,9 @@ uv run psi-agent session \
 ## Automatic History Persistence
 
 Passive persistence is enabled by running the Fusion Memory history sync process
-beside the Dolphin-Agent session. It reads saved Dolphin history from
+beside the Haitun-Agent session. It reads saved Haitun history from
 `histories/<session-id>.jsonl`, keeps a checkpoint, and stores only new saved
-user/assistant turns. It does not patch Dolphin-Agent internals and cannot see
+user/assistant turns. It does not patch Haitun-Agent internals and cannot see
 messages that were never written to the history file.
 
 Explicit tool writes still happen only when the agent calls `memory_add`. Those
@@ -123,7 +119,7 @@ Start passive saved-history sync in a second shell:
 
 ```bash
 cd /public/home/wwb/memory
-fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
+fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
   --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
   --session-id <session-id>
 ```
@@ -139,7 +135,7 @@ whole directory:
 cp -R /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace ./my-memory-workspace
 ```
 
-Then start Dolphin-Agent with `--workspace ./my-memory-workspace`.
+Then start Haitun-Agent with `--workspace ./my-memory-workspace`.
 
 To add Fusion Memory to an existing workspace, copy the memory tools and merge
 the system prompt instructions:
@@ -167,5 +163,5 @@ Fusion Memory is offline or returns an error, they return structured JSON:
 
 If the server returns a request error, `error`, `cause`, and `message` preserve
 the safe server-provided reason, for example `bad_request` with `missing_scope`.
-The Dolphin session can continue without memory and retry after the Fusion Memory
+The Haitun session can continue without memory and retry after the Fusion Memory
 server is available or the request shape is fixed.

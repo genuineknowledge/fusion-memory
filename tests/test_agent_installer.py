@@ -29,7 +29,7 @@ class AgentInstallerTests(unittest.TestCase):
         self.assertEqual(action["target"], "dolphin")
         self.assertTrue(Path(action["workspace"]).exists())
         self.assertTrue(Path(action["skill"]).exists())
-        self.assertIn("sync-dolphin-history", action["sync_command"])
+        self.assertIn("sync-haitun-history", action["sync_command"])
         self.assertIn("--db", action["sync_command"])
         self.assertIn("memory_add", action["message"])
 

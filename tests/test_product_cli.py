@@ -122,7 +122,39 @@ class ProductCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["mode"], "production")
 
-    def test_sync_dolphin_history_cli_json_runs_once(self) -> None:
+    def test_sync_haitun_history_cli_json_runs_once(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        try:
+            sys.argv = [
+                "fusion-memory",
+                "sync-haitun-history",
+                "--session-id",
+                "session-a",
+                "--workspace",
+                "/tmp/workspace",
+                "--once",
+                "--json",
+            ]
+            sys.stdout = StringIO()
+            with patch(
+                "fusion_memory.cli.sync_haitun_history_once",
+                return_value={"ok": True, "added": 1, "skipped": 0},
+            ):
+                main()
+            payload = json.loads(sys.stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+            sys.stdout = old_stdout
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["added"], 1)
+
+    def test_sync_dolphin_history_cli_json_alias_runs_once(self) -> None:
         from fusion_memory.cli import main
         import sys
         from io import StringIO
@@ -142,7 +174,7 @@ class ProductCliTests(unittest.TestCase):
             ]
             sys.stdout = StringIO()
             with patch(
-                "fusion_memory.cli.sync_dolphin_history_once",
+                "fusion_memory.cli.sync_haitun_history_once",
                 return_value={"ok": True, "added": 1, "skipped": 0},
             ):
                 main()
@@ -153,6 +185,25 @@ class ProductCliTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["added"], 1)
+
+    def test_cli_help_hides_dolphin_history_alias(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+
+        old_argv = sys.argv
+        stdout = StringIO()
+        try:
+            sys.argv = ["fusion-memory", "--help"]
+            with redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("sync-haitun-history", help_text)
+        self.assertNotIn("sync-dolphin-history", help_text)
 
     def test_install_agent_invalid_target_cli_json_is_beginner_safe(self) -> None:
         from fusion_memory.cli import main

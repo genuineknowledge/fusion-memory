@@ -138,7 +138,7 @@ set PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 ```
 
 然后使用带 Fusion Memory tools 的 psi-agent workspace，例如
-`examples/fusion-memory-workspace`。当前 agent main 通过 workspace tools 接入，
+`examples/haitun-workspace`。当前 agent main 通过 workspace tools 接入，
 不需要额外的 agent core memory flag。
 
 ## 6. 自动持久化 history
@@ -150,24 +150,16 @@ Fusion Memory。要让会话 history 持续自动写入，不需要改 agent cor
 读 workspace history 文件：
 
 ```bash
-fusion-memory sync-dolphin-history \
-  --workspace /path/to/fusion-memory-workspace \
-  --session-id <session-id>
-```
-
-如果使用 psi-agent gateway，可改读 gateway history API：
-
-```bash
-fusion-memory sync-dolphin-history \
-  --gateway-url http://127.0.0.1:8080 \
+fusion-memory sync-haitun-history \
+  --workspace /path/to/haitun-workspace \
   --session-id <session-id>
 ```
 
 一次性回填：
 
 ```bash
-fusion-memory sync-dolphin-history \
-  --workspace /path/to/fusion-memory-workspace \
+fusion-memory sync-haitun-history \
+  --workspace /path/to/haitun-workspace \
   --session-id <session-id> \
   --once --json
 ```

@@ -34,10 +34,10 @@ checkouts return `ok=false` with recovery guidance instead of raw runtime logs.
 runtime exposes that information. Repository source files are not enough to make
 the runtime smoke pass.
 
-Dolphin, OpenClaw, Hermes, and Fusion-Agent include built-in write/retrieve smoke paths.
-Dolphin runs the workspace smoke against `memory_add`, `memory_search`, and
+Haitun, OpenClaw, Hermes, and Fusion-Agent include built-in write/retrieve smoke paths.
+Haitun runs the workspace smoke against `memory_add`, `memory_search`, and
 `memory_answer_context`, and passive persistence is handled by
-`sync-dolphin-history` reading saved JSONL history beside the Dolphin session.
+`sync-haitun-history` reading saved JSONL history beside the Haitun session.
 OpenClaw first asks the host to inspect the `fusion-memory` plugin with
 `openclaw plugins inspect fusion-memory --runtime --json`, then runs the
 external plugin's `smoke.mjs` script, which executes the same registered
@@ -63,25 +63,25 @@ The smoke harness passes the selected service URL to an override command as
 the report returns `ok=false`, `write_smoke=false`, and `retrieve_smoke=false`
 with a beginner-safe recovery message.
 
-Dolphin uses the repository workspace under `integrations/dolphin-fusion-memory/workspace`.
+Haitun uses the repository workspace under `integrations/dolphin-fusion-memory/workspace`.
 OpenClaw and Hermes are installed as external plugins. Their source checkouts
 are not modified in stage one.
 
-## Dolphin recovery
+## Haitun recovery
 
-If Dolphin memory tools are missing or passive persistence is not running,
-verify the workspace and start the history sync beside the Dolphin session:
+If Haitun memory tools are missing or passive persistence is not running,
+verify the workspace and start the history sync beside the Haitun session:
 
 ```bash
 fusion-memory install-agent --target dolphin
 fusion-memory doctor
-fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
+fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
   --workspace integrations/dolphin-fusion-memory/workspace \
   --session-id <session-id>
 ```
 
-The sync process reads Dolphin's saved `histories/<session-id>.jsonl` file and
-does not patch Dolphin source code. Continue the session if memory is offline;
+The sync process reads Haitun's saved `histories/<session-id>.jsonl` file and
+does not patch Haitun source code. Continue the session if memory is offline;
 restart the sync process after the local service is back.
 
 Fusion-Agent uses its in-repo adapter. Start a session with memory enabled and:

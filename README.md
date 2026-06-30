@@ -79,22 +79,17 @@ fusion-memory upgrade --dry-run
 fusion-memory stop
 ```
 
-psi-agent/Dolphin 自动持久化：
+psi-agent/Haitun 自动持久化：
 
 ```bash
-fusion-memory sync-dolphin-history --workspace /path/to/fusion-memory-workspace --session-id <session-id>
+fusion-memory sync-haitun-history --workspace /path/to/haitun-workspace --session-id <session-id>
 ```
 
 这条命令不改 agent core。它读取 `histories/<session-id>.jsonl`，把新的
 user/assistant turn 写入 Fusion Memory `/add`，并用本地 state 文件去重。
-如果使用 psi-agent gateway，也可以改用：
-
-```bash
-fusion-memory sync-dolphin-history --gateway-url http://127.0.0.1:8080 --session-id <session-id>
-```
 
 默认 workspace tools 只有在 agent 调用 `memory_add` 时才写入；启动
-`sync-dolphin-history` 后，history 才会持续自动写入。
+`sync-haitun-history` 后，history 才会持续自动写入。
 
 ```bash
 cd /path/to/fusion-memory

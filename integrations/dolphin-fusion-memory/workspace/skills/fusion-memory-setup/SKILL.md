@@ -43,7 +43,7 @@ The default production configuration is Postgres/pgvector plus bundled local
 Qwen vector models:
 
 ```text
-database: postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory
+database: Postgres/pgvector using Fusion Memory's default local DSN
 embedding: models/Qwen3-Embedding-0.6B
 reranker: models/Qwen3-Reranker-0.6B
 ```
@@ -108,26 +108,26 @@ fusion-memory doctor --json
 
 The beginner default is `http://127.0.0.1:8700`, but if that port is busy the
 start command may choose another local port. Set `PSI_MEMORY_BASE_URL` to the
-returned URL before starting Dolphin or psi-agent.
+returned URL before starting Haitun or psi-agent.
 
 ## Persistence Defaults
 
-passive persistence is on by default for Dolphin workspaces when the history
+passive persistence is on by default for Haitun workspaces when the history
 sync process is running beside the agent session. The sync reads saved
 `histories/<session-id>.jsonl` turns and persists conversation evidence without
 requiring the agent to decide every write:
 
 ```bash
-fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
-  --workspace /path/to/fusion-memory-workspace \
+fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
+  --workspace /path/to/haitun-workspace \
   --session-id <session-id>
 ```
 
 For a one-time backfill:
 
 ```bash
-fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
-  --workspace /path/to/fusion-memory-workspace \
+fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
+  --workspace /path/to/haitun-workspace \
   --session-id <session-id> \
   --once --json
 ```

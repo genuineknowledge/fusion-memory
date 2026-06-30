@@ -34,9 +34,8 @@ COPY_USAGE_PHRASES = [
 ]
 AUTO_PERSISTENCE_PHRASES = [
     "Automatic History Persistence",
-    "fusion-memory sync-dolphin-history",
-    "--workspace /path/to/fusion-memory-workspace",
-    "--gateway-url http://127.0.0.1:8080",
+    "fusion-memory --db fusion-memory.sqlite3 sync-haitun-history",
+    "--workspace /path/to/haitun-workspace",
     "only when the agent calls",
     "without changing",
 ]
@@ -66,7 +65,7 @@ def test_psi_agent_fusion_memory_example_matches_canonical_adapter() -> None:
         canonical = (CANONICAL_WORKSPACE / relative_path).read_text()
         synced = (agent_workspace / relative_path).read_text()
         assert synced == canonical, (
-            f"{relative_path} is out of sync with the canonical Dolphin adapter"
+            f"{relative_path} is out of sync with the canonical Haitun adapter"
         )
 
     for relative_path in ("tools/_client.py", "tools/_config.py"):
@@ -119,8 +118,8 @@ def test_fusion_memory_docs_match_workspace_setup_skill() -> None:
     assert "--memory-enabled" not in integration_readme
 
     for text in (quickstart, memory_readme, integration_readme):
-        assert "fusion-memory sync-dolphin-history" in text
-        assert "--gateway-url http://127.0.0.1:8080" in text
+        assert "sync-haitun-history" in text
+        assert "--gateway-url http://127.0.0.1:8080" not in text
         assert "--session-id <session-id>" in text
 
 
@@ -138,5 +137,5 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "authentication" not in skill.lower()
     assert "compromised" in skill
     assert "DASHSCOPE_API_KEY" in skill
-    assert "fusion-memory sync-dolphin-history" in skill
-    assert "do not automatically write every conversation turn" in skill
+    assert "fusion-memory --db fusion-memory.sqlite3 sync-haitun-history" in skill
+    assert "passive persistence is on by default" in skill
