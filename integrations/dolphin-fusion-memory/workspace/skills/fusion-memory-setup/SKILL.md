@@ -39,20 +39,35 @@ cd fusion-memory
 sh install.sh
 ```
 
-The installer checks Python 3.11+, installs Fusion Memory in editable mode with
-the full runtime extras (`.[postgres,qwen]`), and checks only repository-local
-model paths:
+The default production configuration is Postgres/pgvector plus bundled local
+Qwen vector models:
+
+```text
+database: postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory
+embedding: models/Qwen3-Embedding-0.6B
+reranker: models/Qwen3-Reranker-0.6B
+```
+
+The repository includes the local vector model directories:
 
 ```text
 models/Qwen3-Embedding-0.6B
 models/Qwen3-Reranker-0.6B
 ```
 
-It does not download model weights from other locations. If bundled model files
-are missing or dependency installation failed, installation reports not ready and
-asks you to rerun `pip install -e ".[postgres,qwen]"`. Only when model files and
-dependencies are present but this hardware/runtime cannot load or run both
-bundled vector models does installation fall back to compromised local mode.
+The installer checks Python 3.11+, installs Fusion Memory in editable mode with
+the full runtime extras (`.[postgres,qwen]`), and checks only those
+repository-local model paths. It installs the Python runtime dependencies for
+Postgres, local Qwen models, PyTorch, and Transformers, but it does not download
+model weights from other locations.
+
+If bundled model files are missing or dependency installation failed,
+installation reports not ready and asks you to rerun
+`pip install -e ".[postgres,qwen]"`. Only when model files and dependencies are
+present but this hardware/runtime cannot load or run both bundled vector models
+does installation fall back to compromised local mode. In compromised mode
+Fusion Memory still runs with SQLite plus built-in lightweight
+embedding/reranker, but memory quality is compromised.
 
 Recommended API provider for API-backed models: Aliyun DashScope.
 
@@ -76,7 +91,8 @@ FUSION_MEMORY_USE_WIZARD=1 sh install.sh
 
 ## Start And Verify
 
-If Postgres or model dependencies are not ready, use local test mode:
+Use local test mode only for temporary evaluation when Postgres or model
+dependencies are not ready:
 
 ```bash
 fusion-memory init --local-test --json
