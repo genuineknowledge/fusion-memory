@@ -19,6 +19,14 @@ MIN_TIMEOUT_SECONDS = 0.1
 MAX_TIMEOUT_SECONDS = 2.0
 
 
+class FusionMemoryHTTPError(RuntimeError):
+    def __init__(self, error: str, cause: str, message: str) -> None:
+        super().__init__(message)
+        self.error = error
+        self.cause = cause
+        self.message = message
+
+
 class FusionMemoryProvider(MemoryProvider):
     @property
     def name(self) -> str:
@@ -160,8 +168,8 @@ class FusionMemoryProvider(MemoryProvider):
                 result = self._post_json("/clear", {"scope": self.scope, "allow_cross_session": True})
                 return json.dumps({"ok": True, "cleared": True, "result": result}, ensure_ascii=False)
             return json.dumps({"ok": False, "message": f"Unknown Fusion Memory tool: {tool_name}"})
-        except Exception:
-            return json.dumps(_safe_failure(), ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps(_safe_failure(exc), ensure_ascii=False)
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
@@ -180,8 +188,19 @@ class FusionMemoryProvider(MemoryProvider):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {}
+            raise FusionMemoryHTTPError(
+                str(payload.get("error") or "request_failed"),
+                str(payload.get("cause") or f"http_{exc.code}"),
+                str(payload.get("message") or "Fusion Memory request failed."),
+            ) from exc
         return data if isinstance(data, dict) else {}
 
 
@@ -206,10 +225,19 @@ def _format_context(pack: Dict[str, Any]) -> str:
     return "Fusion Memory context:\n" + "\n".join(lines)
 
 
-def _safe_failure() -> Dict[str, Any]:
+def _safe_failure(exc: Exception | None = None) -> Dict[str, Any]:
+    if isinstance(exc, FusionMemoryHTTPError):
+        return {
+            "ok": False,
+            "error": exc.error,
+            "cause": exc.cause,
+            "message": exc.message,
+        }
     return {
         "ok": False,
-        "message": "Fusion Memory is not available. Continue without memory, then run fusion-memory doctor.",
+        "error": "service_unavailable",
+        "cause": "connection_failed",
+        "message": "Fusion Memory service is not reachable. Run fusion-memory status or fusion-memory start.",
     }
 
 

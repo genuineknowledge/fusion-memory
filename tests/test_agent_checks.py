@@ -20,6 +20,15 @@ class AgentChecksTests(unittest.TestCase):
         self.assertIn("message", report)
         self.assertNotIn("Traceback", report["message"])
 
+    def test_dolphin_check_reports_workspace_skill_and_sync_command(self) -> None:
+        report = check_agent("dolphin")
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["target"], "dolphin")
+        self.assertIn("workspace", report)
+        self.assertIn("skill", report)
+        self.assertIn("sync-dolphin-history", report["message"])
+
     def test_hermes_check_uses_installed_destination_under_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

@@ -30,6 +30,49 @@ def ts(value: str) -> datetime:
 
 
 class FusionMemoryTests(unittest.TestCase):
+    def test_chinese_rule_extractor_accepts_user_preference(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+
+        result = memory.add("我现在更喜欢用 PostgreSQL 做报表。", scope, ts("2026-06-30T10:00:00+00:00"))
+
+        self.assertTrue(result.accepted_fact_ids)
+        facts = memory.store.list_facts(scope)
+        self.assertTrue(any(fact.category == "preference" and fact.predicate == "prefers" and "PostgreSQL" in fact.object for fact in facts))
+
+    def test_chinese_rule_extractor_accepts_switch_decision_and_event(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+
+        result = memory.add("我决定把 Atlas 检索从 Qdrant 切换到 pgvector。", scope, ts("2026-06-30T10:00:00+00:00"))
+
+        self.assertTrue(result.accepted_fact_ids)
+        self.assertTrue(result.accepted_event_ids)
+        facts = memory.store.list_facts(scope)
+        events = memory.store.list_events(scope)
+        self.assertTrue(any(fact.predicate == "switched_to" and "pgvector" in fact.object for fact in facts))
+        self.assertTrue(any(event.event_type in {"decision", "preference_change", "state_change"} for event in events))
+
+    def test_chinese_rule_extractor_accepts_instruction_and_activity_event(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+
+        instruction = memory.add("以后默认用中文回复我。", scope, ts("2026-06-30T10:00:00+00:00"))
+        activity = memory.add("昨天我完成了 Render 部署并修复了端口配置问题。", scope, ts("2026-06-30T11:00:00+00:00"))
+
+        self.assertTrue(instruction.accepted_fact_ids)
+        self.assertTrue(activity.accepted_event_ids)
+        facts = memory.store.list_facts(scope)
+        events = memory.store.list_events(scope)
+        self.assertTrue(any(fact.category == "instruction" and "中文" in fact.object for fact in facts))
+        self.assertTrue(any("Render" in event.description and "部署" in event.description for event in events))
+
+    def test_chinese_resolved_problem_activity_does_not_create_concern_noise(self) -> None:
+        facets = [facet for facet, _label, _snippet in extract_generic_event_facets("昨天我完成了 Render 部署并修复了端口配置问题。")]
+
+        self.assertIn("activity", facets)
+        self.assertNotIn("concern", facets)
+
     def test_value_history_rows_include_safe_temporal_relations_without_affecting_sort(self) -> None:
         spans = [
             {"id": "old", "speaker": "user", "content": "Previously my snack budget was $20.", "timeline_index": 1, "recency_rank": 2},
@@ -2991,6 +3034,32 @@ class FusionMemoryTests(unittest.TestCase):
         duplicate_run = memory.process_background_tasks(scope, limit=5)
         self.assertEqual(duplicate_run["processed_count"], 0)
         self.assertEqual(len(memory.get_session_summaries(scope)), 1)
+
+    def test_server_background_worker_skips_disabled_task_types_without_starving_summaries(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        memory.store.enqueue_background_task(scope, "llm_extract", payload={"source_span_ids": ["span_missing"]}, dedupe_key="llm:first")
+
+        memory.add(
+            [
+                {"role": "user", "content": "Atlas uses Qdrant for retrieval."},
+                {"role": "assistant", "content": "I noted the Atlas backend."},
+                {"role": "user", "content": "Reports use PostgreSQL."},
+                {"role": "assistant", "content": "I will keep reports on PostgreSQL."},
+                {"role": "user", "content": "Reranking should use a cross encoder."},
+                {"role": "assistant", "content": "I will include reranking in the retrieval plan."},
+            ],
+            scope,
+            ts("2026-06-01T10:00:00+00:00"),
+            {"min_window_spans": 3, "window_size": 3},
+        )
+
+        processed = memory.process_server_background_tasks(limit=1)
+
+        self.assertEqual(processed["processed_count"], 1)
+        self.assertEqual(processed["status_counts"], {"succeeded": 1})
+        self.assertEqual(processed["tasks"][0]["task_type"], "refresh_session_summary")
+        self.assertEqual(len(memory.list_background_tasks(scope, status="pending", allow_cross_session=True)), 1)
 
     def test_session_summary_background_task_is_not_enqueued_below_threshold(self) -> None:
         memory = MemoryService()

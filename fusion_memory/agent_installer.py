@@ -6,8 +6,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-VALID_TARGETS = ("openclaw", "hermes", "fusion-agent")
+VALID_TARGETS = ("dolphin", "openclaw", "hermes", "fusion-agent")
 ROOT = Path(__file__).resolve().parents[1]
+DOLPHIN_WORKSPACE = ROOT / "integrations" / "dolphin-fusion-memory" / "workspace"
+DOLPHIN_SKILL = DOLPHIN_WORKSPACE / "skills" / "fusion-memory-setup" / "SKILL.md"
 OPENCLAW_PLUGIN = ROOT / "integrations" / "openclaw-fusion-memory"
 HERMES_PROVIDER = ROOT / "integrations" / "hermes-fusion-memory"
 _INSTALL_ERROR = "Install failed. Check permissions and run fusion-memory doctor."
@@ -20,11 +22,17 @@ def install_agent(target: str, *, dry_run: bool = False, home: str | Path | None
         if invalid:
             return {
                 "ok": False,
-                "message": "Unknown Agent target. Choose one of: all, openclaw, hermes, fusion-agent.",
+                "message": "Unknown Agent target. Choose one of: all, dolphin, openclaw, hermes, fusion-agent.",
             }
         actions = [_action_for(item, home=home) for item in targets]
         if dry_run:
-            return {"ok": True, "dry_run": True, "actions": actions}
+            return {
+                "ok": True,
+                "dry_run": True,
+                "estimated_time": "1-3 minutes for adapter checks; 2-5 minutes if install actions are needed.",
+                "check_first": "Run dry-run/status checks before installing; skip actions whose skip_if condition is already true.",
+                "actions": actions,
+            }
         results = []
         for action in actions:
             results.append(_run_action(action))
@@ -35,11 +43,33 @@ def install_agent(target: str, *, dry_run: bool = False, home: str | Path | None
 
 def _action_for(target: str, *, home: str | Path | None = None) -> dict[str, Any]:
     smoke_command = _smoke_command(target)
+    if target == "dolphin":
+        return {
+            "target": "dolphin",
+            "workspace": str(DOLPHIN_WORKSPACE),
+            "skill": str(DOLPHIN_SKILL),
+            "sync_command": [
+                "fusion-memory",
+                "--db",
+                "fusion-memory.sqlite3",
+                "sync-dolphin-history",
+                "--workspace",
+                str(DOLPHIN_WORKSPACE),
+                "--session-id",
+                "<session-id>",
+            ],
+            "smoke_command": smoke_command,
+            "estimated_time": "under 1 minute",
+            "skip_if": "The Dolphin workspace already exposes memory tools and the fusion-memory-setup skill.",
+            "message": "Use the Dolphin workspace with memory_add, memory_search, memory_answer_context, and sync-dolphin-history.",
+        }
     if target == "openclaw":
         return {
             "target": "openclaw",
             "command": ["openclaw", "plugins", "install", "--link", str(OPENCLAW_PLUGIN)],
             "smoke_command": smoke_command,
+            "estimated_time": "1-2 minutes",
+            "skip_if": "OpenClaw reports the fusion-memory plugin is already linked to this path.",
             "message": "Install the external OpenClaw Fusion Memory plugin.",
         }
     if target == "hermes":
@@ -49,18 +79,35 @@ def _action_for(target: str, *, home: str | Path | None = None) -> dict[str, Any
             "source": str(HERMES_PROVIDER),
             "destination": str(hermes_home / "plugins" / "fusion_memory"),
             "smoke_command": smoke_command,
+            "estimated_time": "under 1 minute",
+            "skip_if": "The Hermes fusion_memory provider destination already matches this source.",
             "message": "Install the external Hermes Fusion Memory provider.",
         }
     return {
         "target": "fusion-agent",
         "path": str(_fusion_agent_root(home)),
         "smoke_command": smoke_command,
+        "estimated_time": "under 1 minute",
+        "skip_if": "Fusion-Agent already points PSI_MEMORY_BASE_URL at the running Fusion Memory service.",
         "message": "Fusion-Agent memory integration is in-repo; verify env PSI_MEMORY_BASE_URL and --memory-enabled.",
     }
 
 
 def _run_action(action: dict[str, Any]) -> dict[str, Any]:
     target = action["target"]
+    if target == "dolphin":
+        workspace = Path(action["workspace"])
+        skill = Path(action["skill"])
+        ok = (workspace / "tools" / "memory_add.py").exists() and skill.exists()
+        return {
+            "target": target,
+            "ok": ok,
+            "message": (
+                "Dolphin Fusion Memory workspace is ready. Start sync-dolphin-history beside the Dolphin session."
+                if ok
+                else "Dolphin Fusion Memory workspace is incomplete. Reinstall Fusion Memory."
+            ),
+        }
     if target == "openclaw":
         try:
             command = action["command"]

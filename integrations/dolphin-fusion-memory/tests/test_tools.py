@@ -155,9 +155,9 @@ async def test_memory_answer_context_uses_fixed_budget_and_cross_session_flag(
 
 
 @pytest.mark.anyio
-async def test_tools_return_unavailable_message_on_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_tools_return_actionable_error_on_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     async def handler(request: web.Request) -> web.Response:
-        return web.json_response({"message": "boom"}, status=500)
+        return web.json_response({"error": "bad_request", "cause": "missing_scope", "message": "Request must include scope."}, status=400)
 
     app = web.Application()
     app.router.add_post("/search", handler)
@@ -173,7 +173,10 @@ async def test_tools_return_unavailable_message_on_http_failure(monkeypatch: pyt
     try:
         result = await memory_search.memory_search("alpha")
         assert '"ok": false' in result
-        assert "Fusion Memory is not available" in result
+        assert '"error": "bad_request"' in result
+        assert '"cause": "missing_scope"' in result
+        assert "Request must include scope." in result
+        assert "Fusion Memory is not available" not in result
     finally:
         await runner.cleanup()
 

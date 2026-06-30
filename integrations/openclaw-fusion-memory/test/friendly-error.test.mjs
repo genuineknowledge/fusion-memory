@@ -6,8 +6,21 @@ import { registerFusionMemoryTools } from "../runtime.js";
 test("safeFailure hides raw errors", () => {
   const result = safeFailure(new Error("connect ECONNREFUSED 127.0.0.1:8765"));
   assert.equal(result.content[0].type, "text");
-  assert.match(result.content[0].text, /fusion-memory doctor/);
+  assert.match(result.content[0].text, /service_unavailable/);
   assert.doesNotMatch(result.content[0].text, /ECONNREFUSED/);
+});
+
+test("safeFailure preserves structured server causes", () => {
+  const error = new Error("Request must include scope.");
+  error.memoryError = "bad_request";
+  error.memoryCause = "missing_scope";
+  const result = safeFailure(error);
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error, "bad_request");
+  assert.equal(payload.cause, "missing_scope");
+  assert.equal(payload.message, "Request must include scope.");
 });
 
 test("normalizeBaseUrl trims trailing slash", () => {

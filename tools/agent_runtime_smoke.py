@@ -22,6 +22,7 @@ from fusion_memory.agent_installer import VALID_TARGETS, _action_for  # noqa: E4
 
 DEFAULT_TIMEOUT_SECONDS = 5
 SMOKE_COMMAND_ENV = {
+    "dolphin": "FUSION_MEMORY_DOLPHIN_SMOKE_COMMAND",
     "openclaw": "FUSION_MEMORY_OPENCLAW_SMOKE_COMMAND",
     "hermes": "FUSION_MEMORY_HERMES_SMOKE_COMMAND",
     "fusion-agent": "FUSION_MEMORY_FUSION_AGENT_SMOKE_COMMAND",
@@ -40,7 +41,7 @@ REQUIRED_REPORT_FIELDS = (
 def run_smoke(target: str, *, memory_url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     report = _base_report(target)
     if target not in VALID_TARGETS:
-        report["message"] = "Unknown Agent target. Choose one of: openclaw, hermes, fusion-agent."
+        report["message"] = "Unknown Agent target. Choose one of: dolphin, openclaw, hermes, fusion-agent."
         return report
 
     host_available, host_message = _host_available(target)
@@ -97,6 +98,11 @@ def _base_report(target: str) -> dict[str, Any]:
 
 
 def _host_available(target: str) -> tuple[bool, str]:
+    if target == "dolphin":
+        workspace = Path(_action_for("dolphin")["workspace"])
+        if workspace.exists():
+            return True, "Dolphin workspace is available."
+        return False, "Dolphin Fusion Memory workspace was not found. Run fusion-memory install-agent --target dolphin."
     if target == "openclaw":
         if shutil.which("openclaw"):
             return True, "OpenClaw host is available."
@@ -113,6 +119,17 @@ def _host_available(target: str) -> tuple[bool, str]:
 
 
 def _plugin_available(target: str, *, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> tuple[bool, str]:
+    if target == "dolphin":
+        action = _action_for("dolphin")
+        workspace = Path(action["workspace"])
+        skill = Path(action["skill"])
+        ok = (workspace / "tools" / "memory_add.py").exists() and skill.exists()
+        return (
+            ok,
+            "Dolphin Fusion Memory workspace tools and setup skill are present."
+            if ok
+            else "Dolphin Fusion Memory workspace is incomplete. Run fusion-memory install-agent --target dolphin.",
+        )
     if target == "openclaw":
         return _openclaw_plugin_available(timeout=timeout)
     if target == "hermes":
@@ -235,11 +252,20 @@ def _safe_adapter_message(value: Any, fallback: str) -> str:
 
 
 def _run_builtin_adapter_smoke(target: str, *, memory_url: str, timeout: int) -> dict[str, Any]:
+    if target == "dolphin":
+        return _run_dolphin_workspace_smoke(memory_url=memory_url, timeout=timeout)
     if target == "openclaw":
         return _run_openclaw_plugin_smoke(memory_url=memory_url, timeout=timeout)
     if target == "hermes":
         return _run_hermes_provider_smoke(memory_url=memory_url, timeout=timeout)
     return {"message": f"{_display_name(target)} adapter runtime smoke is not available. Run fusion-memory doctor."}
+
+
+def _run_dolphin_workspace_smoke(*, memory_url: str, timeout: int) -> dict[str, Any]:
+    script = REPO_ROOT / "integrations" / "dolphin-fusion-memory" / "smoke.py"
+    if not script.exists():
+        return {"message": "Dolphin Fusion Memory smoke script is missing. Run fusion-memory install-agent --target dolphin."}
+    return _run_command_smoke("dolphin", [sys.executable, str(script)], memory_url=memory_url, timeout=timeout)
 
 
 def _run_openclaw_plugin_smoke(*, memory_url: str, timeout: int) -> dict[str, Any]:

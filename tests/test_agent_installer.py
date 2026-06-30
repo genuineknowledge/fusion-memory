@@ -13,10 +13,25 @@ class AgentInstallerTests(unittest.TestCase):
         result = install_agent("all", dry_run=True)
         self.assertTrue(result["ok"])
         self.assertTrue(result["dry_run"])
+        self.assertIn("estimated_time", result)
+        self.assertIn("check_first", result)
         self.assertEqual(
             [item["target"] for item in result["actions"]],
-            ["openclaw", "hermes", "fusion-agent"],
+            ["dolphin", "openclaw", "hermes", "fusion-agent"],
         )
+        for action in result["actions"]:
+            self.assertIn("estimated_time", action)
+            self.assertIn("skip_if", action)
+
+    def test_dolphin_action_points_to_workspace_skill_and_sync_command(self) -> None:
+        action = _action_for("dolphin")
+
+        self.assertEqual(action["target"], "dolphin")
+        self.assertTrue(Path(action["workspace"]).exists())
+        self.assertTrue(Path(action["skill"]).exists())
+        self.assertIn("sync-dolphin-history", action["sync_command"])
+        self.assertIn("--db", action["sync_command"])
+        self.assertIn("memory_add", action["message"])
 
     def test_unknown_target_is_beginner_safe(self) -> None:
         result = install_agent("bad-agent", dry_run=True)

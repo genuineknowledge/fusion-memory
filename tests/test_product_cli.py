@@ -262,6 +262,31 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("next_step", payload)
         self.assertIn("Choose one of", payload["message"])
 
+    def test_doctor_cli_json_preserves_failed_check_report_without_unexpected_error(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+
+        old_argv = sys.argv
+        stdout = StringIO()
+        report = {
+            "ok": False,
+            "checks": [{"name": "postgres_connection", "ok": False, "detail": "Postgres driver is missing."}],
+            "next_step": "Install psycopg2-binary, then run fusion-memory doctor again.",
+        }
+        try:
+            sys.argv = ["fusion-memory", "doctor", "--json"]
+            with redirect_stdout(stdout), patch("fusion_memory.cli.doctor", return_value=report):
+                main()
+            payload = json.loads(stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["checks"][0]["name"], "postgres_connection")
+        self.assertIn("psycopg2-binary", payload["next_step"])
+        self.assertNotIn("error", payload)
+        self.assertNotIn("message", payload)
+
     def test_init_doctor_backup_and_upgrade_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

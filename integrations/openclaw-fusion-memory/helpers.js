@@ -15,12 +15,21 @@ export function normalizeTimeoutMs(value) {
   return Math.min(Math.max(timeoutMs, MIN_TIMEOUT_MS), MAX_TIMEOUT_MS);
 }
 
-export function safeFailure(_error) {
+export function safeFailure(error) {
+  const payload = {
+    ok: false,
+    error: error?.memoryError || "service_unavailable",
+    cause: error?.memoryCause || "connection_failed",
+    message:
+      error?.memoryMessage ||
+      (error?.memoryError ? error.message : undefined) ||
+      "Fusion Memory service is not reachable. Run fusion-memory status or fusion-memory start.",
+  };
   return {
     content: [
       {
         type: "text",
-        text: "Fusion Memory is not available. Continue without memory, then run fusion-memory doctor.",
+        text: JSON.stringify(payload),
       },
     ],
   };

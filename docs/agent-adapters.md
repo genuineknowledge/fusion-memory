@@ -11,6 +11,7 @@ fusion-memory install-agent --target all
 Install one adapter:
 
 ```bash
+fusion-memory install-agent --target dolphin
 fusion-memory install-agent --target openclaw
 fusion-memory install-agent --target hermes
 fusion-memory install-agent --target fusion-agent
@@ -20,6 +21,7 @@ Run a runtime smoke after installing an adapter and starting the local Fusion
 Memory service:
 
 ```bash
+python3 tools/agent_runtime_smoke.py --target dolphin --memory-url http://127.0.0.1:8765 --output .runtime/agent-smoke-dolphin.json
 python3 tools/agent_runtime_smoke.py --target openclaw --memory-url http://127.0.0.1:8765 --output .runtime/agent-smoke-openclaw.json
 python3 tools/agent_runtime_smoke.py --target hermes --memory-url http://127.0.0.1:8765 --output .runtime/agent-smoke-hermes.json
 python3 tools/agent_runtime_smoke.py --target fusion-agent --memory-url http://127.0.0.1:8765 --output .runtime/agent-smoke-fusion-agent.json
@@ -32,7 +34,10 @@ checkouts return `ok=false` with recovery guidance instead of raw runtime logs.
 runtime exposes that information. Repository source files are not enough to make
 the runtime smoke pass.
 
-OpenClaw, Hermes, and Fusion-Agent include built-in write/retrieve smoke paths.
+Dolphin, OpenClaw, Hermes, and Fusion-Agent include built-in write/retrieve smoke paths.
+Dolphin runs the workspace smoke against `memory_add`, `memory_search`, and
+`memory_answer_context`, and passive persistence is handled by
+`sync-dolphin-history` reading saved JSONL history beside the Dolphin session.
 OpenClaw first asks the host to inspect the `fusion-memory` plugin with
 `openclaw plugins inspect fusion-memory --runtime --json`, then runs the
 external plugin's `smoke.mjs` script, which executes the same registered
@@ -47,6 +52,7 @@ command that exercises the target adapter and prints JSON with explicit
 `write_smoke` and `retrieve_smoke` boolean fields:
 
 ```bash
+export FUSION_MEMORY_DOLPHIN_SMOKE_COMMAND="python3 integrations/dolphin-fusion-memory/smoke.py"
 export FUSION_MEMORY_OPENCLAW_SMOKE_COMMAND="openclaw fusion-memory-smoke"
 export FUSION_MEMORY_HERMES_SMOKE_COMMAND="hermes fusion-memory-smoke"
 export FUSION_MEMORY_FUSION_AGENT_SMOKE_COMMAND="python3 path/to/fusion-agent-smoke.py"
@@ -57,8 +63,26 @@ The smoke harness passes the selected service URL to an override command as
 the report returns `ok=false`, `write_smoke=false`, and `retrieve_smoke=false`
 with a beginner-safe recovery message.
 
+Dolphin uses the repository workspace under `integrations/dolphin-fusion-memory/workspace`.
 OpenClaw and Hermes are installed as external plugins. Their source checkouts
 are not modified in stage one.
+
+## Dolphin recovery
+
+If Dolphin memory tools are missing or passive persistence is not running,
+verify the workspace and start the history sync beside the Dolphin session:
+
+```bash
+fusion-memory install-agent --target dolphin
+fusion-memory doctor
+fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
+  --workspace integrations/dolphin-fusion-memory/workspace \
+  --session-id <session-id>
+```
+
+The sync process reads Dolphin's saved `histories/<session-id>.jsonl` file and
+does not patch Dolphin source code. Continue the session if memory is offline;
+restart the sync process after the local service is back.
 
 Fusion-Agent uses its in-repo adapter. Start a session with memory enabled and:
 

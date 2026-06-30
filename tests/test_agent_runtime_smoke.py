@@ -104,6 +104,29 @@ class AgentRuntimeSmokeTests(unittest.TestCase):
         builtin.assert_called_once()
         self.assertEqual(builtin.call_args.args[0], "openclaw")
 
+    def test_dolphin_host_and_workspace_present_uses_builtin_workspace_smoke(self) -> None:
+        with (
+            patch("tools.agent_runtime_smoke._host_available", return_value=(True, "host ok")),
+            patch("tools.agent_runtime_smoke._plugin_available", return_value=(True, "workspace ok")),
+            patch(
+                "tools.agent_runtime_smoke._run_builtin_adapter_smoke",
+                return_value={
+                    "write_smoke": True,
+                    "retrieve_smoke": True,
+                    "ok": True,
+                    "message": "Dolphin adapter runtime smoke completed.",
+                },
+            ) as builtin,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            report = smoke.run_smoke("dolphin", memory_url="http://127.0.0.1:8765")
+
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["write_smoke"])
+        self.assertTrue(report["retrieve_smoke"])
+        builtin.assert_called_once()
+        self.assertEqual(builtin.call_args.args[0], "dolphin")
+
     def test_openclaw_plugin_check_uses_runtime_timeout_budget(self) -> None:
         completed = CompletedProcess(
             args=["openclaw", "plugins", "list"],

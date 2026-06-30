@@ -43,8 +43,23 @@ class HermesFusionMemoryProviderTests(unittest.TestCase):
             result = provider.handle_tool_call("fusion_memory_search", {"query": "preference"})
         payload = json.loads(result)
         self.assertFalse(payload["ok"])
-        self.assertIn("fusion-memory doctor", payload["message"])
+        self.assertEqual(payload["error"], "service_unavailable")
+        self.assertEqual(payload["cause"], "connection_failed")
+        self.assertIn("fusion-memory status", payload["message"])
         self.assertNotIn("socket timeout", payload["message"])
+
+    def test_tool_failure_preserves_structured_server_cause(self) -> None:
+        module = load_provider_module()
+        provider = module.FusionMemoryProvider()
+        error = module.FusionMemoryHTTPError("bad_request", "missing_scope", "Request must include scope.")
+        with patch.object(provider, "_post_json", side_effect=error):
+            result = provider.handle_tool_call("fusion_memory_search", {"query": "preference"})
+
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "bad_request")
+        self.assertEqual(payload["cause"], "missing_scope")
+        self.assertEqual(payload["message"], "Request must include scope.")
 
     def test_invalid_timeout_uses_default(self) -> None:
         module = load_provider_module()

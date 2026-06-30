@@ -107,39 +107,28 @@ uv run psi-agent session \
 
 ## Automatic History Persistence
 
-The workspace tools do not automatically write every conversation turn by
-themselves. By default, memory is written only when the agent calls
-`memory_add`. Explicit tool writes are marked with
-`metadata.write_mode="explicit_tool"` and `metadata.auto_persisted=false`.
+Passive persistence is enabled by running the Fusion Memory history sync process
+beside the Dolphin-Agent session. It reads saved Dolphin history from
+`histories/<session-id>.jsonl`, keeps a checkpoint, and stores only new saved
+user/assistant turns. It does not patch Dolphin-Agent internals and cannot see
+messages that were never written to the history file.
 
-For continuous persistence without changing Dolphin-Agent core, run the Fusion
-Memory history sync process beside the agent session. It reads Dolphin history
-and posts new user/assistant turns to Fusion Memory `/add`. Re-running it is
-safe because it stores a local deduplication state file. Synced writes are
-marked with `metadata.write_mode="history_sync"` and
+Explicit tool writes still happen only when the agent calls `memory_add`. Those
+writes are marked with
+`metadata.write_mode="explicit_tool"` and `metadata.auto_persisted=false`.
+Synced passive writes are marked with `metadata.write_mode="history_sync"` and
 `metadata.auto_persisted=true`.
 
-If you use the psi-agent gateway, start the sync against the gateway history API:
+Start passive saved-history sync in a second shell:
 
 ```bash
-fusion-memory sync-dolphin-history \
-  --gateway-url http://127.0.0.1:8080 \
+cd /public/home/wwb/memory
+fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history \
+  --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
   --session-id <session-id>
 ```
 
-If you run a plain workspace session, sync directly from the workspace history
-file:
-
-```bash
-fusion-memory sync-dolphin-history \
-  --workspace /path/to/fusion-memory-workspace \
-  --session-id <session-id>
-```
-
-For a one-time backfill, add `--once --json`. The gateway mode requires the
-gateway process to be running and the session to be registered in that gateway.
-The workspace-file mode reads `histories/<session-id>.jsonl` and works after the
-session has saved history to disk.
+For a one-time backfill, add `--once --json`.
 
 ## Copy Into Another Workspace
 
@@ -170,11 +159,13 @@ If it does not, copy `workspace/systems/system.py` as-is.
 ## Offline Behavior
 
 The tools never raise Fusion Memory connection failures into the agent loop. If
-Fusion Memory is offline or returns an error, they return the shared fallback:
+Fusion Memory is offline or returns an error, they return structured JSON:
 
 ```json
-{"ok": false, "message": "Fusion Memory is not available. Continue without memory, then run fusion-memory doctor."}
+{"ok": false, "error": "service_unavailable", "cause": "connection_failed", "message": "Fusion Memory service is not reachable. Run fusion-memory status or fusion-memory start."}
 ```
 
+If the server returns a request error, `error`, `cause`, and `message` preserve
+the safe server-provided reason, for example `bad_request` with `missing_scope`.
 The Dolphin session can continue without memory and retry after the Fusion Memory
-server is available.
+server is available or the request shape is fixed.

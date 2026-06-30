@@ -11,17 +11,9 @@ from pathlib import Path
 from fusion_memory import Scope
 from fusion_memory.alpha_beta import run_alpha, run_beta
 from fusion_memory.agent_installer import install_agent
+from fusion_memory.adapters.dolphin_history_watcher import config_from_workspace, sync_history_once, watch_history
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
-from fusion_memory.dolphin_history_sync import (
-    DEFAULT_DOLPHIN_GATEWAY_URL,
-    DEFAULT_INTERVAL_SECONDS,
-    DEFAULT_MEMORY_URL,
-    DEFAULT_TIMEOUT_SECONDS,
-    DolphinHistorySyncConfig,
-    sync_forever as sync_dolphin_history_forever,
-    sync_once as sync_dolphin_history_once,
-)
 from fusion_memory.product import (
     backup_data,
     configure_interactive,
@@ -40,6 +32,8 @@ from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
 from fusion_memory.storage.postgres_verifier import verify_postgres_backend
+
+sync_dolphin_history_once = sync_history_once
 
 
 class FusionMemoryArgumentParser(argparse.ArgumentParser):
@@ -118,6 +112,13 @@ def main() -> None:
     install_agent_cmd.add_argument("--home", default=None)
     install_agent_cmd.add_argument("--json", action="store_true")
 
+    sync_dolphin = sub.add_parser("sync-dolphin-history", help="Sync Dolphin saved history JSONL into Fusion Memory")
+    sync_dolphin.add_argument("--workspace", required=True, help="Dolphin workspace path")
+    sync_dolphin.add_argument("--session-id", required=True, help="Dolphin session id")
+    sync_dolphin.add_argument("--poll-interval-seconds", type=float, default=1.0)
+    sync_dolphin.add_argument("--once", action="store_true")
+    sync_dolphin.add_argument("--json", action="store_true")
+
     alpha_cmd = sub.add_parser("alpha-test", help="Run local Fusion Memory alpha simulation")
     alpha_cmd.add_argument("--report", default=None)
     alpha_cmd.add_argument("--json", action="store_true")
@@ -125,21 +126,6 @@ def main() -> None:
     beta_cmd = sub.add_parser("beta-test", help="Run Fusion Memory beta simulation checks")
     beta_cmd.add_argument("--report", default=None)
     beta_cmd.add_argument("--json", action="store_true")
-
-    sync_dolphin = sub.add_parser("sync-dolphin-history", help="Persist Dolphin-Agent conversation history into Fusion Memory")
-    sync_dolphin.add_argument("--memory-url", default=os.getenv("PSI_MEMORY_BASE_URL", DEFAULT_MEMORY_URL))
-    sync_dolphin.add_argument("--gateway-url", default=os.getenv("PSI_AGENT_GATEWAY_URL"), help=f"Dolphin gateway URL, for example {DEFAULT_DOLPHIN_GATEWAY_URL}")
-    sync_dolphin.add_argument("--workspace", default=os.getenv("PSI_AGENT_WORKSPACE"), help="Dolphin workspace path used when --gateway-url is not set")
-    sync_dolphin.add_argument("--workspace-id", default=None)
-    sync_dolphin.add_argument("--user-id", default=None)
-    sync_dolphin.add_argument("--agent-id", default=None)
-    sync_dolphin.add_argument("--run-id", default=None)
-    sync_dolphin.add_argument("--session-id", default=None)
-    sync_dolphin.add_argument("--state-file", default=None, help="Deduplication state file")
-    sync_dolphin.add_argument("--timeout-seconds", type=float, default=float(os.getenv("PSI_MEMORY_SYNC_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))))
-    sync_dolphin.add_argument("--interval-seconds", type=float, default=float(os.getenv("PSI_MEMORY_SYNC_INTERVAL_SECONDS", str(DEFAULT_INTERVAL_SECONDS))))
-    sync_dolphin.add_argument("--once", action="store_true", help="Run one sync pass and exit")
-    sync_dolphin.add_argument("--json", action="store_true")
 
     add = sub.add_parser("add", help="Add a memory input")
     add.add_argument("content")
@@ -262,18 +248,22 @@ def main() -> None:
                 json_output=args.json,
             )
             return
+        if args.command == "sync-dolphin-history":
+            config = config_from_workspace(
+                workspace=Path(args.workspace),
+                session_id=args.session_id,
+                db_path=args.db,
+            )
+            if args.once:
+                _print_product_result(sync_dolphin_history_once(config), json_output=args.json)
+            else:
+                watch_history(config, poll_interval_seconds=args.poll_interval_seconds)
+            return
         if args.command == "alpha-test":
             _print_product_result(run_alpha(report_path=args.report), json_output=args.json)
             return
         if args.command == "beta-test":
             _print_product_result(run_beta(report_path=args.report), json_output=args.json)
-            return
-        if args.command == "sync-dolphin-history":
-            config = _dolphin_history_sync_config(args)
-            if args.once:
-                _print_product_result(sync_dolphin_history_once(config), json_output=args.json)
-            else:
-                sync_dolphin_history_forever(config)
             return
         if args.command == "migrate-postgres":
             runner = PostgresMigrationRunner(args.dsn)
@@ -376,27 +366,6 @@ def _jsonable(value):
     return value
 
 
-def _dolphin_history_sync_config(args: argparse.Namespace) -> DolphinHistorySyncConfig:
-    scope = {
-        "workspace_id": args.workspace_id or os.getenv("PSI_MEMORY_WORKSPACE_ID") or "dolphin",
-        "user_id": args.user_id or os.getenv("PSI_MEMORY_USER_ID") or os.getenv("USER") or os.getenv("USERNAME") or "user",
-        "agent_id": args.agent_id or os.getenv("PSI_MEMORY_AGENT_ID") or "dolphin",
-        "run_id": args.run_id,
-        "session_id": args.session_id,
-        "app_id": "dolphin",
-    }
-    return DolphinHistorySyncConfig(
-        memory_url=args.memory_url,
-        session_id=args.session_id or os.getenv("PSI_MEMORY_SESSION_ID") or "",
-        workspace=Path(args.workspace) if args.workspace else None,
-        gateway_url=args.gateway_url,
-        scope=scope,
-        state_file=Path(args.state_file) if args.state_file else None,
-        timeout_seconds=args.timeout_seconds,
-        interval_seconds=args.interval_seconds,
-    )
-
-
 def _print_product_result(result: dict, *, json_output: bool = False) -> None:
     result = _normalize_product_result(result)
     if json_output:
@@ -408,6 +377,8 @@ def _print_product_result(result: dict, *, json_output: bool = False) -> None:
 def _normalize_product_result(result: dict[str, object]) -> dict[str, object]:
     if result.get("ok", True):
         return result
+    if "checks" in result:
+        return result
     normalized = dict(result)
     normalized.setdefault("error", "unexpected_error")
     normalized.setdefault("message", "Fusion Memory could not complete the request.")
@@ -417,7 +388,7 @@ def _normalize_product_result(result: dict[str, object]) -> dict[str, object]:
 
 def _friendly_argparse_message(message: str) -> str:
     if "invalid choice" in message and "--target" in message:
-        return "Unknown Agent target. Choose one of: all, openclaw, hermes, fusion-agent."
+        return "Unknown Agent target. Choose one of: all, dolphin, openclaw, hermes, fusion-agent."
     if "the following arguments are required" in message:
         return "A required command option is missing. Run fusion-memory doctor or check the help text."
     return "Fusion Memory could not understand that command. Check the command and try again."

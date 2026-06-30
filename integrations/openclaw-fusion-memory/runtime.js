@@ -10,9 +10,18 @@ async function postJson(baseUrl, path, payload, timeoutMs) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
-    const data = await response.json();
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_error) {
+      data = {};
+    }
     if (!response.ok) {
-      throw new Error("fusion memory request failed");
+      const error = new Error(data?.message || "Fusion Memory request failed.");
+      error.memoryError = data?.error || "request_failed";
+      error.memoryCause = data?.cause || `http_${response.status}`;
+      error.memoryMessage = data?.message || "Fusion Memory request failed.";
+      throw error;
     }
     return data;
   } finally {

@@ -1,103 +1,333 @@
-# Dolphin-Agent × Fusion Memory Adapter Implementation Plan
+# Dolphin-Agent x Fusion Memory History Watcher Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 Dolphin-Agent 在保留显式 `memory_add / memory_search / memory_answer_context` 的同时，于每轮结束后把本轮新增 history 自动持久化到 Fusion Memory。
+**Goal:** 让 Dolphin-Agent 在不修改 `Dolphin-Agent/src` 的前提下，通过外部 history watcher 将已落盘 session history 同步到 Fusion Memory，同时保留显式 memory tools。
 
-**Architecture:** 先在 Dolphin-Agent 侧补一个极薄的 `FusionMemoryClient`，只负责把 turn delta 通过 HTTP 发给 Fusion Memory 的 `/ingest-turn`。再在 `SessionAgent.run()` 中记录本轮开始前的 history 长度，并在 stop / error / unexpected-finish 三类出口上统一调用非阻断 flush。最后收尾 `memory/integrations/dolphin-fusion-memory/` 的系统提示文案和 Dolphin 端到端测试，保证显式工具与自动持久化同时成立。
+**Architecture:** Dolphin 继续只负责现有 workspace tools 和 `workspace/histories/{session_id}.jsonl`。Fusion Memory 在 memory 仓库内新增 Dolphin history watcher：读取 JSONL、按 user-message 边界做轻量 batch、维护 checkpoint、向 `/ingest-turn` 提交稳定 `turn_id`。显式 `memory_add / memory_search / memory_answer_context` 仍由 Dolphin workspace tools 提供。
 
-**Tech Stack:** Python 3.14, `aiohttp`, `anyio`, Dolphin-Agent `SessionAgent`, Fusion Memory HTTP server, pytest integration tests.
+**Tech Stack:** Python 3.11+, standard library `json/pathlib/asyncio/hashlib`, `aiohttp` for HTTP tests and workspace tool client, Fusion Memory HTTP server, pytest.
 
 ## Global Constraints
 
-- 保留显式 `memory_add / memory_search / memory_answer_context` 工具，让模型仍可主动读写记忆。
-- 在 Dolphin session 内增加 turn 结束后的自动持久化。
-- 自动持久化的数据源是当前 session history 的“本轮新增 message 列表”。
-- Dolphin 不在适配层过滤 assistant/tool 噪声。
-- 检索默认允许跨 session 长期视图，但由 memory core 保证 `current session` 优先。
-- Dolphin 侧不实现记忆价值判断。
-- Dolphin 侧不做 spans 预拆分。
-- 自动持久化必须是“非阻断”的。
+- 不修改 Dolphin `src`、不新增 Dolphin 内部 memory client、不改 `SessionAgent.run()`。
+- watcher 同步的是已落盘 history JSONL，不保证捕获 Dolphin in-memory 未保存消息。
+- 保留显式 `memory_add / memory_search / memory_answer_context` 工具。
+- watcher 不过滤 assistant/tool 噪声，不做长期记忆价值判断。
+- `/ingest-turn` 默认提交到 `http://127.0.0.1:8700`。
+- watcher 必须维护 checkpoint，重启后不重复提交已经确认的 batch。
+- Fusion Memory 不可用时，不影响 Dolphin session；watcher 保留未确认 batch 并重试。
+- Dolphin 生产运行推荐显式传入 `--session-id`，并设置同值 `PSI_MEMORY_SESSION_ID`。
+- 所有改动只落在 memory 仓库；Dolphin Fusion Memory PR 可以关闭或撤销。
 
 ## File Map
 
-- Create: `/public/home/wwb/Dolphin-Agent/src/psi_agent/session/memory_client.py`
-  - 定义 Dolphin 侧 Fusion Memory HTTP client。
-  - 读取 `PSI_MEMORY_*` 环境变量，复用现有 integration 配置约定。
-- Modify: `/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-  - 为 `SessionAgent` 增加可选 `memory_client`。
-  - 在 `create()` 中按环境变量构造 client。
-  - 在 `run()` 中计算 turn delta 并非阻断 flush。
-- Modify: `/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_agent.py`
-  - 覆盖 stop / error 两种 turn flush 路径。
-- Create: `/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_memory_client.py`
-  - 覆盖 config 构造与 `/ingest-turn` payload。
-- Modify: `/public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/systems/system.py`
-  - 更新系统提示，明确“显式 add + 系统 auto-persist 并存”。
-- Modify: `/public/home/wwb/memory/integrations/dolphin-fusion-memory/tests/test_tools.py`
-  - 覆盖系统提示文案。
-- Create: `/public/home/wwb/Dolphin-Agent/tests/integration/test_fusion_memory_auto_persist.py`
-  - 覆盖端到端 turn auto-persist 与 memory down 非阻断降级。
+- Create: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`
+  - 解析 Dolphin JSONL history。
+  - 维护 checkpoint。
+  - 生成稳定 turn batches。
+  - 提交 `/ingest-turn`。
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/cli.py`
+  - 增加 `watch-dolphin-history` 子命令。
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/workspace/systems/system.py`
+  - 将提示词从“session auto-persist after each response”改为“external history watcher may sync saved history”。
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/README.md`
+  - 增加 watcher 启动流程、session id 要求、降级边界。
+- Create: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`
+  - 覆盖 parser、batching、checkpoint、HTTP submit、retry。
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/tests/test_tools.py`
+  - 覆盖系统提示不再暗示 Dolphin 内部 hook。
 
 ---
 
-### Task 1: Add a minimal Dolphin-side Fusion Memory client
+### Task 1: Add pure history parsing, batching, and checkpoint state
 
 **Files:**
-- Create: `/public/home/wwb/Dolphin-Agent/src/psi_agent/session/memory_client.py`
-- Create: `/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_memory_client.py`
+- Create: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`
+- Create: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`
 
 **Interfaces:**
 - Produces:
-  - `@dataclass(frozen=True) class MemoryClientConfig`
-  - `build_memory_client_config(env: Mapping[str, str] | None = None) -> MemoryClientConfig`
-  - `class FusionMemoryClient`
-  - `async def ingest_turn(self, messages: list[dict[str, Any]], *, turn_id: str | None, turn_index: int | None, ended_with_error: bool) -> None`
+  - `@dataclass(frozen=True) class HistoryMessage`
+  - `@dataclass(frozen=True) class HistoryBatch`
+  - `@dataclass class WatcherCheckpoint`
+  - `read_history_messages(path: Path) -> list[HistoryMessage]`
+  - `build_batches(messages: list[HistoryMessage], *, session_id: str) -> list[HistoryBatch]`
+  - `load_checkpoint(path: Path) -> WatcherCheckpoint`
+  - `save_checkpoint(path: Path, checkpoint: WatcherCheckpoint) -> None`
 - Consumes:
-  - Fusion Memory HTTP endpoint `/ingest-turn`
-  - env vars `PSI_MEMORY_BASE_URL`, `PSI_MEMORY_TIMEOUT_SECONDS`, `PSI_MEMORY_WORKSPACE_ID`, `PSI_MEMORY_USER_ID`, `PSI_MEMORY_AGENT_ID`, `PSI_MEMORY_SESSION_ID`
+  - Dolphin JSONL file containing one message dict per line.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write failing tests**
 
-`/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_memory_client.py`
+`/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`
 ```python
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from fusion_memory.adapters.dolphin_history_watcher import (
+    WatcherCheckpoint,
+    build_batches,
+    load_checkpoint,
+    read_history_messages,
+    save_checkpoint,
+)
+
+
+def test_read_history_messages_skips_blank_lines_and_preserves_line_numbers(tmp_path: Path) -> None:
+    history = tmp_path / "session-1.jsonl"
+    history.write_text(
+        "\n".join(
+            [
+                json.dumps({"role": "user", "content": "first"}),
+                "",
+                json.dumps({"role": "assistant", "content": "answer"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    messages = read_history_messages(history)
+
+    assert [message.line_number for message in messages] == [1, 3]
+    assert [message.data["role"] for message in messages] == ["user", "assistant"]
+
+
+def test_build_batches_starts_new_batch_on_user_message() -> None:
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "tool", "content": "tool result", "name": "lookup"},
+        {"role": "user", "content": "second"},
+    ]
+    path = Path("session-1.jsonl")
+    messages = [
+        read_message
+        for index, item in enumerate(history, start=1)
+        for read_message in read_history_messages_from_items(path, index, item)
+    ]
+
+    batches = build_batches(messages, session_id="session-1")
+
+    assert len(batches) == 2
+    assert [message["role"] for message in batches[0].messages] == ["user", "assistant", "tool"]
+    assert [message["role"] for message in batches[1].messages] == ["user"]
+    assert batches[0].turn_id.startswith("dolphin:session-1:lines:2-4:")
+    assert batches[1].turn_id.startswith("dolphin:session-1:lines:5-5:")
+
+
+def test_checkpoint_round_trip(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / ".fusion-memory" / "dolphin-history-watcher" / "session-1.json"
+    checkpoint = WatcherCheckpoint(
+        history_path="/workspace/histories/session-1.jsonl",
+        session_id="session-1",
+        line_count=4,
+        file_size=123,
+        file_mtime_ns=456,
+        last_message_hash="abc",
+        submitted_batches=["batch-1"],
+    )
+
+    save_checkpoint(checkpoint_path, checkpoint)
+
+    assert load_checkpoint(checkpoint_path) == checkpoint
+
+
+def read_history_messages_from_items(path: Path, line_number: int, item: dict) -> list:
+    tmp = path.parent / f".{line_number}.jsonl"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    message = read_history_messages(tmp)[0]
+    return [type(message)(line_number=line_number, data=message.data, raw_hash=message.raw_hash)]
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "read_history_messages or build_batches or checkpoint" -v
+```
+
+Expected: FAIL with `ModuleNotFoundError: No module named 'fusion_memory.adapters'`.
+
+- [ ] **Step 3: Implement pure logic**
+
+`/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`
+```python
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class HistoryMessage:
+    line_number: int
+    data: dict[str, Any]
+    raw_hash: str
+
+
+@dataclass(frozen=True)
+class HistoryBatch:
+    turn_id: str
+    batch_hash: str
+    line_start: int
+    line_end: int
+    messages: list[dict[str, Any]]
+
+
+@dataclass
+class WatcherCheckpoint:
+    history_path: str
+    session_id: str
+    line_count: int = 0
+    file_size: int = 0
+    file_mtime_ns: int = 0
+    last_message_hash: str | None = None
+    submitted_batches: list[str] = field(default_factory=list)
+
+
+def read_history_messages(path: Path) -> list[HistoryMessage]:
+    if not path.exists():
+        return []
+    messages: list[HistoryMessage] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        messages.append(
+            HistoryMessage(
+                line_number=line_number,
+                data=data,
+                raw_hash=_stable_hash(json.dumps(data, ensure_ascii=False, sort_keys=True)),
+            )
+        )
+    return messages
+
+
+def build_batches(messages: list[HistoryMessage], *, session_id: str) -> list[HistoryBatch]:
+    batches: list[list[HistoryMessage]] = []
+    current: list[HistoryMessage] = []
+    for message in messages:
+        role = str(message.data.get("role") or "")
+        if role == "system":
+            continue
+        if role == "user" and current:
+            batches.append(current)
+            current = [message]
+            continue
+        if role == "user" or current:
+            current.append(message)
+    if current:
+        batches.append(current)
+    return [_batch_from_messages(batch, session_id=session_id) for batch in batches]
+
+
+def load_checkpoint(path: Path) -> WatcherCheckpoint:
+    if not path.exists():
+        session_id = path.stem
+        return WatcherCheckpoint(history_path="", session_id=session_id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return WatcherCheckpoint(
+        history_path=str(data.get("history_path") or ""),
+        session_id=str(data.get("session_id") or path.stem),
+        line_count=int(data.get("line_count") or 0),
+        file_size=int(data.get("file_size") or 0),
+        file_mtime_ns=int(data.get("file_mtime_ns") or 0),
+        last_message_hash=data.get("last_message_hash"),
+        submitted_batches=list(data.get("submitted_batches") or []),
+    )
+
+
+def save_checkpoint(path: Path, checkpoint: WatcherCheckpoint) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(checkpoint), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _batch_from_messages(messages: list[HistoryMessage], *, session_id: str) -> HistoryBatch:
+    line_start = messages[0].line_number
+    line_end = messages[-1].line_number
+    raw = "\n".join(message.raw_hash for message in messages)
+    batch_hash = _stable_hash(raw)[:16]
+    return HistoryBatch(
+        turn_id=f"dolphin:{session_id}:lines:{line_start}-{line_end}:{batch_hash}",
+        batch_hash=batch_hash,
+        line_start=line_start,
+        line_end=line_end,
+        messages=[dict(message.data) for message in messages],
+    )
+
+
+def _stable_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "read_history_messages or build_batches or checkpoint" -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit locally**
+
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+git add fusion_memory/adapters/dolphin_history_watcher.py tests/test_dolphin_history_watcher.py
+git commit -m "feat(memory): parse Dolphin history watcher batches"
+```
+
+### Task 2: Add HTTP submission and retry-safe checkpoint advancement
+
+**Files:**
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`
+
+**Interfaces:**
+- Produces:
+  - `@dataclass(frozen=True) class WatcherConfig`
+  - `async def submit_batch(config: WatcherConfig, batch: HistoryBatch) -> None`
+  - `async def sync_history_once(config: WatcherConfig) -> int`
+- Consumes:
+  - Fusion Memory HTTP endpoint `POST /ingest-turn`.
+  - `WatcherCheckpoint.submitted_batches`.
+
+- [ ] **Step 1: Write failing tests**
+
+Append to `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`:
+```python
 import socket
 
 import pytest
 from aiohttp import web
 
-from psi_agent.session.memory_client import FusionMemoryClient, MemoryClientConfig, build_memory_client_config
-
-
-def test_build_memory_client_config_reads_expected_env_keys() -> None:
-    config = build_memory_client_config(
-        {
-            "PSI_MEMORY_BASE_URL": "http://127.0.0.1:8700",
-            "PSI_MEMORY_TIMEOUT_SECONDS": "3.5",
-            "PSI_MEMORY_WORKSPACE_ID": "ws",
-            "PSI_MEMORY_USER_ID": "u",
-            "PSI_MEMORY_AGENT_ID": "agent",
-            "PSI_MEMORY_SESSION_ID": "session-1",
-        }
-    )
-
-    assert config.base_url == "http://127.0.0.1:8700"
-    assert config.timeout_seconds == 3.5
-    assert config.workspace_id == "ws"
-    assert config.user_id == "u"
-    assert config.agent_id == "agent"
-    assert config.session_id == "session-1"
+from fusion_memory.adapters.dolphin_history_watcher import WatcherConfig, sync_history_once
 
 
 @pytest.mark.anyio
-async def test_ingest_turn_posts_messages_scope_and_error_flag() -> None:
-    seen: dict[str, object] = {}
+async def test_sync_history_once_posts_new_batch_and_advances_checkpoint(tmp_path: Path) -> None:
+    seen: list[dict] = []
 
     async def handler(request: web.Request) -> web.Response:
-        seen.update(await request.json())
-        return web.json_response({"span_ids": ["span-1"]})
+        seen.append(await request.json())
+        return web.json_response({"ok": True})
 
     app = web.Application()
     app.router.add_post("/ingest-turn", handler)
@@ -109,636 +339,479 @@ async def test_ingest_turn_posts_messages_scope_and_error_flag() -> None:
     site = web.SockSite(runner, sock)
     await site.start()
 
-    client = FusionMemoryClient(
-        MemoryClientConfig(
-            base_url=f"http://127.0.0.1:{port}",
-            timeout_seconds=2.0,
-            workspace_id="ws",
-            user_id="u",
-            agent_id="agent",
-            session_id="session-1",
-        )
+    history = tmp_path / "histories" / "session-1.jsonl"
+    history.parent.mkdir()
+    history.write_text(
+        json.dumps({"role": "user", "content": "remember blue"}) + "\n"
+        + json.dumps({"role": "assistant", "content": "stored"}) + "\n",
+        encoding="utf-8",
     )
+    checkpoint = tmp_path / ".fusion-memory" / "dolphin-history-watcher" / "session-1.json"
 
     try:
-        await client.ingest_turn(
-            [{"role": "user", "content": "remember my aisle seat preference"}],
-            turn_id="turn-1",
-            turn_index=1,
-            ended_with_error=False,
+        count = await sync_history_once(
+            WatcherConfig(
+                history_path=history,
+                checkpoint_path=checkpoint,
+                base_url=f"http://127.0.0.1:{port}",
+                workspace_id="ws",
+                user_id="u",
+                agent_id="dolphin",
+                session_id="session-1",
+                timeout_seconds=2.0,
+            )
         )
-        assert seen["messages"] == [{"role": "user", "content": "remember my aisle seat preference"}]
-        assert seen["scope"]["workspace_id"] == "ws"
-        assert seen["scope"]["session_id"] == "session-1"
-        assert seen["metadata"]["ended_with_error"] is False
     finally:
         await runner.cleanup()
+
+    assert count == 1
+    assert seen[0]["turn_id"].startswith("dolphin:session-1:lines:1-2:")
+    assert seen[0]["scope"]["session_id"] == "session-1"
+    assert seen[0]["metadata"]["source"] == "dolphin-history-watcher"
+    assert load_checkpoint(checkpoint).submitted_batches == [seen[0]["metadata"]["batch_hash"]]
+
+
+@pytest.mark.anyio
+async def test_sync_history_once_does_not_advance_checkpoint_when_post_fails(tmp_path: Path) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        return web.json_response({"message": "down"}, status=503)
+
+    app = web.Application()
+    app.router.add_post("/ingest-turn", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    site = web.SockSite(runner, sock)
+    await site.start()
+
+    history = tmp_path / "histories" / "session-1.jsonl"
+    history.parent.mkdir()
+    history.write_text(json.dumps({"role": "user", "content": "remember blue"}) + "\n", encoding="utf-8")
+    checkpoint = tmp_path / ".fusion-memory" / "dolphin-history-watcher" / "session-1.json"
+
+    try:
+        with pytest.raises(RuntimeError):
+            await sync_history_once(
+                WatcherConfig(
+                    history_path=history,
+                    checkpoint_path=checkpoint,
+                    base_url=f"http://127.0.0.1:{port}",
+                    workspace_id="ws",
+                    user_id="u",
+                    agent_id="dolphin",
+                    session_id="session-1",
+                    timeout_seconds=2.0,
+                )
+            )
+    finally:
+        await runner.cleanup()
+
+    assert load_checkpoint(checkpoint).submitted_batches == []
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run tests to verify failure**
 
 Run:
 ```bash
-cd /public/home/wwb/Dolphin-Agent
-PYTHONPATH=/public/home/wwb/Dolphin-Agent/src ./.venv/bin/python -m pytest tests/psi_agent/session/test_memory_client.py -v
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "sync_history_once" -v
 ```
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'psi_agent.session.memory_client'`.
+Expected: FAIL with `ImportError` for `WatcherConfig` or `sync_history_once`.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [ ] **Step 3: Implement submit and checkpoint advancement**
 
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/memory_client.py`
+Add to `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`:
 ```python
-from __future__ import annotations
-
-from dataclasses import dataclass
-import os
-from typing import Any, Mapping
-
 import aiohttp
 
 
 @dataclass(frozen=True)
-class MemoryClientConfig:
+class WatcherConfig:
+    history_path: Path
+    checkpoint_path: Path
     base_url: str
-    timeout_seconds: float
     workspace_id: str
     user_id: str
     agent_id: str
-    session_id: str | None
+    session_id: str
+    timeout_seconds: float = 2.0
+    app_id: str = "dolphin"
 
 
-def build_memory_client_config(env: Mapping[str, str] | None = None) -> MemoryClientConfig:
-    env = os.environ if env is None else env
-    return MemoryClientConfig(
-        base_url=(env.get("PSI_MEMORY_BASE_URL") or "http://127.0.0.1:8700").rstrip("/"),
-        timeout_seconds=float(env.get("PSI_MEMORY_TIMEOUT_SECONDS") or "2.0"),
-        workspace_id=env.get("PSI_MEMORY_WORKSPACE_ID") or "dolphin",
-        user_id=env.get("PSI_MEMORY_USER_ID") or env.get("USER") or "user",
-        agent_id=env.get("PSI_MEMORY_AGENT_ID") or "dolphin",
-        session_id=env.get("PSI_MEMORY_SESSION_ID") or None,
+async def submit_batch(config: WatcherConfig, batch: HistoryBatch) -> None:
+    payload = {
+        "messages": batch.messages,
+        "scope": {
+            "workspace_id": config.workspace_id,
+            "user_id": config.user_id,
+            "agent_id": config.agent_id,
+            "session_id": config.session_id,
+            "app_id": config.app_id,
+        },
+        "turn_id": batch.turn_id,
+        "turn_index": None,
+        "metadata": {
+            "source": "dolphin-history-watcher",
+            "history_path": str(config.history_path),
+            "line_start": batch.line_start,
+            "line_end": batch.line_end,
+            "batch_hash": batch.batch_hash,
+            "ended_with_error": "unknown",
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=max(0.1, min(5.0, config.timeout_seconds)))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{config.base_url.rstrip('/')}/ingest-turn", json=payload) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Fusion Memory ingest-turn failed with status {response.status}")
+
+
+async def sync_history_once(config: WatcherConfig) -> int:
+    messages = read_history_messages(config.history_path)
+    batches = build_batches(messages, session_id=config.session_id)
+    checkpoint = load_checkpoint(config.checkpoint_path)
+    submitted = set(checkpoint.submitted_batches)
+    submitted_count = 0
+    for batch in batches:
+        if batch.batch_hash in submitted:
+            continue
+        await submit_batch(config, batch)
+        submitted.add(batch.batch_hash)
+        checkpoint.submitted_batches.append(batch.batch_hash)
+        submitted_count += 1
+    stat = config.history_path.stat() if config.history_path.exists() else None
+    checkpoint.history_path = str(config.history_path)
+    checkpoint.session_id = config.session_id
+    checkpoint.line_count = messages[-1].line_number if messages else 0
+    checkpoint.file_size = stat.st_size if stat else 0
+    checkpoint.file_mtime_ns = stat.st_mtime_ns if stat else 0
+    checkpoint.last_message_hash = messages[-1].raw_hash if messages else None
+    save_checkpoint(config.checkpoint_path, checkpoint)
+    return submitted_count
+```
+
+- [ ] **Step 4: Run tests to verify pass**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "sync_history_once" -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit locally**
+
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+git add fusion_memory/adapters/dolphin_history_watcher.py tests/test_dolphin_history_watcher.py
+git commit -m "feat(memory): sync Dolphin history batches"
+```
+
+### Task 3: Add CLI command for the watcher loop
+
+**Files:**
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/cli.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`
+
+**Interfaces:**
+- Produces:
+  - `async def watch_history(config: WatcherConfig, *, poll_interval_seconds: float = 1.0) -> None`
+  - CLI: `fusion-memory watch-dolphin-history --workspace <path> --session-id <id>`
+- Consumes:
+  - env vars `PSI_MEMORY_BASE_URL`, `PSI_MEMORY_WORKSPACE_ID`, `PSI_MEMORY_USER_ID`, `PSI_MEMORY_AGENT_ID`, `PSI_MEMORY_TIMEOUT_SECONDS`.
+
+- [ ] **Step 1: Write failing CLI test**
+
+Append to `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/tests/test_dolphin_history_watcher.py`:
+```python
+from fusion_memory.adapters.dolphin_history_watcher import config_from_workspace
+
+
+def test_config_from_workspace_uses_expected_history_and_checkpoint_paths(tmp_path: Path) -> None:
+    cfg = config_from_workspace(
+        workspace=tmp_path,
+        session_id="session-1",
+        env={
+            "PSI_MEMORY_BASE_URL": "http://127.0.0.1:8700",
+            "PSI_MEMORY_WORKSPACE_ID": "ws",
+            "PSI_MEMORY_USER_ID": "u",
+            "PSI_MEMORY_AGENT_ID": "dolphin",
+            "PSI_MEMORY_TIMEOUT_SECONDS": "3",
+        },
+    )
+
+    assert cfg.history_path == tmp_path / "histories" / "session-1.jsonl"
+    assert cfg.checkpoint_path == tmp_path / ".fusion-memory" / "dolphin-history-watcher" / "session-1.json"
+    assert cfg.base_url == "http://127.0.0.1:8700"
+    assert cfg.workspace_id == "ws"
+    assert cfg.timeout_seconds == 3.0
+```
+
+- [ ] **Step 2: Run test to verify failure**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "config_from_workspace" -v
+```
+
+Expected: FAIL with `ImportError` for `config_from_workspace`.
+
+- [ ] **Step 3: Implement config builder and watch loop**
+
+Add to `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/adapters/dolphin_history_watcher.py`:
+```python
+import asyncio
+import os
+from collections.abc import Mapping
+
+
+def config_from_workspace(
+    *,
+    workspace: Path,
+    session_id: str,
+    env: Mapping[str, str] | None = None,
+) -> WatcherConfig:
+    env_map = os.environ if env is None else env
+    timeout_raw = env_map.get("PSI_MEMORY_TIMEOUT_SECONDS")
+    try:
+        timeout = float(timeout_raw) if timeout_raw else 2.0
+    except ValueError:
+        timeout = 2.0
+    return WatcherConfig(
+        history_path=workspace / "histories" / f"{session_id}.jsonl",
+        checkpoint_path=workspace / ".fusion-memory" / "dolphin-history-watcher" / f"{session_id}.json",
+        base_url=(env_map.get("PSI_MEMORY_BASE_URL") or "http://127.0.0.1:8700").rstrip("/"),
+        workspace_id=env_map.get("PSI_MEMORY_WORKSPACE_ID") or "dolphin",
+        user_id=env_map.get("PSI_MEMORY_USER_ID") or env_map.get("USER") or env_map.get("USERNAME") or "user",
+        agent_id=env_map.get("PSI_MEMORY_AGENT_ID") or "dolphin",
+        session_id=session_id,
+        timeout_seconds=max(0.1, min(5.0, timeout)),
     )
 
 
-class FusionMemoryClient:
-    def __init__(self, config: MemoryClientConfig) -> None:
-        self._config = config
-
-    async def ingest_turn(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        turn_id: str | None,
-        turn_index: int | None,
-        ended_with_error: bool,
-    ) -> None:
-        payload = {
-            "messages": messages,
-            "scope": {
-                "workspace_id": self._config.workspace_id,
-                "user_id": self._config.user_id,
-                "agent_id": self._config.agent_id,
-                "session_id": self._config.session_id,
-                "app_id": "dolphin",
-            },
-            "turn_id": turn_id,
-            "turn_index": turn_index,
-            "metadata": {"ended_with_error": ended_with_error},
-        }
-        timeout = aiohttp.ClientTimeout(total=self._config.timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{self._config.base_url}/ingest-turn", json=payload) as response:
-                response.raise_for_status()
+async def watch_history(config: WatcherConfig, *, poll_interval_seconds: float = 1.0) -> None:
+    while True:
+        try:
+            await sync_history_once(config)
+        except Exception as exc:
+            print(f"Fusion Memory Dolphin history watcher skipped sync: {exc}", flush=True)
+        await asyncio.sleep(max(0.1, poll_interval_seconds))
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+Modify `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/fusion_memory/cli.py`:
+```python
+def _add_watch_dolphin_history_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("watch-dolphin-history", help="Sync Dolphin-Agent saved history JSONL into Fusion Memory")
+    parser.add_argument("--workspace", required=True, help="Dolphin workspace path")
+    parser.add_argument("--session-id", required=True, help="Dolphin session id")
+    parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
+```
+
+In the existing CLI dispatch, add:
+```python
+elif args.command == "watch-dolphin-history":
+    import asyncio
+    from pathlib import Path
+    from fusion_memory.adapters.dolphin_history_watcher import config_from_workspace, watch_history
+
+    config = config_from_workspace(workspace=Path(args.workspace), session_id=args.session_id)
+    asyncio.run(watch_history(config, poll_interval_seconds=args.poll_interval_seconds))
+```
+
+- [ ] **Step 4: Run focused tests**
 
 Run:
 ```bash
-cd /public/home/wwb/Dolphin-Agent
-PYTHONPATH=/public/home/wwb/Dolphin-Agent/src ./.venv/bin/python -m pytest tests/psi_agent/session/test_memory_client.py -v
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py -k "config_from_workspace" -v
+python -m fusion_memory.cli watch-dolphin-history --help
 ```
 
-Expected: PASS.
+Expected: pytest PASS, help output includes `--workspace` and `--session-id`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit locally**
 
 ```bash
-cd /public/home/wwb/Dolphin-Agent
-git add src/psi_agent/session/memory_client.py tests/psi_agent/session/test_memory_client.py
-git commit -m "feat(session): add Fusion Memory client"
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+git add fusion_memory/adapters/dolphin_history_watcher.py fusion_memory/cli.py tests/test_dolphin_history_watcher.py
+git commit -m "feat(memory): add Dolphin history watcher CLI"
 ```
 
-### Task 2: Hook non-blocking turn-delta persistence into `SessionAgent.run()`
+### Task 4: Update Dolphin integration prompt and docs
 
 **Files:**
-- Modify: `/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-- Modify: `/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_agent.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/workspace/systems/system.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/tests/test_tools.py`
+- Modify: `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/README.md`
 
 **Interfaces:**
 - Produces:
-  - `SessionAgent(..., memory_client: FusionMemoryClient | None = None)`
-  - `self._turn_index: int`
-  - `async def _flush_turn_memory(self, history_len_before: int, *, turn_index: int, ended_with_error: bool) -> None`
+  - System prompt that does not claim Dolphin internal turn hook exists.
+  - README with two-process startup: Dolphin session plus memory watcher.
 - Consumes:
-  - `FusionMemoryClient.ingest_turn(...)`
-  - existing `history` append order in `SessionAgent.run()`
+  - Existing workspace tool names.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write failing prompt test**
 
-`/public/home/wwb/Dolphin-Agent/tests/psi_agent/session/test_agent.py`
+Modify `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/tests/test_tools.py`:
 ```python
 @pytest.mark.anyio
-async def test_turn_delta_is_flushed_on_stop(tmp_path: Path) -> None:
-    seen: dict[str, object] = {}
-
-    class FakeMemoryClient:
-        async def ingest_turn(self, messages, *, turn_id, turn_index, ended_with_error):
-            seen["messages"] = messages
-            seen["turn_index"] = turn_index
-            seen["ended_with_error"] = ended_with_error
-
-    async def handler(request: web.Request) -> web.StreamResponse:
-        resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
-        await resp.prepare(request)
-        await resp.write(_sse_chunk(content="stored", finish="stop").encode())
-        await resp.write(b"data: [DONE]\n\n")
-        return resp
-
-    mock_server = MockAIServer(tmp_path)
-    ai_socket = await mock_server.start(handler)
-    try:
-        agent = SessionAgent(ai_socket=ai_socket, tools={}, memory_client=FakeMemoryClient())
-        async for _ in agent.run({"role": "user", "content": "remember my seat preference"}):
-            pass
-
-        assert [item["role"] for item in seen["messages"]] == ["user", "assistant"]
-        assert seen["turn_index"] == 1
-        assert seen["ended_with_error"] is False
-    finally:
-        await mock_server.cleanup()
-
-
-@pytest.mark.anyio
-async def test_turn_delta_is_flushed_on_error(tmp_path: Path) -> None:
-    seen: dict[str, object] = {}
-
-    class FakeMemoryClient:
-        async def ingest_turn(self, messages, *, turn_id, turn_index, ended_with_error):
-            seen["messages"] = messages
-            seen["turn_index"] = turn_index
-            seen["ended_with_error"] = ended_with_error
-
-    async def handler(request: web.Request) -> web.Response:
-        return web.Response(status=500)
-
-    mock_server = MockAIServer(tmp_path)
-    ai_socket = await mock_server.start(handler)
-    try:
-        agent = SessionAgent(ai_socket=ai_socket, tools={}, memory_client=FakeMemoryClient())
-        async for _ in agent.run({"role": "user", "content": "danger"}):
-            pass
-
-        assert [item["role"] for item in seen["messages"]] == ["user"]
-        assert seen["turn_index"] == 1
-        assert seen["ended_with_error"] is True
-    finally:
-        await mock_server.cleanup()
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run:
-```bash
-cd /public/home/wwb/Dolphin-Agent
-PYTHONPATH=/public/home/wwb/Dolphin-Agent/src ./.venv/bin/python -m pytest tests/psi_agent/session/test_agent.py -k "turn_delta_is_flushed" -v
-```
-
-Expected: FAIL because `SessionAgent.__init__` has no `memory_client` parameter and there is no flush hook.
-
-- [ ] **Step 3: Write the minimal implementation**
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-from psi_agent.session.memory_client import FusionMemoryClient, build_memory_client_config
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-def __init__(
-    self,
-    *,
-    ai_socket: str,
-    tools: dict[str, ToolFunction],
-    tool_funcs: dict[str, Callable[..., Any]] | None = None,
-    schedules: list | None = None,
-    system_prompt_builder: Callable[..., Any] | None = None,
-    max_tool_rounds: int = 128,
-    history: list[dict] | None = None,
-    history_path: Path | None = None,
-    memory_client: FusionMemoryClient | None = None,
-) -> None:
-    self.ai_socket = ai_socket
-    self.tools = tools
-    self._tool_funcs = tool_funcs if tool_funcs else {}
-    self.schedules = schedules if schedules is not None else []
-    self._system_prompt_builder = system_prompt_builder
-    self.max_tool_rounds = max_tool_rounds
-    self.history = history if history is not None else []
-    self._history_path = history_path
-    self._pending_schedule_chunks = []
-    self._memory_client = memory_client
-    self._turn_index = 0
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-memory_client = None
-try:
-    memory_client = FusionMemoryClient(build_memory_client_config())
-except Exception as exc:
-    logger.warning(f"Fusion Memory client disabled during session startup: {exc}")
-
-return cls(
-    ai_socket=ai_socket,
-    tools=tools,
-    tool_funcs=tool_funcs,
-    schedules=schedules,
-    system_prompt_builder=_load_system_prompt_builder(workspace_path),
-    max_tool_rounds=max_tool_rounds,
-    history=history,
-    history_path=history_path,
-    memory_client=memory_client,
-)
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-self._turn_index += 1
-turn_index = self._turn_index
-history_len_before = len(self.history)
-self.history.append(user_message)
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-if finish_reason == "error":
-    await self._flush_turn_memory(history_len_before, turn_index=turn_index, ended_with_error=True)
-    return
-
-if finish_reason == "stop":
-    if accumulated_content or accumulated_reasoning:
-        assistant_msg: dict = {"role": "assistant"}
-        if accumulated_content:
-            assistant_msg["content"] = accumulated_content
-        if accumulated_reasoning:
-            assistant_msg["reasoning_content"] = accumulated_reasoning
-        self.history.append(assistant_msg)
-        if self._history_path is not None:
-            await _save_history(self._history_path, self.history)
-    await self._flush_turn_memory(history_len_before, turn_index=turn_index, ended_with_error=False)
-    return
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-if finish_reason not in ("error", "stop", "tool_calls"):
-    if accumulated_content or accumulated_reasoning:
-        assistant_msg: dict = {"role": "assistant"}
-        if accumulated_content:
-            assistant_msg["content"] = accumulated_content
-        if accumulated_reasoning:
-            assistant_msg["reasoning_content"] = accumulated_reasoning
-        self.history.append(assistant_msg)
-    await self._flush_turn_memory(history_len_before, turn_index=turn_index, ended_with_error=False)
-    return
-```
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-async def _flush_turn_memory(
-    self,
-    history_len_before: int,
-    *,
-    turn_index: int,
-    ended_with_error: bool,
-) -> None:
-    if self._memory_client is None:
-        return
-    delta = self.history[history_len_before:]
-    if not delta:
-        return
-    try:
-        await self._memory_client.ingest_turn(
-            delta,
-            turn_id=None,
-            turn_index=turn_index,
-            ended_with_error=ended_with_error,
-        )
-    except Exception as exc:
-        logger.warning(f"Fusion Memory auto-persist skipped: {exc}")
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run:
-```bash
-cd /public/home/wwb/Dolphin-Agent
-PYTHONPATH=/public/home/wwb/Dolphin-Agent/src ./.venv/bin/python -m pytest tests/psi_agent/session/test_agent.py -k "turn_delta_is_flushed" -v
-```
-
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /public/home/wwb/Dolphin-Agent
-git add src/psi_agent/session/agent.py tests/psi_agent/session/test_agent.py
-git commit -m "feat(session): auto-persist turn deltas to Fusion Memory"
-```
-
-### Task 3: Update the explicit-tool system prompt to mention auto persistence
-
-**Files:**
-- Modify: `/public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/systems/system.py`
-- Modify: `/public/home/wwb/memory/integrations/dolphin-fusion-memory/tests/test_tools.py`
-
-**Interfaces:**
-- Produces:
-  - system prompt copy that explicitly distinguishes:
-    - explicit `memory_add`
-    - automatic turn auto-persist
-- Consumes:
-  - existing public tool names `memory_add`, `memory_search`, `memory_answer_context`
-
-- [ ] **Step 1: Write the failing test**
-
-`/public/home/wwb/memory/integrations/dolphin-fusion-memory/tests/test_tools.py`
-```python
-@pytest.mark.anyio
-async def test_system_prompt_mentions_explicit_add_and_auto_persist() -> None:
+async def test_system_prompt_mentions_external_history_watcher_without_internal_hook_claim() -> None:
     prompt = await system.system_prompt_builder()
     assert "memory_add" in prompt
-    assert "auto-persist" in prompt
     assert "memory_search" in prompt
     assert "memory_answer_context" in prompt
+    assert "history watcher" in prompt
+    assert "after each response" not in prompt
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run test to verify failure**
 
 Run:
 ```bash
-cd /public/home/wwb/memory
-python -m pytest memory/integrations/dolphin-fusion-memory/tests/test_tools.py -k "explicit_add_and_auto_persist" -v
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest integrations/dolphin-fusion-memory/tests/test_tools.py -k "history_watcher" -v
 ```
 
-Expected: FAIL because the current prompt only describes the three explicit tools and does not mention session auto-persist.
+Expected: FAIL because the prompt still says the current turn may auto-persist after each response.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [ ] **Step 3: Update system prompt**
 
-`/public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/systems/system.py`
-```python
-async def system_prompt_builder() -> str:
-    return (
-        "You have access to durable Fusion Memory via three explicit tools:\n"
-        "- memory_add: store a stable user preference, project fact, or decision\n"
-        "- memory_search: retrieve raw evidence by keyword\n"
-        "- memory_answer_context: retrieve a query-grounded context pack\n\n"
-        "The session may also auto-persist the current turn's raw history after each turn. "
-        "Use memory_add when you intentionally want to promote a durable fact or preference. "
-        "Use memory_answer_context when answering questions about the user's history, preferences, or prior context. "
-        "Use memory_search when you need raw supporting evidence."
-    )
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run:
-```bash
-cd /public/home/wwb/memory
-python -m pytest memory/integrations/dolphin-fusion-memory/tests/test_tools.py -k "explicit_add_and_auto_persist" -v
-```
-
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /public/home/wwb/memory
-git add \
-  memory/integrations/dolphin-fusion-memory/workspace/systems/system.py \
-  memory/integrations/dolphin-fusion-memory/tests/test_tools.py
-git commit -m "docs(memory): clarify explicit add and auto persist prompt"
-```
-
-### Task 4: Add end-to-end coverage for auto persistence and non-blocking degradation
-
-**Files:**
-- Create: `/public/home/wwb/Dolphin-Agent/tests/integration/test_fusion_memory_auto_persist.py`
-
-**Interfaces:**
-- Produces regression coverage for:
-  - stop-path auto persistence
-  - memory-server failure non-blocking behavior
-- Consumes:
-  - `tests.integration.conftest._psi_process_spec`
-  - `tests.integration.conftest.read_sse`
-  - `FusionMemoryClient.ingest_turn(...)`
-
-- [ ] **Step 1: Write the failing tests**
-
-`/public/home/wwb/Dolphin-Agent/tests/integration/test_fusion_memory_auto_persist.py`
+`/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/workspace/systems/system.py`
 ```python
 from __future__ import annotations
 
-import socket
-from pathlib import Path
 
-import anyio
-import pytest
-from aiohttp import web
-
-from tests.integration.conftest import _psi_process_spec, read_sse
-from tests.integration.test_end_to_end import _chunk, _stop_process, _wait_for_socket
-
-
-async def _start_memory_server(status: int, seen: list[dict]) -> tuple[web.AppRunner, int]:
-    async def handler(request: web.Request) -> web.Response:
-        seen.append(await request.json())
-        return web.json_response({"span_ids": ["span-1"]}, status=status)
-
-    app = web.Application()
-    app.router.add_post("/ingest-turn", handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    site = web.SockSite(runner, sock)
-    await site.start()
-    return runner, port
-
-
-@pytest.mark.anyio
-async def test_turn_auto_persist_posts_new_messages_without_blocking(
-    tmp_path: Path,
-    mock_ai_server,
-) -> None:
-    seen: list[dict] = []
-    memory_runner, memory_port = await _start_memory_server(200, seen)
-    mock_ai_server.set_responses([_chunk(content="stored", finish_reason="stop")])
-    base_url = await mock_ai_server.start()
-
-    ai_socket = str(tmp_path / "ai.sock")
-    channel_socket = str(tmp_path / "channel.sock")
-
-    ai_cmd, ai_env, ai_cwd = _psi_process_spec(
-        "ai",
-        "--provider",
-        "openai",
-        "--session-socket",
-        ai_socket,
-        "--model",
-        "test",
-        "--api-key",
-        "k",
-        "--base-url",
-        base_url,
+async def system_prompt_builder() -> str:
+    """Build the Dolphin-Agent system prompt for Fusion Memory tools."""
+    return (
+        "You have access to durable Fusion Memory via three tools:\n"
+        "- memory_add: store a stable user preference, project fact, or decision\n"
+        "- memory_search: retrieve raw evidence by keyword\n"
+        "- memory_answer_context: retrieve a query-grounded context pack\n\n"
+        "An external history watcher may sync Dolphin's saved JSONL history into Fusion Memory. "
+        "That watcher only sees messages after Dolphin writes them to the history file. "
+        "Use memory_add when you intentionally want to store a durable fact or preference. "
+        "Use memory_answer_context when answering questions about the user's history, preferences, or prior context. "
+        "Use memory_search when you need raw supporting evidence. "
+        "Use memory_add only for durable, reusable facts, not transient conversation."
     )
-    ai_proc = await anyio.open_process(ai_cmd, env=ai_env, cwd=str(ai_cwd))
-
-    ses_cmd, ses_env, ses_cwd = _psi_process_spec(
-        "session",
-        "--workspace",
-        "examples/a-simple-schedule-workspace",
-        "--channel-socket",
-        channel_socket,
-        "--ai-socket",
-        ai_socket,
-    )
-    ses_env = dict(ses_env or {})
-    ses_env.update(
-        {
-            "PSI_MEMORY_BASE_URL": f"http://127.0.0.1:{memory_port}",
-            "PSI_MEMORY_WORKSPACE_ID": "ws",
-            "PSI_MEMORY_USER_ID": "u",
-            "PSI_MEMORY_AGENT_ID": "dolphin",
-            "PSI_MEMORY_SESSION_ID": "session-1",
-        }
-    )
-    ses_proc = await anyio.open_process(ses_cmd, env=ses_env, cwd=str(ses_cwd))
-
-    try:
-        assert await _wait_for_socket(ai_socket)
-        assert await _wait_for_socket(channel_socket)
-        chunks = await read_sse(channel_socket, "remember my aisle seat preference")
-        assert chunks
-        assert seen
-        assert seen[0]["messages"][0]["role"] == "user"
-        assert seen[0]["messages"][0]["content"] == "remember my aisle seat preference"
-    finally:
-        await _stop_process(ses_proc)
-        await _stop_process(ai_proc)
-        await memory_runner.cleanup()
-
-
-@pytest.mark.anyio
-async def test_turn_auto_persist_failure_does_not_fail_session(
-    tmp_path: Path,
-    mock_ai_server,
-) -> None:
-    seen: list[dict] = []
-    memory_runner, memory_port = await _start_memory_server(500, seen)
-    mock_ai_server.set_responses([_chunk(content="still answered", finish_reason="stop")])
-    base_url = await mock_ai_server.start()
-
-    ai_socket = str(tmp_path / "ai.sock")
-    channel_socket = str(tmp_path / "channel.sock")
-
-    ai_cmd, ai_env, ai_cwd = _psi_process_spec(
-        "ai",
-        "--provider",
-        "openai",
-        "--session-socket",
-        ai_socket,
-        "--model",
-        "test",
-        "--api-key",
-        "k",
-        "--base-url",
-        base_url,
-    )
-    ai_proc = await anyio.open_process(ai_cmd, env=ai_env, cwd=str(ai_cwd))
-
-    ses_cmd, ses_env, ses_cwd = _psi_process_spec(
-        "session",
-        "--workspace",
-        "examples/a-simple-schedule-workspace",
-        "--channel-socket",
-        channel_socket,
-        "--ai-socket",
-        ai_socket,
-    )
-    ses_env = dict(ses_env or {})
-    ses_env.update(
-        {
-            "PSI_MEMORY_BASE_URL": f"http://127.0.0.1:{memory_port}",
-            "PSI_MEMORY_WORKSPACE_ID": "ws",
-            "PSI_MEMORY_USER_ID": "u",
-            "PSI_MEMORY_AGENT_ID": "dolphin",
-            "PSI_MEMORY_SESSION_ID": "session-1",
-        }
-    )
-    ses_proc = await anyio.open_process(ses_cmd, env=ses_env, cwd=str(ses_cwd))
-
-    try:
-        assert await _wait_for_socket(ai_socket)
-        assert await _wait_for_socket(channel_socket)
-        chunks = await read_sse(channel_socket, "hello")
-        text = "".join(chunk.get("choices", [{}])[0].get("delta", {}).get("content", "") for chunk in chunks)
-        assert "still answered" in text
-        assert seen
-    finally:
-        await _stop_process(ses_proc)
-        await _stop_process(ai_proc)
-        await memory_runner.cleanup()
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 4: Update README run instructions**
+
+Add to `/public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd/integrations/dolphin-fusion-memory/README.md`:
+````markdown
+## Saved-History Watcher
+
+This integration does not patch Dolphin-Agent source code. Automatic persistence
+is provided by an external watcher that reads Dolphin's saved history file:
+
+```text
+<workspace>/histories/<session-id>.jsonl
+```
+
+Start Dolphin with a stable session id:
+
+```bash
+export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
+export PSI_MEMORY_SESSION_ID=dolphin-demo
+
+uv run psi-agent session \
+  --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
+  --session-id dolphin-demo \
+  --channel-socket ./channel.sock \
+  --ai-socket ./ai.sock
+```
+
+Start the watcher in a second shell:
+
+```bash
+cd /public/home/wwb/memory
+fusion-memory watch-dolphin-history \
+  --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
+  --session-id dolphin-demo
+```
+
+The watcher syncs saved JSONL history only. It cannot see messages that Dolphin
+kept only in memory before an error or process exit.
+````
+
+- [ ] **Step 5: Run tests and docs smoke**
 
 Run:
 ```bash
-cd /public/home/wwb/Dolphin-Agent
-PATH=/public/home/wwb/Dolphin-Agent/.venv/bin:$PATH ./.venv/bin/python -m pytest tests/integration/test_fusion_memory_auto_persist.py -v
-```
-
-Expected: FAIL because the session does not yet attempt `/ingest-turn`.
-
-- [ ] **Step 3: Write the minimal implementation**
-
-`/public/home/wwb/Dolphin-Agent/src/psi_agent/session/agent.py`
-```python
-# No additional production files beyond Task 2 should be needed here.
-# The implementation work for this task is the integration wiring already added:
-# - SessionAgent.create() builds FusionMemoryClient from PSI_MEMORY_* env
-# - SessionAgent.run() flushes turn deltas on stop/error/unexpected-finish
-# - _flush_turn_memory() swallows memory errors and logs them
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run:
-```bash
-cd /public/home/wwb/Dolphin-Agent
-PATH=/public/home/wwb/Dolphin-Agent/.venv/bin:$PATH ./.venv/bin/python -m pytest tests/integration/test_fusion_memory_auto_persist.py -v
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest integrations/dolphin-fusion-memory/tests/test_tools.py -k "history_watcher" -v
+python -m pytest tests/test_dolphin_history_watcher.py -v
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit locally**
 
 ```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+git add \
+  integrations/dolphin-fusion-memory/workspace/systems/system.py \
+  integrations/dolphin-fusion-memory/tests/test_tools.py \
+  integrations/dolphin-fusion-memory/README.md \
+  tests/test_dolphin_history_watcher.py
+git commit -m "docs(memory): document Dolphin history watcher integration"
+```
+
+### Task 5: Verification and Dolphin PR cleanup
+
+**Files:**
+- No production file changes.
+
+**Interfaces:**
+- Consumes:
+  - All tasks above.
+- Produces:
+  - Verification evidence.
+  - Clear decision that Dolphin Fusion Memory PR is no longer needed.
+
+- [ ] **Step 1: Verify Dolphin source is untouched by this implementation**
+
+Run:
+```bash
 cd /public/home/wwb/Dolphin-Agent
-git add tests/integration/test_fusion_memory_auto_persist.py
-git commit -m "test(session): cover Fusion Memory auto persistence"
+git diff -- src/psi_agent/session/agent.py src/psi_agent/session/__init__.py
+```
+
+Expected: no diff for the watcher-only implementation branch. If an old Fusion Memory PR branch still contains memory hook changes, close or abandon that PR instead of merging it.
+
+- [ ] **Step 2: Run memory watcher tests**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest tests/test_dolphin_history_watcher.py integrations/dolphin-fusion-memory/tests/test_tools.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 3: Run existing memory integration tests**
+
+Run:
+```bash
+cd /public/home/wwb/memory/.worktrees/memory-turn-ingestion-sdd
+python -m pytest integrations/dolphin-fusion-memory/tests -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Report close-PR action**
+
+Record in the handoff or PR comment:
+
+```text
+Dolphin Fusion Memory core hook PR is no longer needed. The accepted design uses a memory-side external history watcher that reads Dolphin's existing workspace/histories/{session_id}.jsonl and submits saved history to Fusion Memory. No Dolphin src changes are required.
 ```

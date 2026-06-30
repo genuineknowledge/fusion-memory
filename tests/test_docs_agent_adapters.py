@@ -20,6 +20,9 @@ class AgentAdapterDocsTests(unittest.TestCase):
         ]
         text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
         self.assertIn("fusion-memory install-agent --target all", text)
+        self.assertIn("fusion-memory install-agent --target dolphin", text)
+        self.assertIn("sync-dolphin-history", text)
+        self.assertIn("Dolphin recovery", text)
         self.assertIn("fusion-memory doctor", text)
         self.assertIn("OpenClaw recovery", text)
         self.assertIn("Hermes recovery", text)
@@ -35,6 +38,20 @@ class AgentAdapterDocsTests(unittest.TestCase):
         self.assertNotIn("HTTP 500", text)
         self.assertNotIn("psql:", text)
         self.assertNotIn("psi_memories", text)
+
+    def test_fusion_memory_setup_skill_documents_update_install_and_passive_persistence(self) -> None:
+        skill = ROOT / "integrations" / "dolphin-fusion-memory" / "workspace" / "skills" / "fusion-memory-setup" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+
+        self.assertIn("default tracks fusion-memory main", text)
+        self.assertIn("check before installing or upgrading", text)
+        self.assertIn("estimate", text)
+        self.assertIn("10-20 minutes", text)
+        self.assertIn("passive persistence is on by default", text)
+        self.assertIn("automatic turn sync", text)
+        self.assertIn("fusion-memory --db fusion-memory.sqlite3 sync-dolphin-history", text)
+        self.assertIn("memory_add is for explicit durable facts", text)
+        self.assertNotIn("LLM extractor", text)
 
 
 if __name__ == "__main__":

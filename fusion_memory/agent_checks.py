@@ -3,12 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fusion_memory.agent_installer import OPENCLAW_PLUGIN, VALID_TARGETS, _action_for
+from fusion_memory.agent_installer import DOLPHIN_SKILL, DOLPHIN_WORKSPACE, OPENCLAW_PLUGIN, VALID_TARGETS, _action_for
 
 
 def check_agent(target: str, *, home: str | Path | None = None) -> dict[str, Any]:
     if target not in VALID_TARGETS:
-        return {"ok": False, "message": "Unknown Agent target. Choose one of: openclaw, hermes, fusion-agent."}
+        return {"ok": False, "message": "Unknown Agent target. Choose one of: dolphin, openclaw, hermes, fusion-agent."}
+    if target == "dolphin":
+        ok = (DOLPHIN_WORKSPACE / "tools" / "memory_add.py").exists() and DOLPHIN_SKILL.exists()
+        return {
+            "target": target,
+            "ok": ok,
+            "workspace": str(DOLPHIN_WORKSPACE),
+            "skill": str(DOLPHIN_SKILL),
+            "message": (
+                "Dolphin Fusion Memory workspace is present. Run sync-dolphin-history beside the Dolphin session for passive persistence."
+                if ok
+                else "Dolphin Fusion Memory workspace is incomplete. Run fusion-memory install-agent --target dolphin."
+            ),
+        }
     if target == "openclaw":
         ok = (OPENCLAW_PLUGIN / "openclaw.plugin.json").exists()
         return {

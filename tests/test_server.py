@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import time
 import threading
 import unittest
 from urllib import error, request
 
 from fusion_memory import MemoryService
+from fusion_memory.core.config import MemoryConfig
+from fusion_memory.core.models import Scope
 from fusion_memory.product import runtime_status_payload
 from fusion_memory.server import serve
 
@@ -155,7 +159,78 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
 
-    def test_post_errors_are_sanitized_for_beginner_clients(self) -> None:
+    def test_server_processes_refresh_session_summary_background_tasks(self) -> None:
+        ready = threading.Event()
+        holder = {}
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = f"{temp_dir}/memory.sqlite3"
+
+            def run_server() -> None:
+                service = MemoryService(
+                    db_path=db_path,
+                    config=MemoryConfig(
+                        session_summary_min_spans=3,
+                        min_window_spans=3,
+                        session_window_size=3,
+                    ),
+                )
+                server = serve(service, host="127.0.0.1", port=0, background_task_interval_seconds=0.01)
+                holder["server"] = server
+                ready.set()
+                try:
+                    server.serve_forever(poll_interval=0.01)
+                finally:
+                    server.server_close()
+                    service.close()
+
+            thread = threading.Thread(target=run_server, daemon=True)
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5))
+            server = holder["server"]
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+                for index in range(6):
+                    add = _post_or_get(
+                        f"{base_url}/add",
+                        {
+                            "input": {"role": "user", "content": f"I completed memory setup step {index}."},
+                            "scope": scope.__dict__,
+                        },
+                    )
+                    self.assertTrue(add["span_ids"])
+
+                deadline = time.monotonic() + 5
+                succeeded = []
+                summaries = []
+                while time.monotonic() < deadline:
+                    inspector = MemoryService(db_path=db_path)
+                    try:
+                        succeeded = inspector.store.list_background_tasks(scope, status="succeeded", include_session=True)
+                        summaries = inspector.get_session_summaries(scope)
+                    finally:
+                        inspector.close()
+                    if succeeded and summaries:
+                        break
+                    time.sleep(0.05)
+
+                self.assertGreaterEqual(len(succeeded), 1)
+                self.assertGreaterEqual(len(summaries), 1)
+                summary_ids = {summary.span_id for summary in summaries}
+                self.assertTrue(
+                    any(
+                        task["task_type"] == "refresh_session_summary"
+                        and task["attempts"] == 1
+                        and task["payload"]["result"]["summary_span_id"] in summary_ids
+                        for task in succeeded
+                    )
+                )
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def test_post_errors_report_actionable_safe_cause_for_beginner_clients(self) -> None:
         ready = threading.Event()
         holder = {}
 
@@ -189,10 +264,10 @@ class ServerTests(unittest.TestCase):
             except error.HTTPError as exc:
                 response = exc.fp.read().decode("utf-8")
                 payload = json.loads(response)
-            self.assertEqual(payload["error"], "request_failed")
-            self.assertIn("fusion-memory doctor", payload["message"])
+            self.assertEqual(payload["error"], "bad_request")
+            self.assertEqual(payload["cause"], "missing_scope")
+            self.assertIn("scope", payload["message"])
             self.assertNotIn("ValueError", json.dumps(payload))
-            self.assertNotIn("scope is required", json.dumps(payload))
         finally:
             server.shutdown()
             thread.join(timeout=2)

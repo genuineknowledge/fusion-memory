@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-当前 Fusion Memory 更偏向显式 `add()` 驱动：调用方主动挑选一段内容写入 memory。这个模型适合 tool 显式写入，但不适合 Dolphin 这类已经维护完整 session history 的 agent。
+当前 Fusion Memory 更偏向显式 `add()` 驱动：调用方主动挑选一段内容写入 memory。这个模型适合 tool 显式写入，但不适合 Dolphin 这类已经维护 session history、或通过外部 watcher 同步已落盘 history 的 agent。
 
 当前问题有两类：
 
@@ -22,7 +22,7 @@
 
 ### 2.1 写入目标
 
-- 支持调用方按“每轮一次 flush”提交本轮新增 message 列表。
+- 支持调用方按“每轮一次 flush”或“saved-history batch 一次 flush”提交新增 message 列表。
 - core 内部保留 `user / assistant / tool` 的原始顺序，不要求适配层先做归并或过滤。
 - assistant / tool 的重要性降低、噪声过滤、状态变更识别都下沉到 memory core。
 - 显式 `memory_add` 继续保留，不与 turn ingestion 互斥。
@@ -44,9 +44,9 @@
 
 ### 4.1 Turn ingestion 输入单位
 
-采用调用方传入“本轮新增 message 列表”的方案。
+采用调用方传入“本轮新增 message 列表”的方案。对 Dolphin watcher 降级适配来说，这个列表来自已落盘 history JSONL 的 batch，而不一定来自 Dolphin 内部强 turn boundary。
 
-- 每轮只 flush 一次。
+- 每个逻辑 batch 只 flush 一次；内部 hook 场景通常是一轮一个 batch，history watcher 场景则是一次 saved-history batch。
 - 一次 flush 内仍拆成多个 raw spans。
 - 顺序严格保留，至少包含：
   - `turn_index`
@@ -56,6 +56,14 @@
   - `message_time`（若调用方提供）
 
 调用方不需要先做 message 合并、importance 过滤或 assistant/tool 折叠。
+
+如果调用方是文件 watcher，必须提供稳定 `turn_id`，例如：
+
+```text
+dolphin:<session-id>:lines:<start-line>-<end-line>:<batch-hash>
+```
+
+core 不依赖这个格式解析业务语义，但会保留它用于去重、排序、trace 和 event ordering。
 
 ### 4.2 Session 与长期视图
 
@@ -101,6 +109,8 @@ tool result 的高价值例外：
 - “结束”既包括正常完成，也包括以错误结束
 - 不因为 assistant 缺失就丢掉本轮 user message
 
+对只读取 history 文件的 Dolphin watcher，core 接受 `metadata["ended_with_error"] = "unknown"`。是否精确知道错误结束属于 adapter 能力，不属于 core 必填项。
+
 ## 5. Core 接口设计
 
 新增一个 core 级入口，命名建议为 `ingest_turn(...)`。
@@ -124,7 +134,9 @@ def ingest_turn(
 语义：
 
 - `messages` 是本轮新增 message 列表，不是完整 history。
+- `messages` 也可以是外部 watcher 从已保存 history 中切出的 batch，但必须保持原始 message 顺序。
 - `messages` 中至少支持 `role/content`，可选 `tool_name/tool_call_id/name/metadata`。
+- `turn_id` 如果由调用方提供，core 必须原样用于 raw span `turn_id` 和 trace `turn_ingestion.turn_id`。
 - core 负责把 message 拆成 raw spans，并写入统一的 ingestion pipeline。
 - `AddResult` 继续沿用已有结构，必要时补充 `ingested_turn_span_ids` 一类字段。
 
@@ -168,6 +180,18 @@ core 根据 role 和内容特征生成初始 hint：
 - `ingest_turn()`：调用方声明“这是本轮新增原始 history，请 core 自己判断价值”
 
 二者在底层可复用同一写入管线，但必须保留不同的 `ingestion_kind`，以便后续检索和调试区分来源。
+
+### 6.4 Watcher 幂等边界
+
+`ingest_turn()` 的第一阶段不要求实现全局强幂等，因为显式 add 和已有 store 没有统一事务级幂等键。Dolphin history watcher 必须先用本地 checkpoint 避免重复提交。
+
+core 需要做到：
+
+- 保留调用方提供的稳定 `turn_id`。
+- 将 `metadata["source"]`、`metadata["batch_hash"]`、`metadata["history_path"]`、`metadata["line_start"]`、`metadata["line_end"]` 写入 spans/trace。
+- 检索和 event ordering 使用 `turn_id + message_index_in_turn` 作为顺序线索。
+
+后续如果要加强幂等，可在 store 层增加 `(scope, ingestion_kind, turn_id, message_index_in_turn, content_hash)` 唯一约束或软去重逻辑；这不进入本阶段。
 
 ## 7. 检索排序模型
 
@@ -252,17 +276,18 @@ core 根据 role 和内容特征生成初始 hint：
 
 ## 10. 对 Dolphin 适配层的契约
 
-core 对 Dolphin 的输入契约非常薄：
+core 对 Dolphin-compatible adapter 的输入契约非常薄：
 
-- Dolphin 在 turn 结束时提供本轮新增 messages
-- 不要求 Dolphin 过滤 assistant/tool 噪声
-- 不要求 Dolphin 预先拆 spans
-- Dolphin 只需要保证 messages 顺序和 scope 信息可靠
+- adapter 提供新增 messages，可以来自 Dolphin 内部 turn hook，也可以来自外部 history watcher 的 saved-history batch
+- 不要求 adapter 过滤 assistant/tool 噪声
+- 不要求 adapter 预先拆 spans
+- adapter 只需要保证 messages 顺序、scope 信息、以及 watcher 场景下的稳定 `turn_id`
 
-也就是说，Dolphin 侧只做：
+在当前 Dolphin watcher-only 方案中，Dolphin `src` 不做任何 memory 改动。memory 侧 watcher 只做：
 
-- turn 边界检测
-- delta 提取
+- history JSONL 读取
+- saved-history batch 分组
+- checkpoint 去重
 - scope 传递
 
 memory core 才负责：

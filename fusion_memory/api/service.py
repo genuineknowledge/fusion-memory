@@ -971,6 +971,43 @@ class MemoryService:
         )
         return {"processed_count": len(processed), "status_counts": counts, "tasks": processed}
 
+    def process_server_background_tasks(self, *, limit: int = 5, task_types: set[str] | None = None) -> dict[str, Any]:
+        task_types = task_types or {"refresh_session_summary"}
+        scan_limit = max(limit * 10, limit + 10)
+        tasks = [
+            task
+            for task in self.store.next_background_tasks(limit=scan_limit, scope=None)
+            if task.get("task_type") in task_types
+        ][:limit]
+        processed: list[dict[str, Any]] = []
+        for task in tasks:
+            task_scope = Scope(**task["scope"])
+            self._authorize(
+                "memory.tasks.process",
+                task_scope,
+                {"limit": limit, "allow_cross_session": False, "include_session": bool(task_scope.session_id), "server_background": True},
+            )
+            self.store.update_background_task(task["task_id"], status="running")
+            try:
+                if task["task_type"] == "refresh_session_summary":
+                    updated = self._process_refresh_session_summary_task(task)
+                else:
+                    updated = self.store.update_background_task(
+                        task["task_id"],
+                        status="skipped",
+                        result={"reason": "server_task_type_disabled", "task_type": task["task_type"]},
+                    )
+                if updated:
+                    processed.append(updated)
+            except Exception as exc:
+                failed = self.store.update_background_task(task["task_id"], status="failed", error=str(exc))
+                if failed:
+                    processed.append(failed)
+        counts: dict[str, int] = {}
+        for task in processed:
+            counts[task["status"]] = counts.get(task["status"], 0) + 1
+        return {"processed_count": len(processed), "status_counts": counts, "tasks": processed}
+
     def encoding_report(self, scope: Scope, labels: dict[str, bool] | None = None) -> dict[str, Any]:
         scope.validate_for_read()
         self._authorize("memory.report.encoding", scope, {"has_labels": bool(labels)})

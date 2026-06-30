@@ -21,6 +21,14 @@ EVENT_RE = re.compile(
     r")\b",
     re.I,
 )
+ZH_PREFERENCE_RE = re.compile(
+    r"(?:我|我们|用户)?(?:现在|目前|以后|默认)?(?:更?喜欢|偏好|倾向于|想用|要用|希望用|打算用|准备用|采用|使用)\s*(?:用|使用)?\s*(.+?)(?:[。！？.!?]|$)"
+)
+ZH_SWITCH_RE = re.compile(
+    r"(?:我|我们)?(?:已经|现在|决定|打算|准备)?\s*(?:把\s*)?(.{1,80}?)\s*从\s*(.+?)\s*(?:切换|迁移|换|改|转)(?:到|为|成)\s*(.+?)(?:[。！？.!?]|$)"
+)
+ZH_INSTRUCTION_RE = re.compile(r"(?:以后|记住|请记住|默认|总是|不要|别|请|务必|必须)")
+ZH_EVENT_RE = re.compile(r"(?:测试|切换|迁移|决定|部署|创建|修复|更改|开始|完成|实现|配置|调试|上线|讨论|评审|接入|处理)")
 
 
 class RuleBasedExtractor:
@@ -114,9 +122,52 @@ class RuleBasedExtractor:
                     },
                 )
             )
+        zh_switch = ZH_SWITCH_RE.search(text)
+        if zh_switch:
+            target = _clean_zh_object(zh_switch.group(3))
+            subject = _clean_zh_object(zh_switch.group(1))
+            out.append(
+                self._candidate(
+                    "fact",
+                    f"User switched {subject} to {target}.",
+                    span,
+                    {
+                        "subject": "user",
+                        "predicate": "switched_to",
+                        "object": target,
+                        "category": "project_state",
+                        "polarity": _fact_polarity(text),
+                        "value_mentions": _value_mentions(text),
+                        "topic_terms": _topic_terms(text),
+                        "confidence": 0.86,
+                        "salience": 0.82,
+                    },
+                )
+            )
         pref = PREFERENCE_RE.search(text)
         if pref:
             obj = pref.group(1).strip()
+            out.append(
+                self._candidate(
+                    "fact",
+                    f"User prefers {obj}.",
+                    span,
+                    {
+                        "subject": "user",
+                        "predicate": "prefers",
+                        "object": obj,
+                        "category": "preference",
+                        "polarity": _fact_polarity(text),
+                        "value_mentions": _value_mentions(text),
+                        "topic_terms": _topic_terms(text),
+                        "confidence": 0.82,
+                        "salience": 0.78,
+                    },
+                )
+            )
+        zh_pref = ZH_PREFERENCE_RE.search(text)
+        if zh_pref and not zh_switch:
+            obj = _clean_zh_object(zh_pref.group(1))
             out.append(
                 self._candidate(
                     "fact",
@@ -156,8 +207,9 @@ class RuleBasedExtractor:
                     },
                 )
             )
-        if INSTRUCTION_RE.search(text) and not pref:
-            category = "instruction" if any(w in lower for w in ["always", "please", "do not", "don't", "以后", "默认"]) else "general_fact"
+        has_instruction = INSTRUCTION_RE.search(text) or ZH_INSTRUCTION_RE.search(text)
+        if has_instruction and not pref and not zh_pref:
+            category = "instruction" if any(w in lower for w in ["always", "please", "do not", "don't"]) or ZH_INSTRUCTION_RE.search(text) else "general_fact"
             out.append(
                 self._candidate(
                     "fact",
@@ -201,7 +253,7 @@ class RuleBasedExtractor:
     def _extract_event_candidates(self, span: EvidenceSpan, session_time: datetime) -> list[ExtractedCandidate]:
         generic_facets = extract_generic_event_facets(span.content) if span.speaker == "user" else []
         milestone_mentions = extract_milestone_mentions(span.content) if span.speaker == "user" else []
-        if not generic_facets and not milestone_mentions and not EVENT_RE.search(span.content):
+        if not generic_facets and not milestone_mentions and not EVENT_RE.search(span.content) and not ZH_EVENT_RE.search(span.content):
             return []
         normalized = self.temporal.normalize(span.content, session_time)
         participants = list(dict.fromkeys([*(extract_entities(span.content) or ["user"]), *_topic_terms(span.content)[:6]]))
@@ -314,6 +366,10 @@ class RuleBasedExtractor:
 def _event_type(text: str) -> str:
     if re.search(r"\b(?:switched|changed|moved)\b", text, re.I):
         return "state_change"
+    if re.search(r"(?:切换|迁移|改为|换成)", text):
+        return "state_change"
+    if re.search(r"(?:决定|选择|选定|敲定)", text):
+        return "decision"
     if re.search(r"\b(?:planned|discussed|mentioned|asked|brought\s+up|came\s+up)\b", text, re.I):
         return "milestone"
     return "user_action"
@@ -363,21 +419,39 @@ def classify_event_facets(text: str) -> list[str]:
     out: list[str] = []
     if re.search(r"\b(?:switched|moved|changed|now prefer|now preferred|instead of|rather than)\b", lower):
         out.append("preference_change")
+    if re.search(r"(?:切换|迁移|改用|改为|换成|转到|从.+到)", text):
+        out.append("preference_change")
     if re.search(r"\b(?:decided|chose|picked|settled on|went with|opted for)\b", lower):
+        out.append("decision")
+    if re.search(r"(?:决定|选择|选定|敲定|采用)", text):
         out.append("decision")
     if re.search(r"\b(?:worried|concerned|concern|stressed|anxious|trouble|issue|problem|error|blocked|struggling)\b", lower):
         out.append("concern")
+    if re.search(r"(?:担心|顾虑|问题|错误|报错|失败|卡住|阻塞|风险)", text) and not re.search(r"(?:完成|修复|解决|处理)", text):
+        out.append("concern")
     if re.search(r"\b(?:always|never|must|need to|have to|required|requirement|constraint|deadline|budget|limit|only|format)\b", lower):
+        out.append("constraint")
+    if re.search(r"(?:总是|永远|不要|不能|必须|需要|只能|默认|以后|要求|限制|截止|预算|格式)", text):
         out.append("constraint")
     if re.search(r"\b(?:compare|compared|comparing|comparison|versus|vs\.?|between|which (?:one|option)|choose between|decide between)\b", lower):
         out.append("request_for_comparison")
+    if re.search(r"(?:比较|对比|相比|哪个|哪种|二选一|选择.+还是)", text):
+        out.append("request_for_comparison")
     if re.search(r"\b(?:how many|total|unique|count|number of|list(?:ed)?(?: of)?|ways to|different (?:ways|items|options|topics|calculations|movies|books|series|genres)|(?:two|three|four|five|six|seven|eight|nine|\d+)\s+(?:ways|items|options|topics|calculations|movies|books|series|genres))\b", lower):
+        out.append("count_list_mention")
+    if re.search(r"(?:多少|几个|总数|数量|列出|列表|清单|不同.+(?:项|种|个))", text):
         out.append("count_list_mention")
     if re.search(r"\b(?:plan|planned|planning|schedule|step|sprint|phase|timeline|roadmap)\b", lower):
         out.append("plan_step")
+    if re.search(r"(?:计划|规划|步骤|阶段|排期|路线图|时间线)", text):
+        out.append("plan_step")
     if re.search(r"\b(?:started|finished|completed|implemented|configured|tested|deployed|launched|created|added|fixed|reviewed|worked on|working on|trying to)\b", lower):
         out.append("activity")
+    if re.search(r"(?:开始|完成|实现|配置|测试|部署|上线|创建|添加|修复|评审|处理|接入|推进|调试)", text):
+        out.append("activity")
     if re.search(r"\b(?:brought up|mentioned|discussed|asked about|asked|want to|i want|i need|i'm trying|i am trying)\b", lower):
+        out.append("user_introduced_aspect")
+    if re.search(r"(?:提到|讨论|问到|询问|想要|想用|需要|正在|尝试)", text):
         out.append("user_introduced_aspect")
     return out
 
@@ -625,14 +699,51 @@ FACT_TOPIC_STOPWORDS = {
     "want",
     "with",
     "you",
+    "以及",
+    "以后",
+    "使用",
+    "修改",
+    "决定",
+    "可以",
+    "因为",
+    "如果",
+    "我们",
+    "我的",
+    "现在",
+    "用户",
+    "这个",
 }
+
+ZH_TOPIC_TERMS = (
+    "中文",
+    "回复",
+    "报表",
+    "检索",
+    "部署",
+    "端口",
+    "配置",
+    "问题",
+    "数据库",
+    "记忆",
+    "偏好",
+    "切换",
+    "迁移",
+    "决定",
+    "完成",
+    "修复",
+    "默认",
+)
 
 
 def _fact_polarity(text: str) -> str:
     lower = text.lower()
     if re.search(r"\b(?:never|not yet|haven['’]?t|have not|don['’]?t|do not|without)\b", lower):
         return "negative"
+    if re.search(r"(?:不要|别|不能|不再|未|没有)", text):
+        return "negative"
     if re.search(r"\b(?:used|integrated|worked|read|listened|met|downloaded|placed|attended|completed|tested|made|drafted|managed|started)\b", lower):
+        return "positive"
+    if re.search(r"(?:用了|使用|集成|完成|测试|部署|修复|开始|实现)", text):
         return "positive"
     return "unknown"
 
@@ -659,4 +770,13 @@ def _topic_terms(text: str) -> list[str]:
         if len(token) < 4 or token in FACT_TOPIC_STOPWORDS:
             continue
         terms.append(token[:-1] if token.endswith("s") and len(token) > 5 else token)
+    for term in ZH_TOPIC_TERMS:
+        if term in text and term not in FACT_TOPIC_STOPWORDS:
+            terms.append(term)
     return list(dict.fromkeys(terms[:12]))
+
+
+def _clean_zh_object(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip(" ，,。.!?！？")
+    cleaned = re.sub(r"^(?:我|我们|用户)?(?:现在|目前|以后|默认)?(?:更?喜欢|偏好|倾向于|想用|要用|希望用|打算用|准备用|采用|使用|用)\s*", "", cleaned)
+    return cleaned.strip(" ，,。.!?！？")

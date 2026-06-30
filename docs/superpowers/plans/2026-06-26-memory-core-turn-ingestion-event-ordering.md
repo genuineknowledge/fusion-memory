@@ -4,14 +4,16 @@
 
 **Goal:** 为 Fusion Memory core 增加按 turn ingestion 的写入入口，并把 `event_ordering` 主路径收敛成单次 selection、单次 topic-scope gating、单次 required-preservation restore。
 
-**Architecture:** 在 `MemoryService` 上新增 `ingest_turn()`，把调用方提交的“本轮新增 messages”转成现有 `normalize_input()` 可消费的 message list，并补齐 `turn_id / turn_index / message_index_in_turn / message_role / importance_hint / state_change_hint` 等 metadata。随后复用既有 `add()` 写入管线，并在写入 trace 上追加 `turn_ingestion` 结构化调试块。检索侧只收 `event_ordering` 与紧邻保护逻辑：把现有多轮 preserve/filter/rescue 交错压成一条主路径，并把最终覆盖信息统一写入 `coverage["event_ordering_selection"]`。
+**Architecture:** 在 `MemoryService` 上新增 `ingest_turn()`，把调用方提交的“本轮新增 messages”或 watcher 的 saved-history batch 转成现有 `normalize_input()` 可消费的 message list，并补齐 `turn_id / turn_index / message_index_in_turn / message_role / importance_hint / state_change_hint` 等 metadata。随后复用既有 `add()` 写入管线，并在写入 trace 上追加 `turn_ingestion` 结构化调试块。检索侧只收 `event_ordering` 与紧邻保护逻辑：把现有多轮 preserve/filter/rescue 交错压成一条主路径，并把最终覆盖信息统一写入 `coverage["event_ordering_selection"]`。
 
 **Tech Stack:** Python 3.12+, `unittest`, `pytest`, `http.server`, Fusion Memory `MemoryService`, SQLite/Postgres store trace APIs.
 
 ## Global Constraints
 
-- 支持调用方按“每轮一次 flush”提交本轮新增 message 列表。
+- 支持调用方按“每轮一次 flush”或“saved-history batch 一次 flush”提交新增 message 列表。
 - core 内部保留 `user / assistant / tool` 的原始顺序，不要求适配层先做归并或过滤。
+- core 必须原样保留调用方提供的稳定 `turn_id`，供 watcher 去重、trace 和 event ordering 使用。
+- core 接受 `metadata["ended_with_error"] = "unknown"`，因为 history watcher 无法可靠知道 Dolphin 内部错误结束状态。
 - assistant / tool 的重要性降低、噪声过滤、状态变更识别都下沉到 memory core。
 - 显式 `memory_add` 继续保留，不与 turn ingestion 互斥。
 - 默认允许跨 session 汇总到 `workspace_id + user_id + agent_id` 长期视图。
@@ -52,6 +54,7 @@
 **Interfaces:**
 - Produces:
   - `MemoryService.ingest_turn(messages: list[dict[str, Any]], scope: Scope, *, turn_id: str | None = None, turn_index: int | None = None, session_time: datetime | None = None, metadata: dict[str, Any] | None = None) -> AddResult`
+  - Raw span metadata preserving adapter-provided `source`, `batch_hash`, `history_path`, `line_start`, and `line_end` when present.
 - Consumes:
   - existing `MemoryService.add(input: Any, scope: Scope, session_time: datetime | None = None, metadata: dict[str, Any] | None = None) -> AddResult`
   - `normalize_input()` contract: list/dict entries use `role`, `content`, `turn_id`, `timestamp`, `span_type`, `metadata`
@@ -115,6 +118,36 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertEqual(spans[0].speaker, "user")
         self.assertEqual(spans[0].content, "delete the stale branch")
         self.assertTrue(spans[0].metadata["ended_with_error"])
+
+    def test_ingest_turn_preserves_watcher_turn_id_and_source_metadata(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="ws", user_id="u", agent_id="a", session_id="session-1")
+
+        memory.ingest_turn(
+            [{"role": "user", "content": "remember blue"}],
+            scope,
+            turn_id="dolphin:session-1:lines:1-1:abcd1234",
+            metadata={
+                "source": "dolphin-history-watcher",
+                "history_path": "/workspace/histories/session-1.jsonl",
+                "line_start": 1,
+                "line_end": 1,
+                "batch_hash": "abcd1234",
+                "ended_with_error": "unknown",
+            },
+            session_time=ts("2026-06-26T09:06:00+00:00"),
+        )
+
+        spans = [
+            span
+            for span in memory.store.list_spans(scope, include_session=True)
+            if span.turn_id == "dolphin:session-1:lines:1-1:abcd1234"
+        ]
+
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0].metadata["source"], "dolphin-history-watcher")
+        self.assertEqual(spans[0].metadata["batch_hash"], "abcd1234")
+        self.assertEqual(spans[0].metadata["ended_with_error"], "unknown")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -143,6 +176,7 @@ def ingest_turn(
 ) -> AddResult:
     scope.validate_for_add()
     session_time = session_time or datetime.now(timezone.utc)
+    resolved_turn_id = turn_id or f"turn_{turn_index or 0}"
     base_metadata = dict(metadata or {})
     payload_messages: list[dict[str, Any]] = []
 
@@ -152,7 +186,7 @@ def ingest_turn(
             {
                 "role": role,
                 "content": str(message.get("content") or ""),
-                "turn_id": turn_id or f"turn_{turn_index or 0}",
+                "turn_id": resolved_turn_id,
                 "timestamp": message.get("timestamp") or session_time.isoformat(),
                 "span_type": "tool_result" if role == "tool" else "turn",
                 "metadata": {
@@ -323,7 +357,7 @@ for index, message in enumerate(messages):
         {
             "role": role,
             "content": str(message.get("content") or ""),
-            "turn_id": turn_id or f"turn_{turn_index or 0}",
+            "turn_id": resolved_turn_id,
             "timestamp": message.get("timestamp") or session_time.isoformat(),
             "span_type": "tool_result" if role == "tool" else "turn",
             "metadata": {
@@ -346,7 +380,7 @@ for index, message in enumerate(messages):
 result = self.add({"messages": payload_messages}, scope, session_time=session_time)
 trace = self.store.get_trace(result.trace_id, scope, include_session=True) or {}
 trace["turn_ingestion"] = {
-    "turn_id": turn_id,
+    "turn_id": resolved_turn_id,
     "turn_index": turn_index,
     "raw_message_count": len(messages),
     "role_breakdown": role_breakdown,

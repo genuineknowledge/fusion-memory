@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import threading
+import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,9 +20,37 @@ from fusion_memory.product import runtime_status_payload
 
 
 class MemoryServerState:
-    def __init__(self, service: MemoryService) -> None:
+    def __init__(
+        self,
+        service: MemoryService,
+        *,
+        background_task_interval_seconds: float = 1.0,
+        background_task_batch_size: int = 5,
+    ) -> None:
         self.service = service
         self.lock = threading.RLock()
+        self.background_task_interval_seconds = max(0.0, background_task_interval_seconds)
+        self.background_task_batch_size = max(1, background_task_batch_size)
+        self.next_background_task_run = time.monotonic() + self.background_task_interval_seconds
+
+
+class FusionMemoryHTTPServer(HTTPServer):
+    def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler], state: MemoryServerState) -> None:
+        super().__init__(server_address, handler_class)
+        self.state = state
+        self.storage_backend = state.service.storage_backend
+
+    def service_actions(self) -> None:
+        super().service_actions()
+        interval = self.state.background_task_interval_seconds
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        if now < self.state.next_background_task_run:
+            return
+        self.state.next_background_task_run = now + interval
+        with self.state.lock:
+            self.state.service.process_server_background_tasks(limit=self.state.background_task_batch_size)
 
 
 def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
@@ -75,14 +105,9 @@ def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
                         self._write_json(404, {"error": "not_found"})
                         return
                 self._write_json(200, _jsonable(result))
-            except Exception:
-                self._write_json(
-                    400,
-                    {
-                        "error": "request_failed",
-                        "message": "Fusion Memory could not complete that request. Run fusion-memory doctor.",
-                    },
-                )
+            except Exception as exc:
+                status, payload = _error_response(exc)
+                self._write_json(status, payload)
 
         def log_message(self, format: str, *args: Any) -> None:
             if os.getenv("FUSION_MEMORY_SERVER_LOG_REQUESTS", "").lower() in {"1", "true", "yes"}:
@@ -114,10 +139,15 @@ def serve(
     *,
     host: str = "127.0.0.1",
     port: int = 8700,
+    background_task_interval_seconds: float = 1.0,
+    background_task_batch_size: int = 5,
 ) -> HTTPServer:
-    state = MemoryServerState(service)
-    server = HTTPServer((host, port), make_handler(state))
-    server.storage_backend = service.storage_backend  # type: ignore[attr-defined]
+    state = MemoryServerState(
+        service,
+        background_task_interval_seconds=background_task_interval_seconds,
+        background_task_batch_size=background_task_batch_size,
+    )
+    server = FusionMemoryHTTPServer((host, port), make_handler(state), state)
     return server
 
 
@@ -172,6 +202,65 @@ def _optional_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str):
         raise ValueError("session_time must be an ISO datetime string")
     return datetime.fromisoformat(value)
+
+
+def _error_response(exc: Exception) -> tuple[int, dict[str, str]]:
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            400,
+            {
+                "error": "bad_request",
+                "cause": "invalid_json",
+                "message": "Request body must be valid JSON.",
+            },
+        )
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        if message == "scope is required":
+            return (
+                400,
+                {
+                    "error": "bad_request",
+                    "cause": "missing_scope",
+                    "message": "Request must include a scope with at least one of workspace_id, user_id, agent_id, or run_id.",
+                },
+            )
+        if message.endswith(" is required"):
+            field = message.removesuffix(" is required")
+            return (
+                400,
+                {
+                    "error": "bad_request",
+                    "cause": f"missing_{field}",
+                    "message": f"Request must include {field}.",
+                },
+            )
+        if message in {
+            "request body must be a JSON object",
+            "session_time must be an ISO datetime string",
+            "add requires at least one of workspace_id, user_id, agent_id, or run_id",
+            "read requires at least one of workspace_id, user_id, agent_id, or run_id",
+        }:
+            return (
+                400,
+                {
+                    "error": "bad_request",
+                    "cause": _safe_cause(message),
+                    "message": message,
+                },
+            )
+    return (
+        500,
+        {
+            "error": "request_failed",
+            "cause": "server_error",
+            "message": "Fusion Memory could not complete that request. Run fusion-memory doctor.",
+        },
+    )
+
+
+def _safe_cause(message: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", message.lower()).strip("_")[:80]
 
 
 def _jsonable(value: Any) -> Any:
