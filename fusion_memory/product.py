@@ -30,6 +30,9 @@ DEFAULT_QWEN_EMBEDDING_MODEL = str(
 DEFAULT_QWEN_RERANKER_MODEL = str(
     Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_RERANKER_MODEL_NAME
 )
+MODEL_SAFETENSORS_MIN_BYTES = 100 * 1024 * 1024
+TOKENIZER_JSON_MIN_BYTES = 100 * 1024
+LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 _STARTED_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 
 
@@ -101,29 +104,52 @@ def install_readiness(
     hardware failures fall back to compromised local mode.
     """
 
-    embedding_ready = _repository_model_ready(default_local_embedding_model_path())
-    reranker_ready = _repository_model_ready(default_local_reranker_model_path())
+    embedding_status = _repository_model_status(
+        default_local_embedding_model_path(),
+        label="repository-local Qwen3 embedding model",
+    )
+    reranker_status = _repository_model_status(
+        default_local_reranker_model_path(),
+        label="repository-local Qwen3 reranker model",
+    )
+    embedding_ready = bool(embedding_status["ok"])
+    reranker_ready = bool(reranker_status["ok"])
     qwen_dependency_ready = _qwen_dependency_available()
     missing = []
     if not embedding_ready:
-        missing.append("repository-local Qwen3 embedding model")
+        missing.append(str(embedding_status["message"]))
     if not reranker_ready:
-        missing.append("repository-local Qwen3 reranker model")
+        missing.append(str(reranker_status["message"]))
     if not qwen_dependency_ready:
         missing.append("full Qwen runtime Python dependencies")
     if missing:
+        model_messages = " ".join(missing)
+        lfs_next_step = (
+            " Install Git LFS if needed, run git lfs pull in the Fusion Memory checkout, then rerun fusion-memory install-check --force."
+            if "Git LFS pointer" in model_messages
+            else ""
+        )
         return {
             "ok": False,
             "mode": "not_ready",
             "compromised": False,
             "missing": missing,
+            "model_readiness": {
+                "embedding": embedding_status,
+                "reranker": reranker_status,
+            },
             "message": (
                 "Fusion Memory install is not ready because "
                 + ", ".join(missing)
                 + " are missing. Install the full runtime dependencies with "
                 'pip install -e ".[postgres,qwen]" and ensure the bundled model files are present.'
+                + lfs_next_step
             ),
-            "next_step": 'Run pip install -e ".[postgres,qwen]", then rerun fusion-memory install-check --force.',
+            "next_step": (
+                "Install Git LFS and run git lfs pull, then rerun fusion-memory install-check --force."
+                if "Git LFS pointer" in model_messages
+                else 'Run pip install -e ".[postgres,qwen]", then rerun fusion-memory install-check --force.'
+            ),
         }
 
     smoke = _qwen_runtime_smoke()
@@ -138,6 +164,9 @@ def install_readiness(
         )
         return result
 
+    hardware_probe = _hardware_runtime_probe()
+    smoke = dict(smoke)
+    smoke["hardware_probe"] = hardware_probe
     result = init_home(
         home, force=force, settings=compromised_local_settings(product_paths(home))
     )
@@ -146,6 +175,7 @@ def install_readiness(
             "mode": "compromised",
             "compromised": True,
             "runtime_smoke": smoke,
+            "hardware_probe": hardware_probe,
             "message": (
                 "installed in compromised local mode because the current hardware or runtime environment "
                 "could not run the bundled Qwen embedding/reranker models: "
@@ -462,19 +492,11 @@ def start_service(
         "--storage-backend",
         str(config["storage_backend"]),
     ]
-    kwargs: dict[str, Any] = {
-        "stdout": log_handle,
-        "stderr": subprocess.STDOUT,
-        "stdin": subprocess.DEVNULL,
-        "cwd": project_root or str(paths.home),
-        "env": _service_env(config),
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        )  # type: ignore[attr-defined]
-    else:
-        kwargs["start_new_session"] = True
+    kwargs = _daemon_popen_kwargs(
+        log_handle,
+        cwd=project_root or str(paths.home),
+        env=_service_env(config),
+    )
     process = subprocess.Popen(cmd, **kwargs)
     paths.pid.write_text(str(process.pid), encoding="utf-8")
     _STARTED_PROCESSES[process.pid] = process
@@ -1157,13 +1179,14 @@ def _qwen_model_readiness_check(
         return _check(name, False, "Qwen model is not configured.")
     if _looks_like_path(model):
         path = Path(model).expanduser()
-        exists = _repository_model_ready(path)
+        status = _repository_model_status(path, label=f"{label} Qwen model")
+        exists = bool(status["ok"])
         return _check(
             name,
             exists and dependency_ok,
             "Repository-local Qwen model path is ready."
             if exists and dependency_ok
-            else "Repository-local Qwen model path or dependencies are not ready.",
+            else f"Repository-local Qwen model path or dependencies are not ready: {status['message']}",
         )
     return _check(
         name,
@@ -1221,14 +1244,164 @@ def _friendly_runtime_smoke_message(exc: BaseException) -> str:
     return text[:240] if text else exc.__class__.__name__
 
 
+def _hardware_runtime_probe() -> dict[str, Any]:
+    probe: dict[str, Any] = {
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "python": sys.version.split()[0],
+        },
+        "cpu": {"count": os.cpu_count()},
+        "memory": {},
+        "torch": {"available": False},
+    }
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        if isinstance(page_size, int) and isinstance(page_count, int):
+            probe["memory"]["total_bytes"] = page_size * page_count
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        cuda_available = bool(torch.cuda.is_available())
+        probe["torch"] = {
+            "available": True,
+            "version": str(getattr(torch, "__version__", "")),
+            "cuda_available": cuda_available,
+            "cuda_device_count": int(torch.cuda.device_count())
+            if cuda_available
+            else 0,
+            "mps_available": bool(
+                hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+            ),
+        }
+    except Exception as exc:
+        probe["torch"] = {"available": False, "error": exc.__class__.__name__}
+    return probe
+
+
 def _repository_model_ready(path: Path) -> bool:
+    return bool(_repository_model_status(path)["ok"])
+
+
+def _repository_model_status(
+    path: Path, *, label: str = "repository-local Qwen model"
+) -> dict[str, Any]:
     path = path.expanduser()
-    return (
-        path.is_dir()
-        and (path / "model.safetensors").is_file()
-        and (path / "config.json").is_file()
-        and (path / "tokenizer.json").is_file()
-    )
+    if not path.is_dir():
+        return {
+            "ok": False,
+            "path": str(path),
+            "message": f"{label} directory is missing",
+        }
+    checks = [
+        _model_file_status(
+            path / "model.safetensors",
+            min_bytes=MODEL_SAFETENSORS_MIN_BYTES,
+            parse_json=False,
+        ),
+        _model_file_status(path / "config.json", min_bytes=2, parse_json=True),
+        _model_file_status(
+            path / "tokenizer.json",
+            min_bytes=TOKENIZER_JSON_MIN_BYTES,
+            parse_json=False,
+        ),
+    ]
+    failed = [check for check in checks if not check["ok"]]
+    if failed:
+        details = "; ".join(str(check["message"]) for check in failed)
+        return {
+            "ok": False,
+            "path": str(path),
+            "files": checks,
+            "message": f"{label} is incomplete: {details}",
+        }
+    return {
+        "ok": True,
+        "path": str(path),
+        "files": checks,
+        "message": f"{label} is ready",
+    }
+
+
+def _model_file_status(
+    path: Path, *, min_bytes: int, parse_json: bool
+) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "ok": False,
+            "path": str(path),
+            "message": f"{path.name} is missing",
+        }
+    if _is_lfs_pointer(path):
+        return {
+            "ok": False,
+            "path": str(path),
+            "message": f"{path.name} is a Git LFS pointer, not the real model file",
+        }
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return {
+            "ok": False,
+            "path": str(path),
+            "message": f"{path.name} cannot be inspected: {_friendly_os_error(exc)}",
+        }
+    if size < min_bytes:
+        return {
+            "ok": False,
+            "path": str(path),
+            "size": size,
+            "message": f"{path.name} is too small ({size} bytes)",
+        }
+    if parse_json:
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {
+                "ok": False,
+                "path": str(path),
+                "size": size,
+                "message": f"{path.name} is not valid JSON: {exc.__class__.__name__}",
+            }
+    return {"ok": True, "path": str(path), "size": size, "message": "ready"}
+
+
+def _is_lfs_pointer(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(256)
+    except OSError:
+        return False
+    return head.startswith(LFS_POINTER_PREFIX)
+
+
+def _daemon_popen_kwargs(
+    log_handle: Any, *, cwd: str, env: dict[str, str]
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "stdout": log_handle,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,
+        "cwd": cwd,
+        "env": env,
+    }
+    if os.name == "nt":
+        flags = 0
+        for name in (
+            "CREATE_NEW_PROCESS_GROUP",
+            "DETACHED_PROCESS",
+            "CREATE_NO_WINDOW",
+        ):
+            flags |= int(getattr(subprocess, name, 0))
+        kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
 
 
 def _looks_like_path(value: str) -> bool:

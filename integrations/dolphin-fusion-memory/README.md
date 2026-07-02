@@ -61,12 +61,14 @@ The Fusion Memory repository includes `models/Qwen3-Embedding-0.6B` and
 other locations. It installs full runtime dependencies (`.[postgres,qwen]`),
 including Postgres adapter, local Qwen adapter, PyTorch, and Transformers. If
 model files are missing or dependency installation failed, install-check reports
-not ready and asks you to rerun `pip install -e ".[postgres,qwen]"`. Only when
-model files and dependencies are present but this hardware/runtime cannot load or
-run both bundled vector models does it fall back to a compromised local mode with
-built-in lightweight retrieval and print the API-key next step. Recommended API
-provider: Aliyun DashScope; set `DASHSCOPE_API_KEY` before configuring API-backed
-providers.
+not ready and asks you to rerun `pip install -e ".[postgres,qwen]"`. If the model
+directory contains Git LFS pointer files, install Git LFS, run `git lfs pull` in
+the Fusion Memory checkout, and rerun `fusion-memory install-check --force`.
+Only when model files and dependencies are present but this hardware/runtime
+cannot load or run both bundled vector models does it fall back to a compromised
+local mode with built-in lightweight retrieval and print the API-key next step.
+Recommended API provider: Aliyun DashScope; set `DASHSCOPE_API_KEY` before
+configuring API-backed providers.
 
 ## Run
 

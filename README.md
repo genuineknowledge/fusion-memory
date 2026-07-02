@@ -63,7 +63,9 @@ If port `8700` is already in use, `fusion-memory start --json` tries the next av
 但检索质量是 compromised 的。安装完成后会提示提供 API key；推荐阿里云
 DashScope，例如设置 `DASHSCOPE_API_KEY`，再通过向导或环境变量接入 API provider。
 如果模型文件缺失或依赖安装失败，安装检查会返回 not ready，并提示重新运行
-`pip install -e ".[postgres,qwen]"`。
+`pip install -e ".[postgres,qwen]"`。如果模型目录中只有 Git LFS pointer 文件，
+先安装 Git LFS 并在仓库中运行 `git lfs pull` 拉取真实权重，再重新运行
+`fusion-memory install-check --force`。
 
 `install.sh` / `install.ps1` 安装完成后会自动运行 `fusion-memory install-check`。
 如需手动配置数据库、embedding、reranker、extractor/router，可设置

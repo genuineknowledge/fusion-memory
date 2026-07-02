@@ -434,6 +434,62 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("Install the full runtime dependencies", result["message"])
         self.assertIn(".[postgres,qwen]", result["message"])
 
+    def test_install_readiness_rejects_git_lfs_pointer_model_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_lfs_pointer_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "not_ready")
+        self.assertFalse(result["compromised"])
+        self.assertIn("Git LFS pointer", result["message"])
+        self.assertIn("git lfs pull", result["next_step"])
+
+    def test_install_readiness_rejects_tiny_stub_model_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_stub_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "not_ready")
+        self.assertIn("too small", result["message"])
+
     def test_install_readiness_falls_back_to_compromised_when_model_smoke_fails(
         self,
     ) -> None:
@@ -478,6 +534,47 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("DASHSCOPE_API_KEY", result["message"])
         self.assertIn("Aliyun", result["message"])
         self.assertIn("compromised", render_human(result))
+
+    def test_install_readiness_compromised_result_includes_hardware_probe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            probe = {
+                "platform": {"system": "Windows"},
+                "torch": {"available": False},
+            }
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_runtime_smoke",
+                    return_value={"ok": False, "message": "runtime failed"},
+                ),
+                patch(
+                    "fusion_memory.product._hardware_runtime_probe",
+                    return_value=probe,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+
+        self.assertTrue(result["compromised"])
+        self.assertEqual(result["hardware_probe"], probe)
+        self.assertEqual(result["runtime_smoke"]["hardware_probe"], probe)
 
     def test_init_home_local_test_fallback_uses_dependency_free_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -822,6 +919,54 @@ class ProductCliTests(unittest.TestCase):
             self.assertIn("--port", popen.call_args.args[0])
             self.assertIn(str(busy_port + 1), popen.call_args.args[0])
 
+    def test_daemon_popen_kwargs_uses_unix_session_detach(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "service.log"
+            with (
+                log_path.open("ab") as handle,
+                patch("fusion_memory.product.os.name", "posix"),
+            ):
+                kwargs = product._daemon_popen_kwargs(
+                    handle, cwd=tmp, env={"A": "B"}
+                )
+
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["stdin"], product.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], product.subprocess.STDOUT)
+
+    def test_daemon_popen_kwargs_uses_windows_no_window_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "service.log"
+            with (
+                log_path.open("ab") as handle,
+                patch("fusion_memory.product.os.name", "nt"),
+                patch.object(
+                    product.subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0x00000200,
+                    create=True,
+                ),
+                patch.object(
+                    product.subprocess,
+                    "DETACHED_PROCESS",
+                    0x00000008,
+                    create=True,
+                ),
+                patch.object(
+                    product.subprocess,
+                    "CREATE_NO_WINDOW",
+                    0x08000000,
+                    create=True,
+                ),
+            ):
+                kwargs = product._daemon_popen_kwargs(
+                    handle, cwd=tmp, env={"A": "B"}
+                )
+
+        self.assertEqual(kwargs["creationflags"] & 0x08000000, 0x08000000)
+        self.assertEqual(kwargs["creationflags"] & 0x00000008, 0x00000008)
+        self.assertEqual(kwargs["creationflags"] & 0x00000200, 0x00000200)
+
     def test_install_scripts_install_full_runtime_dependencies(self) -> None:
         root = Path(product.__file__).resolve().parents[1]
 
@@ -841,8 +986,30 @@ class ProductCliTests(unittest.TestCase):
 
 def _write_ready_model_dir(path: Path) -> None:
     path.mkdir(parents=True)
+    with (path / "model.safetensors").open("wb") as handle:
+        handle.truncate(product.MODEL_SAFETENSORS_MIN_BYTES)
+    (path / "config.json").write_text("{}", encoding="utf-8")
+    with (path / "tokenizer.json").open("wb") as handle:
+        handle.truncate(product.TOKENIZER_JSON_MIN_BYTES)
+
+
+def _write_stub_model_dir(path: Path) -> None:
+    path.mkdir(parents=True)
     for filename in ("model.safetensors", "config.json", "tokenizer.json"):
         (path / filename).write_text("stub", encoding="utf-8")
+
+
+def _write_lfs_pointer_model_dir(path: Path) -> None:
+    path.mkdir(parents=True)
+    pointer = (
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
+        "size 1191586416\n"
+    )
+    (path / "model.safetensors").write_text(pointer, encoding="utf-8")
+    (path / "config.json").write_text("{}", encoding="utf-8")
+    with (path / "tokenizer.json").open("wb") as handle:
+        handle.truncate(product.TOKENIZER_JSON_MIN_BYTES)
 
 
 def _free_port() -> int:

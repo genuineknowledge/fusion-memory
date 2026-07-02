@@ -33,7 +33,9 @@ adapter、本地 Qwen adapter 以及 PyTorch/Transformers 相关依赖。
 - Query router：默认关闭；需要复杂查询路由时再开启 API。
 
 如果模型文件缺失或依赖安装失败，安装检查会返回 not ready，并提示重新运行
-`pip install -e ".[postgres,qwen]"`。只有当模型文件和依赖都已就绪，但当前硬件或
+`pip install -e ".[postgres,qwen]"`。如果模型目录中只有 Git LFS pointer 文件，
+先安装 Git LFS 并在仓库中运行 `git lfs pull` 拉取真实权重，再重新运行
+`fusion-memory install-check --force`。只有当模型文件和依赖都已就绪，但当前硬件或
 运行环境无法加载/运行两个本地 Qwen 模型时，安装才会 fallback 到 `compromised`
 本地模式：SQLite + 内置轻量 embedding/reranker 可以继续试用，但当前 memory
 功能是 compromised 的。安装完成后需要提供 API key 才能接入更完整的模型能力；

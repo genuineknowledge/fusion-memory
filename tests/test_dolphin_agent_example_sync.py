@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -139,3 +142,38 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "DASHSCOPE_API_KEY" in skill
     assert "fusion-memory --db fusion-memory.sqlite3 sync-haitun-history" in skill
     assert "passive persistence is on by default" in skill
+    assert "Git LFS pointer" in skill
+    assert "git lfs pull" in skill
+
+
+@pytest.mark.anyio
+async def test_canonical_memory_workspace_prompt_asks_before_enabling_persistence() -> None:
+    path = CANONICAL_WORKSPACE / "systems" / "system.py"
+    spec = importlib.util.spec_from_file_location("canonical_memory_system", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    _install_psi_agent_yaml_stub()
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("psi_agent._yaml", None)
+        sys.modules.pop("psi_agent", None)
+
+    prompt = await module.system_prompt_builder()
+
+    assert "ask the user whether to enable Fusion Memory persistent memory" in prompt
+    assert "cannot remember across sessions" in prompt
+    assert "If the user declines" in prompt
+
+
+def _install_psi_agent_yaml_stub() -> None:
+    psi_agent = types.ModuleType("psi_agent")
+    yaml_module = types.ModuleType("psi_agent._yaml")
+
+    def parse_yaml_header(_text: str):
+        return ({}, "")
+
+    yaml_module.parse_yaml_header = parse_yaml_header
+    sys.modules["psi_agent"] = psi_agent
+    sys.modules["psi_agent._yaml"] = yaml_module
