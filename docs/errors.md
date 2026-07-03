@@ -75,8 +75,9 @@ fusion-memory install-agent --target fusion-agent
 fusion-memory doctor
 ```
 
-Haitun recovery: verify the Haitun workspace, then run
-`fusion-memory --db fusion-memory.sqlite3 sync-haitun-history --workspace <workspace> --session-id <session-id>`
+Haitun recovery: verify the Haitun workspace, confirm `PSI_MEMORY_BASE_URL`
+points at the local Fusion Memory daemon, then run
+`fusion-memory sync-haitun-history --workspace <workspace> --session-id <session-id>`
 beside the Haitun session for passive persistence.
 
 OpenClaw recovery: reinstall the external OpenClaw plugin, restart OpenClaw, and

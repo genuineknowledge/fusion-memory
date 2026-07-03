@@ -112,6 +112,21 @@ class ProductCliTests(unittest.TestCase):
                         "fusion_memory.product._qwen_runtime_smoke",
                         return_value={"ok": True, "message": "ready"},
                     ),
+                    patch(
+                        "fusion_memory.product._postgres_readiness",
+                        return_value={
+                            "connection": {
+                                "name": "postgres_connection",
+                                "ok": True,
+                                "detail": "Postgres is reachable.",
+                            },
+                            "pgvector": {
+                                "name": "pgvector",
+                                "ok": True,
+                                "detail": "pgvector is installed.",
+                            },
+                        },
+                    ),
                 ):
                     main()
                 payload = json.loads(sys.stdout.getvalue())
@@ -120,7 +135,8 @@ class ProductCliTests(unittest.TestCase):
                 sys.stdout = old_stdout
 
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["mode"], "production")
+        self.assertEqual(payload["mode"], "local_full")
+        self.assertEqual(payload["db"], str(Path(tmp) / "fusion-memory.sqlite3"))
 
     def test_sync_haitun_history_cli_json_runs_once(self) -> None:
         from fusion_memory.cli import main
@@ -345,10 +361,10 @@ class ProductCliTests(unittest.TestCase):
             self.assertTrue(init["ok"])
             self.assertTrue((home / "config.json").exists())
             config = load_config(home)
-            self.assertEqual(
-                init["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory"
-            )
-            self.assertEqual(config["storage_backend"], "postgres")
+            self.assertEqual(init["db"], str(home / "fusion-memory.sqlite3"))
+            self.assertEqual(init["mode"], "local_full")
+            self.assertEqual(config["mode"], "local_full")
+            self.assertEqual(config["storage_backend"], "sqlite")
             self.assertEqual(config["embedding"]["provider"], "qwen")
             self.assertIn("Qwen3-Embedding-0.6B", config["embedding"]["model"])
             self.assertEqual(config["reranker"]["provider"], "qwen")
@@ -357,13 +373,13 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(config["query_intent"]["provider"], "off")
             self.assertTrue(hasattr(product, "default_product_settings"))
             defaults = product.default_product_settings(product_paths(home))
-            self.assertEqual(defaults["storage_backend"], "postgres")
+            self.assertEqual(defaults["mode"], "local_full")
+            self.assertEqual(defaults["storage_backend"], "sqlite")
 
             report = doctor(home)
             self.assertTrue(report["checks"])
-            self.assertIn(
-                "postgres_connection", {item["name"] for item in report["checks"]}
-            )
+            self.assertIn("database_directory", {item["name"] for item in report["checks"]})
+            self.assertNotIn("postgres_connection", {item["name"] for item in report["checks"]})
             self.assertIn(
                 "embedding_dependency", {item["name"] for item in report["checks"]}
             )
@@ -378,14 +394,17 @@ class ProductCliTests(unittest.TestCase):
             self.assertTrue(plan["dry_run"])
             self.assertIn("command", plan)
 
-    def test_init_home_defaults_to_postgres_and_qwen(self) -> None:
+    def test_init_home_defaults_to_sqlite_and_qwen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             result = init_home(home)
             config = load_config(home)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(config["storage_backend"], "postgres")
+        self.assertEqual(result["mode"], "local_full")
+        self.assertEqual(config["mode"], "local_full")
+        self.assertEqual(config["storage_backend"], "sqlite")
+        self.assertEqual(config["db"], str(home / "fusion-memory.sqlite3"))
         self.assertEqual(config["embedding"]["provider"], "qwen")
         self.assertEqual(
             config["embedding"]["model"], str(default_local_embedding_model_path())
@@ -433,6 +452,95 @@ class ProductCliTests(unittest.TestCase):
         self.assertFalse((home / "config.json").exists())
         self.assertIn("Install the full runtime dependencies", result["message"])
         self.assertIn(".[postgres,qwen]", result["message"])
+
+    def test_install_readiness_falls_back_to_compromised_when_qwen_dependencies_are_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=False,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+            config = load_config(home)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "compromised")
+        self.assertTrue(result["compromised"])
+        self.assertEqual(config["storage_backend"], "sqlite")
+        self.assertEqual(config["embedding"]["provider"], "deterministic")
+        self.assertIn("Qwen runtime dependencies", result["message"])
+
+    def test_install_readiness_uses_local_full_when_qwen_is_ready_without_postgres(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            postgres_report = {
+                "connection": {
+                    "name": "postgres_connection",
+                    "ok": False,
+                    "detail": "Postgres is not reachable.",
+                },
+                "pgvector": {
+                    "name": "pgvector",
+                    "ok": False,
+                    "detail": "Postgres is not reachable.",
+                },
+            }
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_runtime_smoke",
+                    return_value={"ok": True, "message": "ready"},
+                ),
+                patch(
+                    "fusion_memory.product._postgres_readiness",
+                    return_value=postgres_report,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+            config = load_config(home)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "local_full")
+        self.assertFalse(result["compromised"])
+        self.assertEqual(config["mode"], "local_full")
+        self.assertEqual(config["storage_backend"], "sqlite")
+        self.assertEqual(config["embedding"]["provider"], "qwen")
+        self.assertEqual(config["reranker"]["provider"], "qwen")
+        self.assertIn("SQLite", result["message"])
+        self.assertIn("Qwen", result["message"])
 
     def test_install_readiness_rejects_git_lfs_pointer_model_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -623,7 +731,7 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(config["reranker"]["provider"], "lexical")
         self.assertIn("not production", result["message"])
 
-    def test_doctor_checks_postgres_pgvector_and_qwen_readiness(self) -> None:
+    def test_doctor_checks_sqlite_and_qwen_readiness_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             init_home(home, port=0)
@@ -631,8 +739,9 @@ class ProductCliTests(unittest.TestCase):
             report = doctor(home)
 
         names = {item["name"]: item for item in report["checks"]}
-        self.assertIn("postgres_connection", names)
-        self.assertIn("pgvector", names)
+        self.assertIn("database_directory", names)
+        self.assertNotIn("postgres_connection", names)
+        self.assertNotIn("pgvector", names)
         self.assertIn("embedding_dependency", names)
         self.assertIn("embedding_model_readiness", names)
         self.assertIn("reranker_dependency", names)
@@ -650,8 +759,9 @@ class ProductCliTests(unittest.TestCase):
             report = doctor(home)
 
         names = {item["name"] for item in report["checks"]}
-        self.assertIn("postgres_connection", names)
-        self.assertIn("pgvector", names)
+        self.assertIn("database_directory", names)
+        self.assertNotIn("postgres_connection", names)
+        self.assertNotIn("pgvector", names)
         self.assertIn("embedding_readiness", names)
         self.assertIn("reranker_readiness", names)
         self.assertIn("port", names)
@@ -708,7 +818,10 @@ class ProductCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("fusion_memory.product.subprocess.Popen") as popen:
+            with (
+                patch("fusion_memory.product._port_available", return_value=True),
+                patch("fusion_memory.product.subprocess.Popen") as popen,
+            ):
                 process = popen.return_value
                 process.pid = 12345
                 process.poll.return_value = 1
@@ -786,15 +899,15 @@ class ProductCliTests(unittest.TestCase):
             self.assertEqual(env["FUSION_MEMORY_EXTRACTOR_API_KEY"], "secret-value")
             self.assertEqual(env["FUSION_MEMORY_QUERY_INTENT_MODE"], "off")
 
-    def test_interactive_and_human_output_redact_default_postgres_credentials(
+    def test_interactive_defaults_to_sqlite_and_qwen(
         self,
     ) -> None:
         answers = iter(
             [
                 "",  # host
                 "18767",  # port
-                "",  # default postgres database
-                "",  # default postgres DSN
+                "",  # default sqlite database
+                "",  # default sqlite path
                 "",  # default qwen embedding
                 "",  # default qwen embedding model
                 "",  # default qwen embedding device
@@ -818,19 +931,17 @@ class ProductCliTests(unittest.TestCase):
         ):
             result = configure_interactive(Path(tmp))
 
-        self.assertEqual(
-            result["db"], "postgresql://***:***@127.0.0.1:55433/fusion_memory"
-        )
+        self.assertTrue(result["db"].endswith("fusion-memory.sqlite3"))
         self.assertNotIn("fusion:fusion", json.dumps(result))
         rendered = render_human(result)
-        self.assertIn("postgresql://***:***@127.0.0.1:55433/fusion_memory", rendered)
+        self.assertIn("fusion-memory.sqlite3", rendered)
         self.assertNotIn("fusion:fusion", rendered)
         wizard_text = output.getvalue()
-        self.assertIn("Postgres / pgvector (recommended)", wizard_text)
+        self.assertIn("SQLite local file (recommended)", wizard_text)
+        self.assertIn("Postgres / pgvector", wizard_text)
         self.assertIn("Qwen3 embedding (recommended)", wizard_text)
         self.assertIn("Qwen3 reranker (recommended)", wizard_text)
         self.assertNotIn("fusion:fusion", wizard_text)
-        self.assertNotIn("SQLite local file (recommended)", wizard_text)
         self.assertNotIn("Built-in lightweight embedding (recommended)", wizard_text)
         self.assertNotIn("Built-in lexical reranker (recommended)", wizard_text)
 
@@ -967,14 +1078,47 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(kwargs["creationflags"] & 0x00000008, 0x00000008)
         self.assertEqual(kwargs["creationflags"] & 0x00000200, 0x00000200)
 
+    def test_daemon_python_executable_uses_pythonw_on_windows(self) -> None:
+        with patch("fusion_memory.product.os.name", "nt"):
+            executable = product._daemon_python_executable(
+                r"C:\Users\alice\AppData\Local\Programs\Python\Python314\python.exe"
+            )
+
+        self.assertEqual(
+            executable,
+            r"C:\Users\alice\AppData\Local\Programs\Python\Python314\pythonw.exe",
+        )
+
+    def test_port_available_returns_false_when_socket_creation_is_blocked(self) -> None:
+        with patch(
+            "fusion_memory.product.socket.socket",
+            side_effect=PermissionError("socket blocked"),
+        ):
+            self.assertFalse(product._port_available("127.0.0.1", 8700))
+
     def test_install_scripts_install_full_runtime_dependencies(self) -> None:
         root = Path(product.__file__).resolve().parents[1]
 
         install_sh = (root / "install.sh").read_text(encoding="utf-8")
         install_ps1 = (root / "install.ps1").read_text(encoding="utf-8")
 
+        self.assertIn('-e "$SCRIPT_DIR"', install_sh)
         self.assertIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
+        self.assertIn("Optional Postgres/Qwen dependencies", install_sh)
+        self.assertIn('-e "$ScriptDir"', install_ps1)
         self.assertIn('-e "$ScriptDir[postgres,qwen]"', install_ps1)
+        self.assertIn("Optional Postgres/Qwen dependencies", install_ps1)
+
+    def test_qwen_extra_does_not_block_python_314(self) -> None:
+        import tomllib
+
+        root = Path(product.__file__).resolve().parents[1]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+        qwen_deps = pyproject["project"]["optional-dependencies"]["qwen"]
+
+        self.assertTrue(qwen_deps)
+        self.assertFalse(any('python_version < "3.14"' in dep for dep in qwen_deps))
 
     def test_qwen_dependency_available_requires_full_runtime_dependencies(self) -> None:
         def fake_find_spec(name: str) -> object | None:
@@ -1013,9 +1157,12 @@ def _write_lfs_pointer_model_dir(path: Path) -> None:
 
 
 def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+    except PermissionError as exc:
+        raise unittest.SkipTest("socket creation is not permitted") from exc
 
 
 class _FakeProcess:

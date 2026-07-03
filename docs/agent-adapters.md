@@ -75,14 +75,15 @@ verify the workspace and start the history sync beside the Haitun session:
 ```bash
 fusion-memory install-agent --target dolphin
 fusion-memory doctor
-fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
+fusion-memory sync-haitun-history \
   --workspace integrations/dolphin-fusion-memory/workspace \
   --session-id <session-id>
 ```
 
 The sync process reads Haitun's saved `histories/<session-id>.jsonl` file and
-does not patch Haitun source code. Continue the session if memory is offline;
-restart the sync process after the local service is back.
+posts turns to the Fusion Memory daemon through HTTP `/add`. It does not patch
+Haitun source code. Continue the session if memory is offline; restart the sync
+process after the local service is back.
 
 Fusion-Agent uses its in-repo adapter. Start a session with memory enabled and:
 

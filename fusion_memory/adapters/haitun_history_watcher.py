@@ -7,12 +7,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib import request
 
-from fusion_memory.api.service import MemoryService
-from fusion_memory.core.models import Scope
 from fusion_memory.core.text import stable_hash
-from fusion_memory.core.runtime_config import memory_service_from_env
 
 
 @dataclass(frozen=True)
@@ -51,43 +49,44 @@ def config_from_workspace(
     )
 
 
-def sync_history_once(config: WatcherConfig) -> dict[str, Any]:
+def sync_history_once(
+    config: WatcherConfig,
+    *,
+    submit_add: Callable[[dict[str, Any]], Any] | None = None,
+) -> dict[str, Any]:
     messages = _read_history_messages(config.history_path)
     batches = _build_batches(messages, session_id=config.session_id)
     checkpoint = load_checkpoint(config.checkpoint_path)
     submitted = set(checkpoint.get("submitted_batches") or [])
     submitted_count = 0
-    service = memory_service_from_env(config.db_path)
-    try:
-        scope = Scope(
-            workspace_id=config.workspace_id,
-            user_id=config.user_id,
-            agent_id=config.agent_id,
-            session_id=config.session_id,
-            app_id=config.app_id,
-        )
-        for batch in batches:
-            if batch["batch_hash"] in submitted:
-                continue
-            service.add(
-                {"messages": batch["messages"]},
-                scope,
-                datetime.now(timezone.utc),
-                metadata={
-                    "source": "haitun-history-watcher",
-                    "history_path": str(config.history_path),
-                    "line_start": batch["line_start"],
-                    "line_end": batch["line_end"],
-                    "batch_hash": batch["batch_hash"],
-                    "turn_id": batch["turn_id"],
-                    "ended_with_error": "unknown",
-                },
-            )
-            submitted.add(batch["batch_hash"])
-            checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
-            submitted_count += 1
-    finally:
-        service.close()
+    submit = submit_add or (lambda payload: _post_add(config, payload))
+    for batch in batches:
+        if batch["batch_hash"] in submitted:
+            continue
+        payload = {
+            "input": {"messages": batch["messages"]},
+            "scope": {
+                "workspace_id": config.workspace_id,
+                "user_id": config.user_id,
+                "agent_id": config.agent_id,
+                "session_id": config.session_id,
+                "app_id": config.app_id,
+            },
+            "session_time": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "source": "haitun-history-watcher",
+                "history_path": str(config.history_path),
+                "line_start": batch["line_start"],
+                "line_end": batch["line_end"],
+                "batch_hash": batch["batch_hash"],
+                "turn_id": batch["turn_id"],
+                "ended_with_error": "unknown",
+            },
+        }
+        submit(payload)
+        submitted.add(batch["batch_hash"])
+        checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
+        submitted_count += 1
 
     stat = config.history_path.stat() if config.history_path.exists() else None
     checkpoint.update(
@@ -102,6 +101,27 @@ def sync_history_once(config: WatcherConfig) -> dict[str, Any]:
     )
     save_checkpoint(config.checkpoint_path, checkpoint)
     return {"ok": True, "submitted_count": submitted_count, "batch_count": len(batches)}
+
+
+def _post_add(config: WatcherConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        f"{config.base_url.rstrip('/')}/add",
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with request.urlopen(req, timeout=config.timeout_seconds) as response:
+        raw = response.read().decode("utf-8")
+        if not raw.strip():
+            return {"ok": True}
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("ok") is False:
+            raise RuntimeError(
+                "Fusion Memory HTTP /add rejected passive sync payload: "
+                + str(data.get("message") or data.get("error") or "unknown error")
+            )
+        return data if isinstance(data, dict) else {"ok": True}
 
 
 def watch_history(config: WatcherConfig, *, poll_interval_seconds: float = 1.0) -> None:

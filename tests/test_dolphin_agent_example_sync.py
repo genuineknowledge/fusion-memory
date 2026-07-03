@@ -37,7 +37,7 @@ COPY_USAGE_PHRASES = [
 ]
 AUTO_PERSISTENCE_PHRASES = [
     "Automatic History Persistence",
-    "fusion-memory --db fusion-memory.sqlite3 sync-haitun-history",
+    "sync-haitun-history",
     "--workspace /path/to/haitun-workspace",
     "only when the agent calls",
     "without changing",
@@ -45,7 +45,7 @@ AUTO_PERSISTENCE_PHRASES = [
 FIRST_USE_COMMANDS = [
     "git clone https://github.com/genuineknowledge/fusion-memory.git",
     "sh install.sh",
-    "fusion-memory init --local-test --json",
+    "fusion-memory init --json",
     "fusion-memory start --json",
     "fusion-memory doctor --json",
     "PSI_MEMORY_BASE_URL=http://127.0.0.1:8700",
@@ -133,17 +133,33 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
         CANONICAL_WORKSPACE / "skills" / "fusion-memory-setup" / "SKILL.md"
     ).read_text()
 
-    assert "git clone https://github.com/genuineknowledge/fusion-memory.git" in skill
+    assert 'AGENT_DIR="/path/to/current-agent-directory"' in skill
+    assert "not the workspace directory" in skill
+    assert 'git clone https://github.com/genuineknowledge/fusion-memory.git "$AGENT_DIR/fusion-memory"' in skill
     assert "wey-bo" not in skill
     assert "git@" not in skill
     assert "identity" not in skill.lower()
     assert "authentication" not in skill.lower()
     assert "compromised" in skill
     assert "DASHSCOPE_API_KEY" in skill
-    assert "fusion-memory --db fusion-memory.sqlite3 sync-haitun-history" in skill
-    assert "passive persistence is on by default" in skill
+    assert "SQLite plus bundled local Qwen vector models" in skill
+    assert "Postgres/pgvector is optional" in skill
+    assert "PASSIVE_SYNC_PID" in skill
+    assert "kill -0" in skill
+    assert "HTTP /add" in skill
+    assert 'fusion-memory sync-haitun-history' in skill
+    assert 'fusion-memory --db "$FM_DB" sync-haitun-history' not in skill
+    assert "Persistence (Required After Start)" in skill
+    assert "After verifying, immediately start the passive sync process" in skill
+    start_section = skill.split("## Start And Verify", 1)[1].split(
+        "## Persistence (Required After Start)", 1
+    )[0]
+    assert 'fusion-memory sync-haitun-history' in start_section
     assert "Git LFS pointer" in skill
     assert "git lfs pull" in skill
+    assert "dependency installation failed" not in skill
+    assert "Qwen runtime dependencies are unavailable" in skill
+    assert "Postgres/pgvector is unavailable" not in skill
 
 
 @pytest.mark.anyio
@@ -162,8 +178,14 @@ async def test_canonical_memory_workspace_prompt_asks_before_enabling_persistenc
 
     prompt = await module.system_prompt_builder()
 
+    assert "At the start of each new interactive session" in prompt
+    assert "service is reachable" in prompt
+    assert "current session passive sync process is running" in prompt
+    assert "do not ask again" in prompt
     assert "ask the user whether to enable Fusion Memory persistent memory" in prompt
+    assert "Do not wait for the first memory tool call" in prompt
     assert "cannot remember across sessions" in prompt
+    assert "start and verify passive sync" in prompt
     assert "If the user declines" in prompt
 
 

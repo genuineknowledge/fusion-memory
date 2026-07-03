@@ -50,8 +50,6 @@ def _action_for(target: str, *, home: str | Path | None = None) -> dict[str, Any
             "skill": str(DOLPHIN_SKILL),
             "sync_command": [
                 "fusion-memory",
-                "--db",
-                "fusion-memory.sqlite3",
                 "sync-haitun-history",
                 "--workspace",
                 str(DOLPHIN_WORKSPACE),

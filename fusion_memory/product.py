@@ -99,9 +99,10 @@ def install_readiness(
     The installer must never download model weights. Production mode is selected
     only when the repository-local embedding/reranker directories are present,
     optional ML dependencies are installed by the installer, and the current
-    machine can load/run the two local vector models. Missing files or
-    dependencies are reported as installation errors; only model runtime or
-    hardware failures fall back to compromised local mode.
+    machine can load/run the two local vector models. The local default uses
+    SQLite plus Qwen. Missing files are reported as installation errors; Qwen
+    dependency, model runtime, or hardware failures fall back to compromised
+    local mode.
     """
 
     embedding_status = _repository_model_status(
@@ -120,7 +121,7 @@ def install_readiness(
         missing.append(str(embedding_status["message"]))
     if not reranker_ready:
         missing.append(str(reranker_status["message"]))
-    if not qwen_dependency_ready:
+    if not qwen_dependency_ready and not (embedding_ready and reranker_ready):
         missing.append("full Qwen runtime Python dependencies")
     if missing:
         model_messages = " ".join(missing)
@@ -152,14 +153,34 @@ def install_readiness(
             ),
         }
 
+    if not qwen_dependency_ready:
+        hardware_probe = _hardware_runtime_probe()
+        return _compromised_install_result(
+            home,
+            force=force,
+            reason=(
+                "the full Qwen runtime dependencies are not importable. "
+                "Install the qwen extra successfully to use the repository-local Qwen models."
+            ),
+            runtime_smoke={
+                "ok": False,
+                "message": "full Qwen runtime Python dependencies are not importable",
+                "hardware_probe": hardware_probe,
+            },
+            hardware_probe=hardware_probe,
+        )
+
     smoke = _qwen_runtime_smoke()
     if smoke["ok"]:
         result = init_home(home, force=force)
         result.update(
             {
-                "mode": "production",
+                "mode": "local_full",
                 "compromised": False,
-                "message": "installed with repository-local Qwen embedding and reranker models.",
+                "message": (
+                    "installed in local_full mode with SQLite and "
+                    "repository-local Qwen embedding and reranker models."
+                ),
             }
         )
         return result
@@ -167,27 +188,17 @@ def install_readiness(
     hardware_probe = _hardware_runtime_probe()
     smoke = dict(smoke)
     smoke["hardware_probe"] = hardware_probe
-    result = init_home(
-        home, force=force, settings=compromised_local_settings(product_paths(home))
+    return _compromised_install_result(
+        home,
+        force=force,
+        reason=(
+            "the current hardware or runtime environment could not run the bundled "
+            "Qwen embedding/reranker models: "
+            + str(smoke.get("message") or "model runtime smoke failed")
+        ),
+        runtime_smoke=smoke,
+        hardware_probe=hardware_probe,
     )
-    result.update(
-        {
-            "mode": "compromised",
-            "compromised": True,
-            "runtime_smoke": smoke,
-            "hardware_probe": hardware_probe,
-            "message": (
-                "installed in compromised local mode because the current hardware or runtime environment "
-                "could not run the bundled Qwen embedding/reranker models: "
-                + str(smoke.get("message") or "model runtime smoke failed")
-                + ". Fusion Memory will use SQLite plus built-in lightweight embedding/reranker. "
-                "To restore full memory quality, use a machine that can run the bundled models or provide "
-                "API model settings. Recommended API option: Aliyun DashScope; set DASHSCOPE_API_KEY "
-                "or map it through FUSION_MEMORY_MODEL_API_KEY before enabling API providers."
-            ),
-        }
-    )
-    return result
 
 
 def init_home(
@@ -249,10 +260,10 @@ def configure_interactive(
     storage_choice = _ask_choice(
         "Database",
         [
-            ("postgres", "Postgres / pgvector (recommended)"),
-            ("sqlite", "SQLite local file"),
+            ("sqlite", "SQLite local file (recommended)"),
+            ("postgres", "Postgres / pgvector"),
         ],
-        str(existing.get("storage_backend") or "postgres"),
+        str(existing.get("storage_backend") or "sqlite"),
     )
     if storage_choice == "postgres":
         default_dsn = str(
@@ -346,8 +357,12 @@ def load_config(home: str | Path | None = None) -> dict[str, Any]:
     data = json.loads(paths.config.read_text(encoding="utf-8"))
     data.setdefault("host", DEFAULT_HOST)
     data.setdefault("port", DEFAULT_PORT)
-    data.setdefault("db", DEFAULT_POSTGRES_DSN)
-    data.setdefault("storage_backend", "postgres")
+    data.setdefault("db", str(paths.db))
+    data.setdefault("storage_backend", "sqlite")
+    data.setdefault(
+        "mode",
+        "production" if data.get("storage_backend") == "postgres" else "local_full",
+    )
     data.setdefault("log", str(paths.log))
     data.setdefault(
         "embedding", {"provider": "qwen", "model": DEFAULT_QWEN_EMBEDDING_MODEL}
@@ -480,7 +495,7 @@ def start_service(
     log_handle = paths.log.open("ab")
     project_root = _local_project_root()
     cmd = [
-        sys.executable,
+        _daemon_python_executable(),
         "-m",
         "fusion_memory.server",
         "--host",
@@ -784,6 +799,42 @@ def safe_product_error(exc: BaseException) -> dict[str, str]:
     }
 
 
+def _compromised_install_result(
+    home: str | Path | None,
+    *,
+    force: bool,
+    reason: str,
+    runtime_smoke: dict[str, Any],
+    hardware_probe: dict[str, Any],
+) -> dict[str, Any]:
+    result = init_home(
+        home, force=force, settings=compromised_local_settings(product_paths(home))
+    )
+    result.update(
+        {
+            "mode": "compromised",
+            "compromised": True,
+            "runtime_smoke": runtime_smoke,
+            "hardware_probe": hardware_probe,
+            "message": (
+                "installed in compromised local mode because "
+                + reason
+                + ". Fusion Memory will use SQLite plus built-in lightweight embedding/reranker. "
+                "To restore full memory quality, use the bundled Qwen models with the qwen "
+                "runtime dependencies, or provide API model settings. Postgres/pgvector is "
+                "optional for production storage. Recommended API option: Aliyun "
+                "DashScope; set DASHSCOPE_API_KEY or map it through FUSION_MEMORY_MODEL_API_KEY "
+                "before enabling API providers."
+            ),
+        }
+    )
+    return result
+
+
+def _postgres_readiness_ok(report: dict[str, dict[str, Any]]) -> bool:
+    return all(bool(check.get("ok")) for check in report.values())
+
+
 def _default_config(paths: ProductPaths, *, host: str, port: int) -> dict[str, Any]:
     return default_product_settings(paths) | {
         "host": host,
@@ -794,10 +845,11 @@ def _default_config(paths: ProductPaths, *, host: str, port: int) -> dict[str, A
 def default_product_settings(paths: ProductPaths) -> dict[str, Any]:
     return {
         "version": CONFIG_VERSION,
+        "mode": "local_full",
         "host": DEFAULT_HOST,
         "port": DEFAULT_PORT,
-        "db": DEFAULT_POSTGRES_DSN,
-        "storage_backend": "postgres",
+        "db": str(paths.db),
+        "storage_backend": "sqlite",
         "log": str(paths.log),
         "embedding": {"provider": "qwen", "model": DEFAULT_QWEN_EMBEDDING_MODEL},
         "reranker": {"provider": "qwen", "model": DEFAULT_QWEN_RERANKER_MODEL},
@@ -1404,6 +1456,18 @@ def _daemon_popen_kwargs(
     return kwargs
 
 
+def _daemon_python_executable(executable: str | None = None) -> str:
+    resolved = executable or sys.executable
+    if os.name != "nt":
+        return resolved
+    lower = resolved.lower()
+    if lower.endswith("pythonw.exe"):
+        return resolved
+    if lower.endswith("python.exe"):
+        return resolved[: -len("python.exe")] + "pythonw.exe"
+    return resolved
+
+
 def _looks_like_path(value: str) -> bool:
     return value.startswith(("~", "/", ".")) or ":\\" in value or "\\" in value
 
@@ -1522,13 +1586,13 @@ def _process_exists(pid: int) -> bool:
 
 
 def _port_available(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
             return True
-        except OSError:
-            return False
+    except OSError:
+        return False
 
 
 def _next_available_port(

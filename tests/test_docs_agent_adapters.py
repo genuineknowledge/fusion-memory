@@ -45,11 +45,25 @@ class AgentAdapterDocsTests(unittest.TestCase):
 
         self.assertIn("default tracks fusion-memory main", text)
         self.assertIn("check before installing or upgrading", text)
+        self.assertIn('AGENT_DIR="/path/to/current-agent-directory"', text)
+        self.assertIn("not the workspace directory", text)
         self.assertIn("estimate", text)
         self.assertIn("10-20 minutes", text)
-        self.assertIn("passive persistence is on by default", text)
+        self.assertIn("SQLite plus bundled local Qwen vector models", text)
+        self.assertIn("Postgres/pgvector is optional", text)
+        self.assertIn("Postgres integration", text)
+        self.assertIn("install or start a PostgreSQL/pgvector server", text)
+        self.assertIn("Persistence (Required After Start)", text)
+        self.assertIn("After verifying, immediately start the passive sync process", text)
+        start_section = text.split("## Start And Verify", 1)[1].split(
+            "## Persistence (Required After Start)", 1
+        )[0]
+        self.assertIn("PASSIVE_SYNC_PID", start_section)
+        self.assertIn("kill -0", start_section)
+        self.assertIn("HTTP /add", text)
+        self.assertIn("fusion-memory sync-haitun-history", start_section)
         self.assertIn("automatic turn sync", text)
-        self.assertIn("fusion-memory --db fusion-memory.sqlite3 sync-haitun-history", text)
+        self.assertNotIn('fusion-memory --db "$FM_DB" sync-haitun-history', text)
         self.assertNotIn("postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory", text)
         self.assertIn("memory_add is for explicit durable facts", text)
         self.assertNotIn("LLM extractor", text)

@@ -12,7 +12,11 @@ fusion-memory-server = "fusion_memory.server:main"
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "aiohttp>=3.9", "anyio>=4.0"]
 postgres = ["psycopg2-binary>=2.9"]
-qwen = ["sentence-transformers>=3.4", "torch>=2.5", "transformers>=4.51"]
+qwen = [
+  "sentence-transformers>=3.4",
+  "torch>=2.5",
+  "transformers>=4.51",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

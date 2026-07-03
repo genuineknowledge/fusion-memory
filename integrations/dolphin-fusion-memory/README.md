@@ -48,7 +48,7 @@ Minimal local setup:
 git clone https://github.com/genuineknowledge/fusion-memory.git
 cd fusion-memory
 sh install.sh
-fusion-memory init --local-test --json
+fusion-memory init --json
 fusion-memory start --json
 fusion-memory doctor --json
 export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
@@ -64,9 +64,11 @@ model files are missing or dependency installation failed, install-check reports
 not ready and asks you to rerun `pip install -e ".[postgres,qwen]"`. If the model
 directory contains Git LFS pointer files, install Git LFS, run `git lfs pull` in
 the Fusion Memory checkout, and rerun `fusion-memory install-check --force`.
-Only when model files and dependencies are present but this hardware/runtime
-cannot load or run both bundled vector models does it fall back to a compromised
-local mode with built-in lightweight retrieval and print the API-key next step.
+The default local configuration uses SQLite plus bundled local Qwen models;
+Postgres/pgvector is optional for production deployments. Only when model files
+and dependencies are present but this hardware/runtime cannot load or run both
+bundled vector models does it fall back to a compromised local mode with
+built-in lightweight retrieval and print the API-key next step.
 Recommended API provider: Aliyun DashScope; set `DASHSCOPE_API_KEY` before
 configuring API-backed providers.
 
@@ -120,8 +122,7 @@ Synced passive writes are marked with `metadata.write_mode="history_sync"` and
 Start passive saved-history sync in a second shell:
 
 ```bash
-cd /public/home/wwb/memory
-fusion-memory --db fusion-memory.sqlite3 sync-haitun-history \
+fusion-memory sync-haitun-history \
   --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
   --session-id <session-id>
 ```
