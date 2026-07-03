@@ -1,19 +1,85 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from subprocess import CompletedProcess
+from threading import Thread
 from unittest.mock import patch
 
 import tools.agent_runtime_smoke as smoke
 
 
 class AgentRuntimeSmokeTests(unittest.TestCase):
+    def test_dolphin_tool_http_client_is_runtime_dependency(self) -> None:
+        pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+
+        dependencies = pyproject["project"]["dependencies"]
+
+        self.assertIn("aiohttp>=3.9", dependencies)
+
+    @unittest.skipIf(importlib.util.find_spec("aiohttp") is None, "aiohttp is required for the live Dolphin smoke script")
+    def test_dolphin_smoke_url_override_drives_tools_and_reports_write_retrieve(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("content-length") or "0")
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/add":
+                    content = payload["input"]["content"]
+                    body = {"span_ids": ["span-smoke"], "accepted_fact_ids": [], "content": content}
+                elif self.path == "/search":
+                    body = {"source_spans": [{"content": f"search hit {payload['query']}"}]}
+                elif self.path == "/answer-context":
+                    body = {"source_spans": [{"content": f"context hit {payload['query']}"}]}
+                else:
+                    self.send_error(404)
+                    return
+                data = json.dumps(body).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            completed = subprocess.run(
+                [sys.executable, "integrations/dolphin-fusion-memory/smoke.py"],
+                cwd=Path(__file__).resolve().parents[1],
+                env={
+                    **os.environ,
+                    "FUSION_MEMORY_SMOKE_MEMORY_URL": base_url,
+                    "PSI_MEMORY_BASE_URL": "http://127.0.0.1:9",
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["url"], base_url)
+        self.assertTrue(report["write_smoke"])
+        self.assertTrue(report["retrieve_smoke"])
+
     def test_missing_openclaw_host_is_beginner_safe(self) -> None:
         with patch("tools.agent_runtime_smoke.shutil.which", return_value=None):
             report = smoke.run_smoke("openclaw", memory_url="http://127.0.0.1:8765")
@@ -126,6 +192,24 @@ class AgentRuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(report["retrieve_smoke"])
         builtin.assert_called_once()
         self.assertEqual(builtin.call_args.args[0], "dolphin")
+
+    def test_dolphin_command_smoke_failure_is_beginner_safe(self) -> None:
+        completed = CompletedProcess(
+            args=["dolphin-smoke"],
+            returncode=1,
+            stdout="",
+            stderr="ModuleNotFoundError: No module named 'aiohttp'",
+        )
+        with patch("subprocess.run", return_value=completed):
+            report = smoke._run_command_smoke(
+                "dolphin",
+                ["dolphin-smoke"],
+                memory_url="http://127.0.0.1:8765",
+                timeout=5,
+            )
+
+        self.assertIn("Dolphin", report["message"])
+        self.assertNotIn("Traceback", report["message"])
 
     def test_openclaw_plugin_check_uses_runtime_timeout_budget(self) -> None:
         completed = CompletedProcess(

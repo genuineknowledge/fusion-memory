@@ -14,7 +14,7 @@ BASE_URL = (
     or os.getenv("PSI_MEMORY_BASE_URL")
     or "http://127.0.0.1:8700"
 )
-os.environ.setdefault("PSI_MEMORY_BASE_URL", BASE_URL)
+os.environ["PSI_MEMORY_BASE_URL"] = BASE_URL
 
 TOOLS_DIR = Path(__file__).resolve().parent / "workspace" / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -54,18 +54,21 @@ async def main() -> int:
     search_result = await memory_search(token, limit=3)
     context_result = await memory_answer_context(token)
 
-    ok = (
-        _write_succeeded(write_result)
-        and token in search_result
+    write_smoke = _write_succeeded(write_result)
+    retrieve_smoke = (
+        token in search_result
         and not _has_failure_message(search_result)
         and token in context_result
         and not _has_failure_message(context_result)
     )
+    ok = write_smoke and retrieve_smoke
 
     print(
         json.dumps(
             {
                 "ok": ok,
+                "write_smoke": write_smoke,
+                "retrieve_smoke": retrieve_smoke,
                 "url": BASE_URL,
                 "token": token,
                 "write": write_result,

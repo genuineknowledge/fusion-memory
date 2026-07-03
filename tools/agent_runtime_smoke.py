@@ -441,6 +441,7 @@ def _normalize_report(target: str, report: dict[str, Any]) -> dict[str, Any]:
 
 def _display_name(target: str) -> str:
     return {
+        "dolphin": "Dolphin",
         "openclaw": "OpenClaw",
         "hermes": "Hermes",
         "fusion-agent": "Fusion-Agent",

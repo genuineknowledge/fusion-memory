@@ -3,14 +3,14 @@ name = "fusion-memory"
 version = "0.1.0"
 description = "Local MVP implementation of Fusion Memory."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["aiohttp>=3.9"]
 
 [project.scripts]
 fusion-memory = "fusion_memory.cli:main"
 fusion-memory-server = "fusion_memory.server:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "aiohttp>=3.9", "anyio>=4.0"]
+dev = ["pytest>=8.0", "anyio>=4.0"]
 postgres = ["psycopg2-binary>=2.9"]
 qwen = [
   "sentence-transformers>=3.4",
