@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib import error, request
 
 
@@ -100,9 +100,9 @@ def install_readiness(
     only when the repository-local embedding/reranker directories are present,
     optional ML dependencies are installed by the installer, and the current
     machine can load/run the two local vector models. The local default uses
-    SQLite plus Qwen. Missing files are reported as installation errors; Qwen
-    dependency, model runtime, or hardware failures fall back to compromised
-    local mode.
+    SQLite plus Qwen. Missing files and missing Qwen runtime dependencies are
+    reported as installation errors; compromised local mode is reserved for
+    complete files and dependencies that fail model runtime/hardware smoke.
     """
 
     embedding_status = _repository_model_status(
@@ -155,20 +155,23 @@ def install_readiness(
 
     if not qwen_dependency_ready:
         hardware_probe = _hardware_runtime_probe()
-        return _compromised_install_result(
-            home,
-            force=force,
-            reason=(
-                "the full Qwen runtime dependencies are not importable. "
-                "Install the qwen extra successfully to use the repository-local Qwen models."
-            ),
-            runtime_smoke={
-                "ok": False,
-                "message": "full Qwen runtime Python dependencies are not importable",
-                "hardware_probe": hardware_probe,
+        return {
+            "ok": False,
+            "mode": "not_ready",
+            "compromised": False,
+            "missing": ["full Qwen runtime Python dependencies"],
+            "model_readiness": {
+                "embedding": embedding_status,
+                "reranker": reranker_status,
             },
-            hardware_probe=hardware_probe,
-        )
+            "hardware_probe": hardware_probe,
+            "message": (
+                "Fusion Memory install is not ready because the full Qwen runtime "
+                "dependencies are not importable. Install the qwen extra successfully "
+                "before reporting installation success."
+            ),
+            "next_step": 'Run pip install -e ".[postgres,qwen]", then rerun fusion-memory install-check --force.',
+        }
 
     smoke = _qwen_runtime_smoke()
     if smoke["ok"]:
@@ -1440,7 +1443,7 @@ def _daemon_popen_kwargs(
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
         "cwd": cwd,
-        "env": env,
+        "env": _normalize_process_env(env),
     }
     if os.name == "nt":
         flags = 0
@@ -1454,6 +1457,21 @@ def _daemon_popen_kwargs(
     else:
         kwargs["start_new_session"] = True
     return kwargs
+
+
+def _normalize_process_env(env: Mapping[str, str] | dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, value in env.items():
+        if value is None:
+            continue
+        out_key = "Path" if os.name == "nt" and key.lower() == "path" else str(key)
+        dedupe_key = out_key.lower() if os.name == "nt" else out_key
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized[out_key] = str(value)
+    return normalized
 
 
 def _daemon_python_executable(executable: str | None = None) -> str:

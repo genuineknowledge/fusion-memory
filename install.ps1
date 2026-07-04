@@ -1,5 +1,32 @@
 $ErrorActionPreference = "Stop"
 
+function Test-IsWindowsProcess {
+    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+}
+
+function Normalize-ProcessPathEnvironment {
+    $PathEntries = @(Get-ChildItem Env: | Where-Object { $_.Name -ieq "Path" })
+    if ($PathEntries.Count -eq 0) {
+        return
+    }
+
+    $Preferred = $PathEntries | Where-Object { $_.Name -ceq "Path" } | Select-Object -First 1
+    if (-not $Preferred) {
+        $Preferred = $PathEntries[0]
+    }
+    $PathValue = $Preferred.Value
+
+    foreach ($Entry in $PathEntries) {
+        Remove-Item -LiteralPath ("Env:" + $Entry.Name) -ErrorAction SilentlyContinue
+    }
+    Remove-Item Env:PATH -ErrorAction SilentlyContinue
+    $env:Path = $PathValue
+}
+
+if (Test-IsWindowsProcess) {
+    Normalize-ProcessPathEnvironment
+}
+
 $Python = $env:PYTHON_BIN
 if (-not $Python) {
     $Python = "python"
@@ -18,16 +45,28 @@ if ($LASTEXITCODE -ne 0) {
 }
 & $Python -m pip install -e "$ScriptDir[postgres,qwen]"
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; Fusion Memory may use compromised local mode."
+    Write-Warning "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available."
 }
 if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
     & $Python -m fusion_memory.cli init --wizard
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 } elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
     & $Python -m fusion_memory.cli install-check --force
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 } else {
     & $Python -m fusion_memory.cli install-check --force
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 }
 & $Python -m fusion_memory.cli doctor
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."

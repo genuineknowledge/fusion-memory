@@ -86,14 +86,21 @@ fusion-memory stop
 psi-agent/Haitun 自动持久化：
 
 ```bash
-fusion-memory sync-haitun-history --workspace /path/to/haitun-workspace --session-id <session-id>
+fusion-memory sync-haitun-history \
+  --workspace /path/to/haitun-workspace \
+  --session-id <session-id> \
+  --background --json
+fusion-memory status-haitun-history-watcher \
+  --workspace /path/to/haitun-workspace \
+  --session-id <session-id> \
+  --json
 ```
 
 这条命令不改 agent core。它读取 `histories/<session-id>.jsonl`，把新的
 user/assistant turn 写入 Fusion Memory `/add`，并用本地 state 文件去重。
 
 默认 workspace tools 只有在 agent 调用 `memory_add` 时才写入；启动
-`sync-haitun-history` 后，history 才会持续自动写入。
+`sync-haitun-history --background` 后，history 才会持续自动写入。
 
 ```bash
 cd /path/to/fusion-memory

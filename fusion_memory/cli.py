@@ -11,7 +11,14 @@ from pathlib import Path
 from fusion_memory import Scope
 from fusion_memory.alpha_beta import run_alpha, run_beta
 from fusion_memory.agent_installer import install_agent
-from fusion_memory.adapters.haitun_history_watcher import config_from_workspace, sync_history_once, watch_history
+from fusion_memory.adapters.haitun_history_watcher import (
+    config_from_workspace,
+    start_history_watcher_daemon,
+    status_history_watcher_daemon,
+    stop_history_watcher_daemon,
+    sync_history_once,
+    watch_history,
+)
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
 from fusion_memory.product import (
@@ -119,6 +126,21 @@ def main() -> None:
 
     sync_haitun = sub.add_parser("sync-haitun-history", help="Sync Haitun saved history JSONL into Fusion Memory")
     _add_haitun_history_sync_args(sync_haitun)
+    start_haitun_watcher = sub.add_parser(
+        "start-haitun-history-watcher",
+        help="Start Haitun passive history sync as a background process",
+    )
+    _add_haitun_history_watcher_args(start_haitun_watcher)
+    status_haitun_watcher = sub.add_parser(
+        "status-haitun-history-watcher",
+        help="Show Haitun passive history sync process status",
+    )
+    _add_haitun_history_watcher_status_args(status_haitun_watcher)
+    stop_haitun_watcher = sub.add_parser(
+        "stop-haitun-history-watcher",
+        help="Stop Haitun passive history sync background process",
+    )
+    _add_haitun_history_watcher_status_args(stop_haitun_watcher)
 
     alpha_cmd = sub.add_parser("alpha-test", help="Run local Fusion Memory alpha simulation")
     alpha_cmd.add_argument("--report", default=None)
@@ -208,65 +230,93 @@ def main() -> None:
     try:
         if args.command == "init":
             if args.wizard:
-                _print_product_result(
+                return _print_product_result(
                     configure_interactive(args.home, host=args.host, port=args.port, force=args.force),
                     json_output=args.json,
                 )
             elif args.local_test:
-                _print_product_result(
+                return _print_product_result(
                     init_home(args.home, host=args.host, port=args.port, force=args.force, local_test=True),
                     json_output=args.json,
                 )
             else:
-                _print_product_result(
+                return _print_product_result(
                     init_home(args.home, host=args.host, port=args.port, force=args.force),
                     json_output=args.json,
                 )
-            return
         if args.command == "doctor":
-            _print_product_result(doctor(args.home), json_output=args.json)
-            return
+            return _print_product_result(doctor(args.home), json_output=args.json)
         if args.command == "install-check":
-            _print_product_result(install_readiness(args.home, force=args.force), json_output=args.json)
-            return
+            return _print_product_result(install_readiness(args.home, force=args.force), json_output=args.json)
         if args.command == "start":
-            _print_product_result(start_service(args.home, wait_seconds=args.wait_seconds), json_output=args.json)
-            return
+            return _print_product_result(start_service(args.home, wait_seconds=args.wait_seconds), json_output=args.json)
         if args.command == "stop":
-            _print_product_result(stop_service(args.home), json_output=args.json)
-            return
+            return _print_product_result(stop_service(args.home), json_output=args.json)
         if args.command == "status":
-            _print_product_result(service_status(args.home), json_output=args.json)
-            return
+            return _print_product_result(service_status(args.home), json_output=args.json)
         if args.command == "backup":
-            _print_product_result(backup_data(args.home), json_output=args.json)
-            return
+            return _print_product_result(backup_data(args.home), json_output=args.json)
         if args.command == "upgrade":
-            _print_product_result(upgrade(args.home, package=args.package, dry_run=args.dry_run), json_output=args.json)
-            return
+            return _print_product_result(upgrade(args.home, package=args.package, dry_run=args.dry_run), json_output=args.json)
         if args.command == "install-agent":
-            _print_product_result(
+            return _print_product_result(
                 install_agent(args.target, dry_run=args.dry_run, home=args.home),
                 json_output=args.json,
             )
-            return
         if args.command == "sync-haitun-history":
             config = config_from_workspace(
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                base_url=args.memory_url,
             )
+            if args.background:
+                return _print_product_result(
+                    start_history_watcher_daemon(
+                        config,
+                        poll_interval_seconds=args.poll_interval_seconds,
+                    ),
+                    json_output=args.json,
+                )
             if args.once:
-                _print_product_result(sync_haitun_history_once(config), json_output=args.json)
+                return _print_product_result(sync_haitun_history_once(config), json_output=args.json)
             else:
                 watch_history(config, poll_interval_seconds=args.poll_interval_seconds)
             return
+        if args.command == "start-haitun-history-watcher":
+            config = config_from_workspace(
+                workspace=Path(args.workspace),
+                session_id=args.session_id,
+                db_path=args.db,
+                base_url=args.memory_url,
+            )
+            return _print_product_result(
+                start_history_watcher_daemon(
+                    config,
+                    poll_interval_seconds=args.poll_interval_seconds,
+                ),
+                json_output=args.json,
+            )
+        if args.command == "status-haitun-history-watcher":
+            config = config_from_workspace(
+                workspace=Path(args.workspace),
+                session_id=args.session_id,
+                db_path=args.db,
+                base_url=args.memory_url,
+            )
+            return _print_product_result(status_history_watcher_daemon(config), json_output=args.json)
+        if args.command == "stop-haitun-history-watcher":
+            config = config_from_workspace(
+                workspace=Path(args.workspace),
+                session_id=args.session_id,
+                db_path=args.db,
+                base_url=args.memory_url,
+            )
+            return _print_product_result(stop_history_watcher_daemon(config), json_output=args.json)
         if args.command == "alpha-test":
-            _print_product_result(run_alpha(report_path=args.report), json_output=args.json)
-            return
+            return _print_product_result(run_alpha(report_path=args.report), json_output=args.json)
         if args.command == "beta-test":
-            _print_product_result(run_beta(report_path=args.report), json_output=args.json)
-            return
+            return _print_product_result(run_beta(report_path=args.report), json_output=args.json)
         if args.command == "migrate-postgres":
             runner = PostgresMigrationRunner(args.dsn)
             try:
@@ -352,8 +402,7 @@ def main() -> None:
             service.close()
     except Exception as exc:
         payload = {"ok": False, **safe_product_error(exc)}
-        _print_product_result(payload, json_output=getattr(args, "json", False))
-        return 1
+        return _print_product_result(payload, json_output=getattr(args, "json", False))
 
 
 def _jsonable(value):
@@ -371,8 +420,26 @@ def _jsonable(value):
 def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
+    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
-    parser.add_argument("--once", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument("--background", action="store_true", help="Start the long-running watcher in the background and return its OS pid")
+    parser.add_argument("--json", action="store_true")
+
+
+def _add_haitun_history_watcher_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workspace", required=True, help="Haitun workspace path")
+    parser.add_argument("--session-id", required=True, help="Haitun session id")
+    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
+    parser.add_argument("--json", action="store_true")
+
+
+def _add_haitun_history_watcher_status_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workspace", required=True, help="Haitun workspace path")
+    parser.add_argument("--session-id", required=True, help="Haitun session id")
+    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
     parser.add_argument("--json", action="store_true")
 
 
@@ -383,12 +450,13 @@ def _rewrite_compat_command_aliases(argv: list[str]) -> None:
             return
 
 
-def _print_product_result(result: dict, *, json_output: bool = False) -> None:
+def _print_product_result(result: dict, *, json_output: bool = False) -> int:
     result = _normalize_product_result(result)
     if json_output:
         print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
     else:
         print(render_human(result))
+    return 0 if result.get("ok", True) else 1
 
 
 def _normalize_product_result(result: dict[str, object]) -> dict[str, object]:

@@ -20,7 +20,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 "$PYTHON_BIN" -m pip install --upgrade pip
 "$PYTHON_BIN" -m pip install -e "$SCRIPT_DIR"
 if ! "$PYTHON_BIN" -m pip install -e "$SCRIPT_DIR[postgres,qwen]"; then
-  echo "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; Fusion Memory may use compromised local mode." >&2
+  echo "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available." >&2
 fi
 if [ "${FUSION_MEMORY_USE_WIZARD:-}" = "1" ]; then
   "$PYTHON_BIN" -m fusion_memory.cli init --wizard

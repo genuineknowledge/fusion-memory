@@ -58,10 +58,13 @@ class AgentAdapterDocsTests(unittest.TestCase):
         start_section = text.split("## Start And Verify", 1)[1].split(
             "## Persistence (Required After Start)", 1
         )[0]
-        self.assertIn("PASSIVE_SYNC_PID", start_section)
-        self.assertIn("kill -0", start_section)
+        self.assertIn("--background --json", start_section)
+        self.assertIn("fusion-memory status-haitun-history-watcher", start_section)
+        self.assertNotIn("nohup", start_section)
+        self.assertNotIn("kill -0", start_section)
+        self.assertNotIn("Start-Process", start_section)
         self.assertIn("HTTP /add", text)
-        self.assertIn("fusion-memory sync-haitun-history", start_section)
+        self.assertIn("fusion-memory sync-haitun-history", text)
         self.assertIn("automatic turn sync", text)
         self.assertNotIn('fusion-memory --db "$FM_DB" sync-haitun-history', text)
         self.assertNotIn("postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory", text)
