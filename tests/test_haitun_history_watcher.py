@@ -8,8 +8,11 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
+from fusion_memory.adapters import haitun_history_watcher as watcher
 from fusion_memory.adapters.haitun_history_watcher import config_from_workspace, load_checkpoint, sync_history_once
 
 
@@ -184,6 +187,190 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             self.assertEqual(len(received), 1)
             self.assertEqual(received[0]["metadata"]["source"], "haitun-history-watcher")
 
+    def test_start_history_watcher_daemon_spawns_python_without_shell_and_writes_pid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cfg = config_from_workspace(
+                workspace=workspace,
+                session_id="session-1",
+                db_path=workspace / "memory.sqlite3",
+                base_url="http://127.0.0.1:9876",
+                env={"PATH": os.environ.get("PATH", "")},
+            )
+            fake_process = _FakeProcess(pid=24680)
+
+            with (
+                patch.object(watcher, "_process_exists", return_value=False),
+                patch.object(watcher.subprocess, "Popen", return_value=fake_process) as popen,
+            ):
+                result = watcher.start_history_watcher_daemon(
+                    cfg,
+                    poll_interval_seconds=0.5,
+                )
+            pid_text = Path(result["pid_file"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["pid"], 24680)
+        self.assertEqual(pid_text, "24680")
+        self.assertTrue(str(result["log_file"]).endswith("session-1.log"))
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:3], [sys.executable, "-m", "fusion_memory.cli"])
+        self.assertIn("--db", command)
+        self.assertIn(str(workspace / "memory.sqlite3"), command)
+        self.assertIn("sync-haitun-history", command)
+        self.assertIn("--workspace", command)
+        self.assertIn(str(workspace), command)
+        self.assertIn("--session-id", command)
+        self.assertIn("session-1", command)
+        self.assertIn("--poll-interval-seconds", command)
+        self.assertIn("0.5", command)
+        self.assertNotIn("--once", command)
+
+        kwargs = popen.call_args.kwargs
+        self.assertNotEqual(kwargs.get("shell"), True)
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+        self.assertEqual(kwargs["env"]["PSI_MEMORY_BASE_URL"], "http://127.0.0.1:9876")
+
+    def test_start_history_watcher_daemon_reports_already_running_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cfg = config_from_workspace(workspace=workspace, session_id="session-1")
+            pid_file = watcher.history_watcher_pid_file(cfg)
+            pid_file.parent.mkdir(parents=True)
+            pid_file.write_text("13579", encoding="utf-8")
+
+            with (
+                patch.object(watcher, "_process_exists", return_value=True),
+                patch.object(watcher.subprocess, "Popen") as popen,
+            ):
+                result = watcher.start_history_watcher_daemon(cfg)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["already_running"])
+        self.assertEqual(result["pid"], 13579)
+        popen.assert_not_called()
+
+    def test_history_watcher_status_and_stop_use_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cfg = config_from_workspace(workspace=workspace, session_id="session-1")
+            pid_file = watcher.history_watcher_pid_file(cfg)
+            pid_file.parent.mkdir(parents=True)
+            pid_file.write_text("13579", encoding="utf-8")
+
+            with patch.object(watcher, "_process_exists", return_value=True):
+                status = watcher.status_history_watcher_daemon(cfg)
+
+            with (
+                patch.object(watcher, "_process_exists", side_effect=[True, False]),
+                patch.object(watcher.os, "kill") as kill,
+            ):
+                stopped = watcher.stop_history_watcher_daemon(cfg, wait_seconds=0.01)
+
+        self.assertTrue(status["running"])
+        self.assertEqual(status["pid"], 13579)
+        self.assertTrue(stopped["ok"], stopped)
+        self.assertTrue(stopped["stopped"])
+        self.assertFalse(pid_file.exists())
+        kill.assert_called()
+
+    def test_history_watcher_status_is_not_ok_when_pid_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cfg = config_from_workspace(workspace=workspace, session_id="session-1")
+
+            status = watcher.status_history_watcher_daemon(cfg)
+
+        self.assertFalse(status["ok"])
+        self.assertFalse(status["running"])
+        self.assertIsNone(status["pid"])
+
+    def test_windows_history_watcher_env_dedupes_path_case(self) -> None:
+        env = watcher._daemon_env(
+            {
+                "Path": r"C:\Windows\System32",
+                "PATH": r"C:\msys64\ucrt64\bin",
+                "OTHER": "value",
+            },
+            memory_url="http://127.0.0.1:8700",
+            os_name="nt",
+        )
+
+        path_keys = [key for key in env if key.lower() == "path"]
+        self.assertEqual(path_keys, ["Path"])
+        self.assertEqual(env["Path"], r"C:\Windows\System32")
+        self.assertEqual(env["PSI_MEMORY_BASE_URL"], "http://127.0.0.1:8700")
+
+    def test_cli_exposes_cross_platform_history_watcher_daemon_commands(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-m", "fusion_memory.cli", "--help"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertIn("start-haitun-history-watcher", proc.stdout)
+        self.assertIn("status-haitun-history-watcher", proc.stdout)
+        self.assertIn("stop-haitun-history-watcher", proc.stdout)
+
+        sync_help = subprocess.run(
+            [sys.executable, "-m", "fusion_memory.cli", "sync-haitun-history", "--help"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertIn("--background", sync_help.stdout)
+
+    def test_cli_sync_haitun_history_background_outputs_daemon_json(self) -> None:
+        from fusion_memory import cli
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            try:
+                sys.argv = [
+                    "fusion-memory",
+                    "sync-haitun-history",
+                    "--workspace",
+                    str(workspace),
+                    "--session-id",
+                    "session-1",
+                    "--memory-url",
+                    "http://127.0.0.1:9876",
+                    "--background",
+                    "--json",
+                ]
+                sys.stdout = StringIO()
+                with patch(
+                    "fusion_memory.cli.start_history_watcher_daemon",
+                    return_value={
+                        "ok": True,
+                        "running": True,
+                        "pid": 24680,
+                        "pid_file": str(workspace / ".fusion-memory" / "haitun-history-watcher" / "session-1.pid"),
+                        "log_file": str(workspace / ".fusion-memory" / "haitun-history-watcher" / "session-1.log"),
+                    },
+                ) as start:
+                    code = cli.main()
+                payload = json.loads(sys.stdout.getvalue())
+            finally:
+                sys.argv = old_argv
+                sys.stdout = old_stdout
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["pid"], 24680)
+        self.assertTrue(payload["running"])
+        self.assertIn("pid_file", payload)
+        self.assertIn("log_file", payload)
+        start.assert_called_once()
+
 
 def _start_fake_memory_server() -> tuple[HTTPServer, threading.Thread, list[dict]]:
     received: list[dict] = []
@@ -205,6 +392,11 @@ def _start_fake_memory_server() -> tuple[HTTPServer, threading.Thread, list[dict
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread, received
+
+
+class _FakeProcess:
+    def __init__(self, *, pid: int) -> None:
+        self.pid = pid
 
 
 if __name__ == "__main__":

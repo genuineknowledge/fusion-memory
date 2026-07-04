@@ -17,7 +17,7 @@ def check_agent(target: str, *, home: str | Path | None = None) -> dict[str, Any
             "workspace": str(DOLPHIN_WORKSPACE),
             "skill": str(DOLPHIN_SKILL),
             "message": (
-                "Haitun Fusion Memory workspace is present. Run sync-haitun-history beside the Haitun session for passive persistence."
+                "Haitun Fusion Memory workspace is present. Run sync-haitun-history --background beside the Haitun session for passive persistence."
                 if ok
                 else "Haitun Fusion Memory workspace is incomplete. Run fusion-memory install-agent --target dolphin."
             ),

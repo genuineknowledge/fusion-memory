@@ -119,15 +119,21 @@ writes are marked with
 Synced passive writes are marked with `metadata.write_mode="history_sync"` and
 `metadata.auto_persisted=true`.
 
-Start passive saved-history sync in a second shell:
+Start passive saved-history sync in the background:
 
 ```bash
 fusion-memory sync-haitun-history \
-  --workspace /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace \
-  --session-id <session-id>
+  --workspace /path/to/integrations/dolphin-fusion-memory/workspace \
+  --session-id <session-id> \
+  --background --json
+fusion-memory status-haitun-history-watcher \
+  --workspace /path/to/integrations/dolphin-fusion-memory/workspace \
+  --session-id <session-id> \
+  --json
 ```
 
-For a one-time backfill, add `--once --json`.
+For a one-time backfill, use `sync-haitun-history --once --json`. Do not run the
+long-running watcher in a foreground WebUI/tool call.
 
 ## Copy Into Another Workspace
 
@@ -135,7 +141,7 @@ This workspace is self-contained. To create a new memory-only workspace, copy th
 whole directory:
 
 ```bash
-cp -R /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace ./my-memory-workspace
+cp -R /path/to/integrations/dolphin-fusion-memory/workspace ./my-memory-workspace
 ```
 
 Then start Haitun-Agent with `--workspace ./my-memory-workspace`.

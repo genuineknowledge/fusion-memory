@@ -144,8 +144,11 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "DASHSCOPE_API_KEY" in skill
     assert "SQLite plus bundled local Qwen vector models" in skill
     assert "Postgres/pgvector is optional" in skill
-    assert "PASSIVE_SYNC_PID" in skill
-    assert "kill -0" in skill
+    assert "--background --json" in skill
+    assert "fusion-memory status-haitun-history-watcher" in skill
+    assert "nohup" not in skill
+    assert "kill -0" not in skill
+    assert "Start-Process" not in skill
     assert "HTTP /add" in skill
     assert 'fusion-memory sync-haitun-history' in skill
     assert 'fusion-memory --db "$FM_DB" sync-haitun-history' not in skill
@@ -154,10 +157,13 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     start_section = skill.split("## Start And Verify", 1)[1].split(
         "## Persistence (Required After Start)", 1
     )[0]
-    assert 'fusion-memory sync-haitun-history' in start_section
+    assert "--background --json" in start_section
     assert "Git LFS pointer" in skill
     assert "git lfs pull" in skill
-    assert "dependency installation failed" not in skill
+    assert "If install-check returns not_ready" in skill
+    assert 'python3 -m pip install -e "$AGENT_DIR/fusion-memory[postgres,qwen]"' in skill
+    assert "summarize the pip error" in skill
+    assert "Do not silently fall back to local_test" in skill
     assert "Qwen runtime dependencies are unavailable" in skill
     assert "Postgres/pgvector is unavailable" not in skill
 

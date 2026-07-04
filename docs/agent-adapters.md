@@ -77,13 +77,24 @@ fusion-memory install-agent --target dolphin
 fusion-memory doctor
 fusion-memory sync-haitun-history \
   --workspace integrations/dolphin-fusion-memory/workspace \
-  --session-id <session-id>
+  --session-id <session-id> \
+  --once --json
+fusion-memory sync-haitun-history \
+  --workspace integrations/dolphin-fusion-memory/workspace \
+  --session-id <session-id> \
+  --background --json
+fusion-memory status-haitun-history-watcher \
+  --workspace integrations/dolphin-fusion-memory/workspace \
+  --session-id <session-id> \
+  --json
 ```
 
 The sync process reads Haitun's saved `histories/<session-id>.jsonl` file and
 posts turns to the Fusion Memory daemon through HTTP `/add`. It does not patch
-Haitun source code. Continue the session if memory is offline; restart the sync
-process after the local service is back.
+Haitun source code. Do not run the long-running sync in a foreground WebUI tool
+call; use `--once` for a finite backfill check or `--background` for the watcher.
+Continue the session if memory is offline; restart the sync process after the
+local service is back.
 
 Fusion-Agent uses its in-repo adapter. Start a session with memory enabled and:
 

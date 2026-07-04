@@ -76,9 +76,11 @@ fusion-memory doctor
 ```
 
 Haitun recovery: verify the Haitun workspace, confirm `PSI_MEMORY_BASE_URL`
-points at the local Fusion Memory daemon, then run
-`fusion-memory sync-haitun-history --workspace <workspace> --session-id <session-id>`
-beside the Haitun session for passive persistence.
+points at the local Fusion Memory daemon, run
+`fusion-memory sync-haitun-history --workspace <workspace> --session-id <session-id> --once --json`
+for a finite backfill check, then run
+`fusion-memory sync-haitun-history --workspace <workspace> --session-id <session-id> --background --json`
+and verify it with `fusion-memory status-haitun-history-watcher --workspace <workspace> --session-id <session-id> --json`.
 
 OpenClaw recovery: reinstall the external OpenClaw plugin, restart OpenClaw, and
 keep the OpenClaw source checkout unchanged.

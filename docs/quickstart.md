@@ -151,12 +151,17 @@ set PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 Fusion Memory。要让会话 history 持续自动写入，不需要改 agent core；启动
 一个 Fusion Memory 侧的同步进程即可。
 
-读 workspace history 文件：
+后台启动 workspace history watcher：
 
 ```bash
 fusion-memory sync-haitun-history \
   --workspace /path/to/haitun-workspace \
-  --session-id <session-id>
+  --session-id <session-id> \
+  --background --json
+fusion-memory status-haitun-history-watcher \
+  --workspace /path/to/haitun-workspace \
+  --session-id <session-id> \
+  --json
 ```
 
 一次性回填：
@@ -169,7 +174,8 @@ fusion-memory sync-haitun-history \
 ```
 
 同步命令只读取 user/assistant turn，写入 Fusion Memory `/add`，并记录本地
-state 文件，重复运行不会重复写入。
+state 文件，重复运行不会重复写入。不要在 WebUI/agent 前台工具里运行不带
+`--once` 或 `--background` 的长驻 sync；那会一直等待 watcher 结束。
 
 ## 7. 常见问题
 

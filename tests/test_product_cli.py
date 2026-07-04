@@ -138,6 +138,35 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "local_full")
         self.assertEqual(payload["db"], str(Path(tmp) / "fusion-memory.sqlite3"))
 
+    def test_install_check_cli_returns_nonzero_when_install_is_not_ready(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        try:
+            sys.argv = ["fusion-memory", "install-check", "--json"]
+            sys.stdout = StringIO()
+            with patch(
+                "fusion_memory.cli.install_readiness",
+                return_value={
+                    "ok": False,
+                    "mode": "not_ready",
+                    "message": "model.safetensors is a Git LFS pointer",
+                    "next_step": "Run git lfs pull.",
+                },
+            ):
+                code = main()
+            payload = json.loads(sys.stdout.getvalue())
+        finally:
+            sys.argv = old_argv
+            sys.stdout = old_stdout
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Git LFS pointer", payload["message"])
+
     def test_sync_haitun_history_cli_json_runs_once(self) -> None:
         from fusion_memory.cli import main
         import sys
@@ -453,7 +482,7 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("Install the full runtime dependencies", result["message"])
         self.assertIn(".[postgres,qwen]", result["message"])
 
-    def test_install_readiness_falls_back_to_compromised_when_qwen_dependencies_are_unavailable(
+    def test_install_readiness_reports_not_ready_when_qwen_dependencies_are_unavailable(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,14 +506,13 @@ class ProductCliTests(unittest.TestCase):
                 ),
             ):
                 result = install_readiness(home, force=True)
-            config = load_config(home)
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["mode"], "compromised")
-        self.assertTrue(result["compromised"])
-        self.assertEqual(config["storage_backend"], "sqlite")
-        self.assertEqual(config["embedding"]["provider"], "deterministic")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "not_ready")
+        self.assertFalse(result["compromised"])
+        self.assertFalse((home / "config.json").exists())
         self.assertIn("Qwen runtime dependencies", result["message"])
+        self.assertIn(".[postgres,qwen]", result["next_step"])
 
     def test_install_readiness_uses_local_full_when_qwen_is_ready_without_postgres(
         self,
@@ -1078,6 +1106,27 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(kwargs["creationflags"] & 0x00000008, 0x00000008)
         self.assertEqual(kwargs["creationflags"] & 0x00000200, 0x00000200)
 
+    def test_daemon_popen_kwargs_dedupes_windows_path_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "service.log"
+            with (
+                log_path.open("ab") as handle,
+                patch("fusion_memory.product.os.name", "nt"),
+            ):
+                kwargs = product._daemon_popen_kwargs(
+                    handle,
+                    cwd=tmp,
+                    env={
+                        "Path": r"C:\Windows\System32",
+                        "PATH": r"C:\msys64\ucrt64\bin",
+                        "OTHER": "value",
+                    },
+                )
+
+        path_keys = [key for key in kwargs["env"] if key.lower() == "path"]
+        self.assertEqual(path_keys, ["Path"])
+        self.assertEqual(kwargs["env"]["Path"], r"C:\Windows\System32")
+
     def test_daemon_python_executable_uses_pythonw_on_windows(self) -> None:
         with patch("fusion_memory.product.os.name", "nt"):
             executable = product._daemon_python_executable(
@@ -1108,6 +1157,16 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn('-e "$ScriptDir"', install_ps1)
         self.assertIn('-e "$ScriptDir[postgres,qwen]"', install_ps1)
         self.assertIn("Optional Postgres/Qwen dependencies", install_ps1)
+        self.assertIn("Normalize-ProcessPathEnvironment", install_ps1)
+        self.assertLess(
+            install_ps1.index("Normalize-ProcessPathEnvironment"),
+            install_ps1.index("& $Python -m pip install --upgrade pip"),
+        )
+        self.assertNotIn("Start-Process", install_ps1)
+        self.assertIn("Remove-Item Env:PATH", install_ps1)
+        self.assertIn("install-check --force", install_ps1)
+        self.assertIn("doctor", install_ps1)
+        self.assertGreaterEqual(install_ps1.count("$LASTEXITCODE -ne 0"), 5)
 
     def test_qwen_extra_does_not_block_python_314(self) -> None:
         import tomllib
