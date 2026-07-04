@@ -23,47 +23,106 @@ function Normalize-ProcessPathEnvironment {
     $env:Path = $PathValue
 }
 
+function Invoke-SelectedPython {
+    param(
+        [string]$PythonCommand,
+        [string[]]$PythonArgs,
+        [string[]]$Arguments
+    )
+    & $PythonCommand @PythonArgs @Arguments
+}
+
+function Test-CompatiblePython {
+    param(
+        [string]$PythonCommand,
+        [string[]]$PythonArgs = @()
+    )
+    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; text = ' '.join(str(x) for x in (sys.version, sys.executable, sysconfig.get_platform())).lower(); sys.exit(1 if ('msys' in text or 'mingw' in text or 'ucrt64' in text) else 0)") 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Select-CompatiblePython {
+    if ($env:PYTHON_BIN) {
+        return @{ Command = $env:PYTHON_BIN; Args = @(); Display = $env:PYTHON_BIN }
+    }
+
+    if (Test-IsWindowsProcess) {
+        $Candidates = @(
+            @{ Command = "py"; Args = @("-3.12"); Display = "py -3.12" },
+            @{ Command = "py"; Args = @("-3.11"); Display = "py -3.11" },
+            @{ Command = "python"; Args = @(); Display = "python" }
+        )
+        foreach ($Candidate in $Candidates) {
+            if (-not (Get-Command $Candidate.Command -ErrorAction SilentlyContinue)) {
+                continue
+            }
+            if (Test-CompatiblePython $Candidate.Command $Candidate.Args) {
+                return $Candidate
+            }
+        }
+        return @{ Command = "python"; Args = @(); Display = "python" }
+    }
+
+    return @{ Command = "python"; Args = @(); Display = "python" }
+}
+
+function Assert-CompatiblePython {
+    param(
+        [string]$PythonCommand,
+        [string[]]$PythonArgs = @()
+    )
+    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; print(sys.executable); print(sys.version.replace('\n', ' ')); print(sysconfig.get_platform())")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    if (-not (Test-CompatiblePython $PythonCommand $PythonArgs)) {
+        Write-Error "MSYS2/Mingw Python is not supported for Fusion Memory's local Qwen runtime because PyTorch wheels are not available for that Python ABI. Install official Windows CPython or conda Python 3.11/3.12, then rerun with `$env:PYTHON_BIN set to that python.exe."
+        exit 1
+    }
+}
+
 if (Test-IsWindowsProcess) {
     Normalize-ProcessPathEnvironment
 }
 
-$Python = $env:PYTHON_BIN
-if (-not $Python) {
-    $Python = "python"
-}
+$PythonSelection = Select-CompatiblePython
+$Python = $PythonSelection.Command
+$PythonArgs = $PythonSelection.Args
+Write-Host "Using Python: $($PythonSelection.Display)"
+Assert-CompatiblePython $Python $PythonArgs
 
-& $Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')"
+Invoke-SelectedPython $Python $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')")
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& $Python -m pip install --upgrade pip
+Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "--upgrade", "pip")
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-& $Python -m pip install -e "$ScriptDir"
+Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "-e", "$ScriptDir")
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-& $Python -m pip install -e "$ScriptDir[postgres,qwen]"
+Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "-e", "$ScriptDir[postgres,qwen]")
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available."
 }
 if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
-    & $Python -m fusion_memory.cli init --wizard
+    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "init", "--wizard")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 } elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
-    & $Python -m fusion_memory.cli install-check --force
+    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "install-check", "--force")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 } else {
-    & $Python -m fusion_memory.cli install-check --force
+    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "install-check", "--force")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 }
-& $Python -m fusion_memory.cli doctor
+Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "doctor")
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

@@ -144,6 +144,9 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "DASHSCOPE_API_KEY" in skill
     assert "SQLite plus bundled local Qwen vector models" in skill
     assert "Postgres/pgvector is optional" in skill
+    assert "Do not use MSYS2/Mingw Python" in skill
+    assert "$env:PYTHON_BIN" in skill
+    assert "py -3.12" in skill
     assert "--background --json" in skill
     assert "fusion-memory status-haitun-history-watcher" in skill
     assert "nohup" not in skill
