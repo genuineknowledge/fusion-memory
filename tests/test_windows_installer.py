@@ -12,49 +12,42 @@ from fusion_memory import windows_installer
 
 
 class WindowsInstallerTests(unittest.TestCase):
-    def test_install_plan_separates_base_install_from_qwen_wheel_dependencies(self) -> None:
+    def test_uv_tool_install_command_manages_python_and_runtime_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            venv_python = root / ".fusion-memory-venv" / "Scripts" / "python.exe"
 
-            plan = windows_installer.build_install_plan(
+            command = windows_installer.build_uv_tool_install_command(
                 root,
-                venv_python,
-                log_dir=root / ".fusion-memory-logs",
+                uv_bin="uv",
             )
 
-        commands = [step.command for step in plan]
-        self.assertIn([str(venv_python), "-m", "pip", "install", "-e", str(root)], commands)
-        qwen_runtime = next(command for command in commands if "torch>=2.5" in command)
-        self.assertIn("--only-binary=:all:", qwen_runtime)
-        self.assertIn("safetensors", qwen_runtime)
-        self.assertIn("tokenizers", qwen_runtime)
-        self.assertIn("hf-xet", qwen_runtime)
-        self.assertNotIn(f"{root}[postgres,qwen]", " ".join(" ".join(command) for command in commands))
+        self.assertEqual(command[:7], ["uv", "tool", "install", "--force", "--python", "3.12", "--managed-python"])
+        self.assertIn("--with", command)
+        self.assertIn("modelscope-hub>=0.1.6", command)
+        self.assertIn("torch>=2.5", command)
+        self.assertIn("sentence-transformers>=3.4", command)
+        self.assertIn("--no-build-package", command)
+        self.assertIn("safetensors", command)
+        self.assertIn("tokenizers", command)
+        self.assertIn("hf-xet", command)
+        self.assertEqual(command[-1], str(root))
+        self.assertNotIn("pip", command)
 
-    def test_install_plan_downloads_qwen_models_from_modelscope_before_readiness(self) -> None:
+    def test_uv_tool_install_command_supports_versioned_package_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            venv_python = root / ".fusion-memory-venv" / "Scripts" / "python.exe"
-
-            plan = windows_installer.build_install_plan(
-                root,
-                venv_python,
-                log_dir=root / ".fusion-memory-logs",
+            command = windows_installer.build_uv_tool_install_command(
+                "git+https://github.com/genuineknowledge/fusion-memory.git@v0.1.0",
+                uv_bin=str(Path(tmp) / "uv.exe"),
             )
 
-        step_names = [step.step_name for step in plan]
-        commands = [step.command for step in plan]
-        downloader = next(command for command in commands if "modelscope-hub>=0.1.6" in command)
-        self.assertIn("--only-binary=:all:", downloader)
-        model_step = next(command for command in commands if "--download-models-only" in command)
-        self.assertIn(str(root), model_step)
-        self.assertLess(step_names.index("local qwen models"), step_names.index("install readiness"))
-        self.assertNotIn("git lfs", " ".join(" ".join(command).lower() for command in commands))
+        self.assertEqual(command[0], str(Path(tmp) / "uv.exe"))
+        self.assertEqual(command[-1], "git+https://github.com/genuineknowledge/fusion-memory.git@v0.1.0")
+        self.assertNotIn("git lfs", " ".join(command).lower())
 
     def test_download_qwen_models_uses_modelscope_model_ids_and_local_model_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            models_dir = root / "home" / "models"
             calls: list[dict[str, object]] = []
 
             class FakeHubApi:
@@ -71,6 +64,7 @@ class WindowsInstallerTests(unittest.TestCase):
                 result = windows_installer.download_qwen_models(
                     root,
                     log_dir=root / ".fusion-memory-logs",
+                    models_dir=models_dir,
                 )
 
         self.assertTrue(result.ok)
@@ -84,6 +78,8 @@ class WindowsInstallerTests(unittest.TestCase):
             [Path(call["kwargs"]["local_dir"]).name for call in download_calls],
             ["Qwen3-Embedding-0.6B", "Qwen3-Reranker-0.6B"],
         )
+        for call in download_calls:
+            self.assertEqual(Path(call["kwargs"]["local_dir"]).parent, models_dir)
         for call in download_calls:
             self.assertIn("*.safetensors", call["kwargs"]["allow_patterns"])
             self.assertIn("*.json", call["kwargs"]["allow_patterns"])
@@ -103,6 +99,7 @@ class WindowsInstallerTests(unittest.TestCase):
                 result = windows_installer.download_qwen_models(
                     root,
                     log_dir=root / ".fusion-memory-logs",
+                    models_dir=root / "models",
                 )
 
         self.assertFalse(result.ok)
@@ -132,6 +129,7 @@ class WindowsInstallerTests(unittest.TestCase):
                 result = windows_installer.download_qwen_models(
                     root,
                     log_dir=root / ".fusion-memory-logs",
+                    models_dir=root / "models",
                 )
 
         self.assertTrue(result.ok)

@@ -27,6 +27,7 @@ from fusion_memory.product import (
     doctor,
     init_home,
     install_readiness,
+    product_paths,
     render_human,
     safe_product_error,
     service_status,
@@ -86,10 +87,14 @@ def main() -> None:
     init_cmd.add_argument("--local-test", action="store_true", help="Use SQLite and built-in lightweight models for temporary local testing")
     init_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
-    install_check_cmd = sub.add_parser("install-check", help="Initialize after install using bundled models or a safe fallback")
+    install_check_cmd = sub.add_parser("install-check", help="Initialize after install using home-local models or a safe fallback")
     install_check_cmd.add_argument("--home", default=None, help="Fusion Memory data directory")
     install_check_cmd.add_argument("--force", action="store_true", help="Overwrite existing local configuration")
     install_check_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    download_models_cmd = sub.add_parser("download-models", help="Download local Qwen models into Fusion Memory home")
+    download_models_cmd.add_argument("--home", default=None, help="Fusion Memory data directory")
+    download_models_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     doctor_cmd = sub.add_parser("doctor", help="Check whether Fusion Memory is ready to run")
     doctor_cmd.add_argument("--home", default=None, help="Fusion Memory data directory")
@@ -248,6 +253,26 @@ def main() -> None:
             return _print_product_result(doctor(args.home), json_output=args.json)
         if args.command == "install-check":
             return _print_product_result(install_readiness(args.home, force=args.force), json_output=args.json)
+        if args.command == "download-models":
+            from fusion_memory.windows_installer import download_qwen_models
+
+            paths = product_paths(args.home)
+            paths.home.mkdir(parents=True, exist_ok=True)
+            result = download_qwen_models(
+                Path.cwd(),
+                log_dir=paths.home / "logs",
+                models_dir=paths.models,
+            )
+            return _print_product_result(
+                {
+                    "ok": result.ok,
+                    "step": result.step_name,
+                    "error": result.error,
+                    "models": str(paths.models),
+                    "log": str(result.log_path) if result.log_path else "",
+                },
+                json_output=args.json,
+            )
         if args.command == "start":
             return _print_product_result(start_service(args.home, wait_seconds=args.wait_seconds), json_output=args.json)
         if args.command == "stop":

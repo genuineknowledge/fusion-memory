@@ -56,10 +56,11 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting this workspace.
 
-The Fusion Memory installer downloads `models/Qwen3-Embedding-0.6B` and
-`models/Qwen3-Reranker-0.6B` from ModelScope, then installs the full local Qwen
-runtime dependencies, including Postgres adapter, local Qwen adapter, PyTorch,
-and Transformers. If model download or dependency installation fails,
+The Fusion Memory installer installs Fusion Memory as a `uv tool` with a
+uv-managed Python 3.12 runtime, then downloads the Qwen model directories from
+ModelScope into the Fusion Memory home `models/` directory. It installs the full
+local Qwen runtime dependencies, including Postgres adapter, local Qwen adapter,
+PyTorch, and Transformers. If model download or dependency installation fails,
 install-check reports not ready with the failed step and log path. The installer
 does not require Git LFS and does not silently fall back to `local_test`.
 The default local configuration uses SQLite plus local Qwen models;

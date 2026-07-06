@@ -26,6 +26,16 @@ WINDOWS_RUNTIME_WHEEL_DEPENDENCIES = [
     "typer",
 ]
 MODELSCOPE_HUB_DEPENDENCY = "modelscope-hub>=0.1.6"
+UV_TOOL_DEPENDENCIES = [MODELSCOPE_HUB_DEPENDENCY, *WINDOWS_RUNTIME_WHEEL_DEPENDENCIES]
+UV_NO_BUILD_PACKAGES = [
+    "psycopg2-binary",
+    "torch",
+    "transformers",
+    "sentence-transformers",
+    "safetensors",
+    "tokenizers",
+    "hf-xet",
+]
 MODELSCOPE_MODEL_SPECS = [
     ("Qwen/Qwen3-Embedding-0.6B", "Qwen3-Embedding-0.6B"),
     ("Qwen/Qwen3-Reranker-0.6B", "Qwen3-Reranker-0.6B"),
@@ -63,6 +73,30 @@ class StepResult:
     error: str = ""
     returncode: int = 0
     log_path: Path | None = None
+
+
+def build_uv_tool_install_command(
+    package: str | Path,
+    *,
+    uv_bin: str | Path = "uv",
+    python: str = "3.12",
+) -> list[str]:
+    command = [
+        str(uv_bin),
+        "tool",
+        "install",
+        "--force",
+        "--python",
+        python,
+        "--managed-python",
+        "--no-progress",
+    ]
+    for dependency in UV_TOOL_DEPENDENCIES:
+        command.extend(["--with", dependency])
+    for package_name in UV_NO_BUILD_PACKAGES:
+        command.extend(["--no-build-package", package_name])
+    command.append(str(package))
+    return command
 
 
 def build_install_plan(
@@ -263,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--python-command")
     parser.add_argument("--python-arg", action="append", default=[])
     parser.add_argument("--script-dir", required=True)
+    parser.add_argument("--models-dir")
     parser.add_argument("--venv-dir")
     parser.add_argument("--log-dir", required=True)
     parser.add_argument("--json", action="store_true")
@@ -271,7 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     script_dir = Path(args.script_dir).resolve()
     log_dir = Path(args.log_dir).resolve()
     if args.download_models_only:
-        result = download_qwen_models(script_dir, log_dir=log_dir)
+        result = download_qwen_models(script_dir, log_dir=log_dir, models_dir=args.models_dir)
         if args.json:
             print(json.dumps(_download_result_payload(result), ensure_ascii=False, indent=2))
         elif result.ok:
@@ -334,8 +369,13 @@ def ensure_uv(script_dir: str | Path, *, log_dir: str | Path) -> Path:
     return _download_uv(tools_dir, log_dir=log_dir)
 
 
-def download_qwen_models(script_dir: str | Path, *, log_dir: str | Path) -> StepResult:
-    root = Path(script_dir).resolve()
+def download_qwen_models(
+    script_dir: str | Path,
+    *,
+    log_dir: str | Path,
+    models_dir: str | Path | None = None,
+) -> StepResult:
+    _ = Path(script_dir).resolve()
     log_path = Path(log_dir) / "install.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -350,7 +390,12 @@ def download_qwen_models(script_dir: str | Path, *, log_dir: str | Path) -> Step
         )
 
     api = HubApi()
-    models_root = root / "models"
+    if models_dir is None:
+        from fusion_memory.product import product_paths
+
+        models_root = product_paths().models
+    else:
+        models_root = Path(models_dir).expanduser()
     for repo_id, local_name in MODELSCOPE_MODEL_SPECS:
         local_dir = models_root / local_name
         status = _model_dir_status(local_dir)

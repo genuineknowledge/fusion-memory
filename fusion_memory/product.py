@@ -24,12 +24,6 @@ PORT_FALLBACK_ATTEMPTS = 20
 DEFAULT_POSTGRES_DSN = "postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory"
 DEFAULT_QWEN_EMBEDDING_MODEL_NAME = "Qwen3-Embedding-0.6B"
 DEFAULT_QWEN_RERANKER_MODEL_NAME = "Qwen3-Reranker-0.6B"
-DEFAULT_QWEN_EMBEDDING_MODEL = str(
-    Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_EMBEDDING_MODEL_NAME
-)
-DEFAULT_QWEN_RERANKER_MODEL = str(
-    Path(__file__).resolve().parents[1] / "models" / DEFAULT_QWEN_RERANKER_MODEL_NAME
-)
 MODEL_SAFETENSORS_MIN_BYTES = 100 * 1024 * 1024
 TOKENIZER_JSON_MIN_BYTES = 100 * 1024
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
@@ -41,6 +35,7 @@ class ProductPaths:
     home: Path
     config: Path
     db: Path
+    models: Path
     log: Path
     pid: Path
     backup_dir: Path
@@ -69,34 +64,27 @@ def product_paths(home: str | Path | None = None) -> ProductPaths:
         home=root,
         config=root / "config.json",
         db=root / "fusion-memory.sqlite3",
+        models=root / "models",
         log=root / "fusion-memory.log",
         pid=root / "fusion-memory.pid",
         backup_dir=root / "backups",
     )
 
 
-def default_local_embedding_model_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "models"
-        / DEFAULT_QWEN_EMBEDDING_MODEL_NAME
-    )
+def default_local_embedding_model_path(home: str | Path | None = None) -> Path:
+    return product_paths(home).models / DEFAULT_QWEN_EMBEDDING_MODEL_NAME
 
 
-def default_local_reranker_model_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "models"
-        / DEFAULT_QWEN_RERANKER_MODEL_NAME
-    )
+def default_local_reranker_model_path(home: str | Path | None = None) -> Path:
+    return product_paths(home).models / DEFAULT_QWEN_RERANKER_MODEL_NAME
 
 
 def install_readiness(
     home: str | Path | None = None, *, force: bool = False
 ) -> dict[str, Any]:
-    """Initialize the product after install using bundled models when possible.
+    """Initialize the product after install using local Qwen models when possible.
 
-    Production mode is selected only when the repository-local
+    Production mode is selected only when the Fusion Memory home-local
     embedding/reranker directories are present,
     optional ML dependencies are installed by the installer, and the current
     machine can load/run the two local vector models. The install scripts
@@ -108,12 +96,12 @@ def install_readiness(
     """
 
     embedding_status = _repository_model_status(
-        default_local_embedding_model_path(),
-        label="repository-local Qwen3 embedding model",
+        default_local_embedding_model_path(home),
+        label="local Qwen3 embedding model",
     )
     reranker_status = _repository_model_status(
-        default_local_reranker_model_path(),
-        label="repository-local Qwen3 reranker model",
+        default_local_reranker_model_path(home),
+        label="local Qwen3 reranker model",
     )
     embedding_ready = bool(embedding_status["ok"])
     reranker_ready = bool(reranker_status["ok"])
@@ -170,7 +158,7 @@ def install_readiness(
             "next_step": "Rerun the Fusion Memory installer, then rerun fusion-memory install-check --force.",
         }
 
-    smoke = _qwen_runtime_smoke()
+    smoke = _qwen_runtime_smoke(home)
     if smoke["ok"]:
         result = init_home(home, force=force)
         result.update(
@@ -179,7 +167,7 @@ def install_readiness(
                 "compromised": False,
                 "message": (
                     "installed in local_full mode with SQLite and "
-                    "repository-local Qwen embedding and reranker models."
+                    "home-local Qwen embedding and reranker models."
                 ),
             }
         )
@@ -192,7 +180,7 @@ def install_readiness(
         home,
         force=force,
         reason=(
-            "the current hardware or runtime environment could not run the bundled "
+            "the current hardware or runtime environment could not run the local "
             "Qwen embedding/reranker models: "
             + str(smoke.get("message") or "model runtime smoke failed")
         ),
@@ -365,10 +353,10 @@ def load_config(home: str | Path | None = None) -> dict[str, Any]:
     )
     data.setdefault("log", str(paths.log))
     data.setdefault(
-        "embedding", {"provider": "qwen", "model": DEFAULT_QWEN_EMBEDDING_MODEL}
+        "embedding", {"provider": "qwen", "model": str(default_local_embedding_model_path(paths.home))}
     )
     data.setdefault(
-        "reranker", {"provider": "qwen", "model": DEFAULT_QWEN_RERANKER_MODEL}
+        "reranker", {"provider": "qwen", "model": str(default_local_reranker_model_path(paths.home))}
     )
     data.setdefault("extractor", {"provider": "rule"})
     data.setdefault("query_intent", {"provider": "off"})
@@ -402,7 +390,7 @@ def doctor(home: str | Path | None = None) -> dict[str, Any]:
             _check(
                 "compromised_mode",
                 True,
-                "Running with built-in lightweight retrieval; provide DASHSCOPE_API_KEY for the recommended Aliyun DashScope API path or restore repository-local Qwen models for full quality.",
+                "Running with built-in lightweight retrieval; provide DASHSCOPE_API_KEY for the recommended Aliyun DashScope API path or restore local Qwen models for full quality.",
             )
         )
     if str(config.get("storage_backend")) == "postgres":
@@ -820,7 +808,7 @@ def _compromised_install_result(
                 "installed in compromised local mode because "
                 + reason
                 + ". Fusion Memory will use SQLite plus built-in lightweight embedding/reranker. "
-                "To restore full memory quality, use the bundled Qwen models with the qwen "
+                "To restore full memory quality, use the local Qwen models with the qwen "
                 "runtime dependencies, or provide API model settings. Postgres/pgvector is "
                 "optional for production storage. Recommended API option: Aliyun "
                 "DashScope; set DASHSCOPE_API_KEY or map it through FUSION_MEMORY_MODEL_API_KEY "
@@ -851,8 +839,8 @@ def default_product_settings(paths: ProductPaths) -> dict[str, Any]:
         "db": str(paths.db),
         "storage_backend": "sqlite",
         "log": str(paths.log),
-        "embedding": {"provider": "qwen", "model": DEFAULT_QWEN_EMBEDDING_MODEL},
-        "reranker": {"provider": "qwen", "model": DEFAULT_QWEN_RERANKER_MODEL},
+        "embedding": {"provider": "qwen", "model": str(default_local_embedding_model_path(paths.home))},
+        "reranker": {"provider": "qwen", "model": str(default_local_reranker_model_path(paths.home))},
         "extractor": {"provider": "rule"},
         "query_intent": {"provider": "off"},
     }
@@ -875,7 +863,7 @@ def compromised_local_settings(paths: ProductPaths) -> dict[str, Any]:
         "message": (
             "Compromised local mode uses built-in lightweight retrieval. "
             "Set DASHSCOPE_API_KEY for the recommended Aliyun DashScope API path "
-            "or restore repository-local Qwen models for full quality."
+            "or restore local Qwen models for full quality."
         ),
     }
 
@@ -942,8 +930,8 @@ def _configure_model(
 
 def _default_qwen_model(title: str) -> str:
     if "Reranker" in title:
-        return DEFAULT_QWEN_RERANKER_MODEL
-    return DEFAULT_QWEN_EMBEDDING_MODEL
+        return str(default_local_reranker_model_path())
+    return str(default_local_embedding_model_path())
 
 
 def _configure_llm(
@@ -1236,24 +1224,24 @@ def _qwen_model_readiness_check(
         return _check(
             name,
             exists and dependency_ok,
-            "Repository-local Qwen model path is ready."
+            "Fusion Memory home-local Qwen model path is ready."
             if exists and dependency_ok
-            else f"Repository-local Qwen model path or dependencies are not ready: {status['message']}",
+            else f"Fusion Memory home-local Qwen model path or dependencies are not ready: {status['message']}",
         )
     return _check(
         name,
         False,
-        "Qwen model must be a local path under models/. Rerun the installer to download model weights from ModelScope.",
+        "Qwen model must be a local path under the Fusion Memory models directory. Rerun the installer to download model weights from ModelScope.",
     )
 
 
-def _qwen_runtime_smoke() -> dict[str, Any]:
+def _qwen_runtime_smoke(home: str | Path | None = None) -> dict[str, Any]:
     try:
         from fusion_memory.core.embedding import Qwen3EmbeddingClient
         from fusion_memory.retrieval.reranker import Qwen3Reranker
 
         embedding = Qwen3EmbeddingClient(
-            model=str(default_local_embedding_model_path()), batch_size=1
+            model=str(default_local_embedding_model_path(home)), batch_size=1
         )
         vector = embedding.embed_text("fusion memory install check")
         if not vector:
@@ -1262,14 +1250,14 @@ def _qwen_runtime_smoke() -> dict[str, Any]:
                 "message": "Qwen embedding model returned an empty vector.",
             }
         reranker = Qwen3Reranker(
-            model=str(default_local_reranker_model_path()), batch_size=1
+            model=str(default_local_reranker_model_path(home)), batch_size=1
         )
         scores = reranker.score("fusion memory", ["fusion memory install check"])
         if not scores:
             return {"ok": False, "message": "Qwen reranker model returned no scores."}
         return {
             "ok": True,
-            "message": "Bundled Qwen models loaded and ran a minimal smoke test.",
+            "message": "Home-local Qwen models loaded and ran a minimal smoke test.",
         }
     except Exception as exc:
         return {"ok": False, "message": _friendly_runtime_smoke_message(exc)}
@@ -1284,7 +1272,7 @@ def _friendly_runtime_smoke_message(exc: BaseException) -> str:
         or "mps" in lowered
         or "meta tensor" in lowered
     ):
-        return "The bundled Qwen models could not run on this hardware/runtime."
+        return "The local Qwen models could not run on this hardware/runtime."
     if (
         "sentence_transformers" in lowered
         or "transformers" in lowered
@@ -1341,7 +1329,7 @@ def _repository_model_ready(path: Path) -> bool:
 
 
 def _repository_model_status(
-    path: Path, *, label: str = "repository-local Qwen model"
+    path: Path, *, label: str = "local Qwen model"
 ) -> dict[str, Any]:
     path = path.expanduser()
     if not path.is_dir():

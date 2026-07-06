@@ -573,6 +573,36 @@ class ModelAdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Qwen3Reranker requires optional ML dependencies"):
                 Qwen3Reranker()
 
+    def test_qwen_runtime_defaults_follow_fusion_memory_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["FUSION_MEMORY_HOME"] = tmp
+            output = subprocess.check_output(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json; "
+                        "from fusion_memory.core.config import "
+                        "DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL; "
+                        "print(json.dumps([DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL]))"
+                    ),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+            )
+
+        embedding_model, reranker_model = json.loads(output)
+        self.assertEqual(
+            embedding_model,
+            str(Path(tmp) / "models" / "Qwen3-Embedding-0.6B"),
+        )
+        self.assertEqual(
+            reranker_model,
+            str(Path(tmp) / "models" / "Qwen3-Reranker-0.6B"),
+        )
+
     def test_eval_answer_and_judge_models_are_pluggable(self) -> None:
         with FakeModelServer() as server:
             answer_client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")

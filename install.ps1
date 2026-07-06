@@ -1,9 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-function Test-IsWindowsProcess {
-    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-}
-
 function Normalize-ProcessPathEnvironment {
     $PathEntries = @(Get-ChildItem Env: | Where-Object { $_.Name -ieq "Path" })
     if ($PathEntries.Count -eq 0) {
@@ -23,139 +19,131 @@ function Normalize-ProcessPathEnvironment {
     $env:Path = $PathValue
 }
 
-function Invoke-SelectedPython {
+function Get-UvDownloadUrl {
+    $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($Arch -eq "arm64") {
+        return "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip"
+    }
+    return "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
+}
+
+function Resolve-Uv {
     param(
-        [string]$PythonCommand,
-        [string[]]$PythonArgs,
+        [string]$ToolsDir,
+        [string]$LogFile
+    )
+
+    if ($env:FUSION_MEMORY_UV_BIN -and (Test-Path -LiteralPath $env:FUSION_MEMORY_UV_BIN)) {
+        return $env:FUSION_MEMORY_UV_BIN
+    }
+
+    $Found = Get-Command uv -ErrorAction SilentlyContinue
+    if ($Found) {
+        return [string]$Found.Source
+    }
+
+    New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
+    $Archive = Join-Path $ToolsDir "uv.zip"
+    $Uv = Join-Path $ToolsDir "uv.exe"
+    $Url = Get-UvDownloadUrl
+    Add-Content -Path $LogFile -Value "Downloading uv from $Url"
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Archive -UseBasicParsing
+        Expand-Archive -LiteralPath $Archive -DestinationPath $ToolsDir -Force
+        $Candidate = Get-ChildItem -Path $ToolsDir -Recurse -Filter "uv.exe" | Select-Object -First 1
+        if (-not $Candidate) {
+            throw "uv.exe was not found in the downloaded archive."
+        }
+        Copy-Item -LiteralPath $Candidate.FullName -Destination $Uv -Force
+        return $Uv
+    } catch {
+        Add-Content -Path $LogFile -Value "uv bootstrap failed: $_"
+        throw
+    }
+}
+
+function Invoke-Step {
+    param(
+        [string]$Name,
+        [string]$LogFile,
+        [string]$Command,
         [string[]]$Arguments
     )
-    & $PythonCommand @PythonArgs @Arguments
-}
 
-function Test-CompatiblePython {
-    param(
-        [string]$PythonCommand,
-        [string[]]$PythonArgs = @()
-    )
-    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; text = ' '.join(str(x) for x in (sys.version, sys.executable, sysconfig.get_platform())).lower(); compatible = sys.version_info[:2] in ((3, 11), (3, 12)) and not any(token in text for token in ('msys', 'mingw', 'ucrt64')); sys.exit(0 if compatible else 1)") 2>$null
-    return $LASTEXITCODE -eq 0
-}
-
-function Test-SafePythonCommand {
-    param([string]$PythonCommand)
-    $Command = Get-Command $PythonCommand -ErrorAction SilentlyContinue
-    if (-not $Command) {
-        return $false
-    }
-    $Source = [string]$Command.Source
-    if ($Source -match "\\WindowsApps\\python(\d+)?\.exe$") {
-        return $false
-    }
-    return $true
-}
-
-function Select-CompatiblePython {
-    if ($env:PYTHON_BIN) {
-        if (Test-CompatiblePython $env:PYTHON_BIN @()) {
-            return @{ Command = $env:PYTHON_BIN; Args = @(); Display = $env:PYTHON_BIN }
-        }
-        Write-Warning "PYTHON_BIN is not a full Memory runtime; it will be used only to bootstrap the installer."
-        return @{ Command = $env:PYTHON_BIN; Args = @(); Display = "$env:PYTHON_BIN (bootstrap)" }
-    }
-
-    if (Test-IsWindowsProcess) {
-        $Candidates = @(
-            @{ Command = "py"; Args = @("-3.12"); Display = "py -3.12" },
-            @{ Command = "py"; Args = @("-3.11"); Display = "py -3.11" }
-        )
-        foreach ($Candidate in $Candidates) {
-            if (-not (Get-Command $Candidate.Command -ErrorAction SilentlyContinue)) {
-                continue
-            }
-            if (Test-CompatiblePython $Candidate.Command $Candidate.Args) {
-                return $Candidate
-            }
-        }
-        if (Test-SafePythonCommand "python") {
-            return @{ Command = "python"; Args = @(); Display = "python (bootstrap)" }
-        }
-        Write-Error "A Python 3.11+ bootstrap interpreter is required. The Windows Store python alias was ignored to avoid interactive popups."
-        exit 1
-    }
-
-    return @{ Command = "python"; Args = @(); Display = "python" }
-}
-
-function Assert-BootstrapPython {
-    param(
-        [string]$PythonCommand,
-        [string[]]$PythonArgs = @()
-    )
-    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")
+    Write-Host "$Name..."
+    Add-Content -Path $LogFile -Value ""
+    Add-Content -Path $LogFile -Value "=== $Name ==="
+    Add-Content -Path $LogFile -Value ($Command + " " + ($Arguments -join " "))
+    & $Command @Arguments *>> $LogFile
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Python 3.11+ is required to bootstrap Fusion Memory."
+        Write-Error "Fusion Memory installation needs attention. Step: $Name. Log: $LogFile"
         exit $LASTEXITCODE
     }
 }
 
-if (Test-IsWindowsProcess) {
-    Normalize-ProcessPathEnvironment
-}
+Normalize-ProcessPathEnvironment
 
-$PythonSelection = Select-CompatiblePython
-$Python = $PythonSelection.Command
-$PythonArgs = $PythonSelection.Args
-Write-Host "Using Python: $($PythonSelection.Display)"
-Assert-BootstrapPython $Python $PythonArgs
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LogDir = Join-Path $ScriptDir ".fusion-memory-logs"
+$LogFile = Join-Path $LogDir "install.log"
+$ToolsDir = Join-Path $ScriptDir ".fusion-memory-tools"
+$Package = if ($env:FUSION_MEMORY_PACKAGE) { $env:FUSION_MEMORY_PACKAGE } else { $ScriptDir }
 
-Invoke-SelectedPython $Python $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')")
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Set-Content -Path $LogFile -Value ""
+
+$Uv = Resolve-Uv -ToolsDir $ToolsDir -LogFile $LogFile
+& $Uv --version *>> $LogFile
 if ($LASTEXITCODE -ne 0) {
+    Write-Error "Fusion Memory installation needs attention. Step: uv bootstrap. Log: $LogFile"
     exit $LASTEXITCODE
 }
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$VenvDir = Join-Path $ScriptDir ".fusion-memory-venv"
-$LogDir = Join-Path $ScriptDir ".fusion-memory-logs"
+$ToolInstallArgs = @(
+    "tool", "install",
+    "--force",
+    "--python", "3.12",
+    "--managed-python",
+    "--no-progress",
+    "--with", "modelscope-hub>=0.1.6",
+    "--with", "psycopg2-binary>=2.9",
+    "--with", "torch>=2.5",
+    "--with", "transformers>=4.51",
+    "--with", "sentence-transformers>=3.4",
+    "--with", "safetensors",
+    "--with", "tokenizers",
+    "--with", "hf-xet",
+    "--with", "click",
+    "--with", "typer",
+    "--no-build-package", "psycopg2-binary",
+    "--no-build-package", "torch",
+    "--no-build-package", "transformers",
+    "--no-build-package", "sentence-transformers",
+    "--no-build-package", "safetensors",
+    "--no-build-package", "tokenizers",
+    "--no-build-package", "hf-xet",
+    $Package
+)
 
-# Qwen and native runtime dependencies are installed in the dedicated memory venv with --only-binary=:all:.
-$OldPythonPath = $env:PYTHONPATH
-try {
-    if ($OldPythonPath) {
-        $env:PYTHONPATH = "$ScriptDir$([System.IO.Path]::PathSeparator)$OldPythonPath"
-    } else {
-        $env:PYTHONPATH = $ScriptDir
-    }
+Invoke-Step -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
 
-    $InstallerArgs = @(
-        "-m",
-        "fusion_memory.windows_installer",
-        "--python-command",
-        $Python,
-        "--script-dir",
-        $ScriptDir,
-        "--venv-dir",
-        $VenvDir,
-        "--log-dir",
-        $LogDir
-    )
-    foreach ($Arg in $PythonArgs) {
-        $InstallerArgs += @("--python-arg", $Arg)
-    }
-    Invoke-SelectedPython $Python $PythonArgs $InstallerArgs
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-} finally {
-    if ($null -eq $OldPythonPath) {
-        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-    } else {
-        $env:PYTHONPATH = $OldPythonPath
-    }
+$ToolBinDir = & $Uv tool dir --bin
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Fusion Memory installation needs attention. Step: uv tool dir --bin. Log: $LogFile"
+    exit $LASTEXITCODE
 }
+$FusionMemory = Join-Path $ToolBinDir "fusion-memory.exe"
+
+Invoke-Step -Name "local qwen models" -LogFile $LogFile -Command $FusionMemory -Arguments @("download-models", "--json")
+if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
+    Invoke-Step -Name "wizard" -LogFile $LogFile -Command $FusionMemory -Arguments @("init", "--wizard")
+} else {
+    Invoke-Step -Name "install readiness" -LogFile $LogFile -Command $FusionMemory -Arguments @("install-check", "--force")
+}
+Invoke-Step -Name "doctor" -LogFile $LogFile -Command $FusionMemory -Arguments @("doctor")
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."
-Write-Host "Model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
-Write-Host "Log: $LogDir\install.log"
-Write-Host "Start it with: $VenvDir\Scripts\fusion-memory.exe start"
-Write-Host "Check it with: $VenvDir\Scripts\fusion-memory.exe status"
+Write-Host "Log: $LogFile"
+Write-Host "Start it with: fusion-memory start"
+Write-Host "Check it with: fusion-memory status"

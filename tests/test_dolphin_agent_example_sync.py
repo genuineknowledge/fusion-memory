@@ -143,10 +143,14 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "compromised" in skill
     assert "DASHSCOPE_API_KEY" in skill
     assert "SQLite plus local Qwen vector models" in skill
+    assert "Fusion Memory home models directory" in skill
+    assert "uv tool" in skill
+    assert "uv-managed Python 3.12" in skill
     assert "Postgres/pgvector is optional" in skill
     assert "Do not use MSYS2/Mingw Python" in skill
     assert "Do not ask the user to manually install Python" in skill
     assert "uv.exe" in skill
+    assert ".fusion-memory-venv" not in skill
     assert "--background --json" in skill
     assert "fusion-memory status-haitun-history-watcher" in skill
     assert "nohup" not in skill
@@ -170,8 +174,9 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert 'fusion-memory[postgres,qwen]' not in skill.split("On Windows PowerShell:", 1)[1].split(
         "If the repair attempt still reports not_ready", 1
     )[0]
-    assert "summarize the pip error" in skill
-    assert "Do not paste full pip logs" in skill
+    assert "summarize the failed install step" in skill
+    assert "Do not paste" in skill
+    assert "full uv, dependency, or model download logs" in skill
     assert "Do not silently fall back to local_test" in skill
     assert "Qwen runtime dependency installation fails" in skill
     assert "Postgres/pgvector is unavailable" not in skill

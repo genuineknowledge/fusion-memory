@@ -167,6 +167,36 @@ class ProductCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("Git LFS pointer", payload["message"])
 
+    def test_download_models_cli_targets_home_models_directory(self) -> None:
+        from fusion_memory.cli import main
+        from fusion_memory.windows_installer import StepResult
+        import sys
+        from io import StringIO
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[dict[str, object]] = []
+
+            def fake_download(script_dir: Path, *, log_dir: Path, models_dir: Path) -> StepResult:
+                calls.append({"script_dir": script_dir, "log_dir": log_dir, "models_dir": models_dir})
+                return StepResult(ok=True, step_name="local qwen models", log_path=log_dir / "install.log")
+
+            try:
+                sys.argv = ["fusion-memory", "download-models", "--home", tmp, "--json"]
+                sys.stdout = StringIO()
+                with patch("fusion_memory.windows_installer.download_qwen_models", side_effect=fake_download):
+                    code = main()
+                payload = json.loads(sys.stdout.getvalue())
+            finally:
+                sys.argv = old_argv
+                sys.stdout = old_stdout
+
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(calls[0]["models_dir"], Path(tmp) / "models")
+        self.assertEqual(calls[0]["log_dir"], Path(tmp) / "logs")
+
     def test_sync_haitun_history_cli_json_runs_once(self) -> None:
         from fusion_memory.cli import main
         import sys
@@ -436,23 +466,34 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(config["db"], str(home / "fusion-memory.sqlite3"))
         self.assertEqual(config["embedding"]["provider"], "qwen")
         self.assertEqual(
-            config["embedding"]["model"], str(default_local_embedding_model_path())
+            config["embedding"]["model"], str(default_local_embedding_model_path(home))
         )
         self.assertEqual(config["reranker"]["provider"], "qwen")
         self.assertEqual(
-            config["reranker"]["model"], str(default_local_reranker_model_path())
+            config["reranker"]["model"], str(default_local_reranker_model_path(home))
         )
         self.assertEqual(config["extractor"]["provider"], "rule")
         self.assertEqual(config["query_intent"]["provider"], "off")
 
-    def test_default_qwen_models_are_repository_local_paths(self) -> None:
-        repo_root = Path(product.__file__).resolve().parents[1]
+    def test_default_qwen_models_live_under_fusion_memory_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
 
-        embedding_model = default_local_embedding_model_path()
-        reranker_model = default_local_reranker_model_path()
+            embedding_model = default_local_embedding_model_path(home)
+            reranker_model = default_local_reranker_model_path(home)
 
-        self.assertEqual(embedding_model, repo_root / "models" / "Qwen3-Embedding-0.6B")
-        self.assertEqual(reranker_model, repo_root / "models" / "Qwen3-Reranker-0.6B")
+        self.assertEqual(embedding_model, home / "models" / "Qwen3-Embedding-0.6B")
+        self.assertEqual(reranker_model, home / "models" / "Qwen3-Reranker-0.6B")
+
+    def test_default_qwen_models_follow_fusion_memory_home_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with patch.dict(os.environ, {"FUSION_MEMORY_HOME": str(home)}):
+                embedding_model = default_local_embedding_model_path()
+                reranker_model = default_local_reranker_model_path()
+
+        self.assertEqual(embedding_model, home / "models" / "Qwen3-Embedding-0.6B")
+        self.assertEqual(reranker_model, home / "models" / "Qwen3-Reranker-0.6B")
 
     def test_install_readiness_reports_not_ready_when_models_or_deps_missing(
         self,
@@ -1147,7 +1188,7 @@ class ProductCliTests(unittest.TestCase):
         ):
             self.assertFalse(product._port_available("127.0.0.1", 8700))
 
-    def test_install_scripts_install_full_runtime_dependencies(self) -> None:
+    def test_install_scripts_install_fusion_memory_as_uv_tool(self) -> None:
         root = Path(product.__file__).resolve().parents[1]
 
         install_sh = (root / "install.sh").read_text(encoding="utf-8")
@@ -1156,50 +1197,45 @@ class ProductCliTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn('-e "$SCRIPT_DIR"', install_sh)
-        self.assertNotIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
+        self.assertIn("tool install", install_sh)
+        self.assertIn("--managed-python", install_sh)
+        self.assertIn("--python", install_sh)
+        self.assertIn('"3.12"', install_sh)
+        self.assertNotIn("python -m pip install", install_sh)
+        self.assertNotIn("-m pip install", install_sh)
+        self.assertNotIn('-e "$SCRIPT_DIR"', install_sh)
         self.assertNotIn("Optional Postgres/Qwen dependencies", install_sh)
         self.assertIn("modelscope-hub", install_sh)
-        self.assertIn("--download-models-only", install_sh)
+        self.assertIn("download-models", install_sh)
         self.assertLess(
-            install_sh.index("--download-models-only"),
+            install_sh.index("download-models"),
             install_sh.index("install-check --force"),
         )
         self.assertNotIn("git lfs", install_sh.lower())
-        self.assertIn("fusion_memory.windows_installer", install_ps1)
-        self.assertIn(".fusion-memory-venv", install_ps1)
-        self.assertIn("--only-binary=:all:", windows_installer)
+
+        self.assertIn("tool install", install_ps1)
+        self.assertIn("--managed-python", install_ps1)
+        self.assertIn('"3.12"', install_ps1)
+        self.assertIn("download-models", install_ps1)
+        self.assertNotIn(".fusion-memory-venv", install_ps1)
+        self.assertNotIn("pip install", install_ps1.lower())
+        self.assertIn("build_uv_tool_install_command", windows_installer)
         self.assertIn("modelscope-hub", windows_installer)
-        self.assertIn("--download-models-only", windows_installer)
         self.assertNotIn("git lfs", install_ps1.lower())
         self.assertNotIn('"pip", "install", "-e", "$ScriptDir[postgres,qwen]"', install_ps1)
         self.assertNotIn("Optional Postgres/Qwen dependencies", install_ps1)
         self.assertIn("Normalize-ProcessPathEnvironment", install_ps1)
-        self.assertIn("Select-CompatiblePython", install_ps1)
-        self.assertIn("Assert-BootstrapPython", install_ps1)
-        self.assertIn("Test-SafePythonCommand", install_ps1)
+        self.assertIn("Resolve-Uv", install_ps1)
         self.assertNotIn("Current Python is not compatible", install_ps1)
         self.assertNotIn("Ignoring incompatible PYTHON_BIN", install_ps1)
         self.assertIn("bootstrap", install_ps1)
         self.assertLess(
-            install_ps1.index("Test-CompatiblePython $env:PYTHON_BIN"),
-            install_ps1.index("return @{ Command = $env:PYTHON_BIN"),
-        )
-        self.assertIn('py -3.12', install_ps1)
-        self.assertIn('py -3.11', install_ps1)
-        self.assertLess(
             install_ps1.index("Normalize-ProcessPathEnvironment"),
-            install_ps1.index("fusion_memory.windows_installer"),
-        )
-        self.assertLess(
-            install_ps1.index("Assert-BootstrapPython"),
-            install_ps1.index("fusion_memory.windows_installer"),
+            install_ps1.index("tool install"),
         )
         self.assertNotIn("Start-Process", install_ps1)
         self.assertIn("Remove-Item Env:PATH", install_ps1)
-        self.assertIn("--script-dir", install_ps1)
-        self.assertIn("--venv-dir", install_ps1)
-        self.assertIn("--log-dir", install_ps1)
+        self.assertIn("tool dir --bin", install_ps1)
         self.assertGreaterEqual(install_ps1.count("$LASTEXITCODE -ne 0"), 3)
 
     def test_qwen_extra_does_not_block_python_314(self) -> None:

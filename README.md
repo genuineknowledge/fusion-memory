@@ -53,12 +53,13 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
 
-安装脚本会安装基础包、通过 ModelScope 下载两个本地向量模型到
-`models/Qwen3-Embedding-0.6B` 和 `models/Qwen3-Reranker-0.6B`，再安装完整
-Qwen 运行依赖，包括 Postgres adapter、本地 Qwen adapter 以及
-PyTorch/Transformers 相关依赖。安装检查会确认本地模型文件存在，并运行一次最小
-Qwen embedding/reranker smoke test。默认本地配置是 SQLite + local Qwen
-embedding/reranker。Postgres/pgvector 是可选生产配置，不是本地默认安装门槛。
+安装脚本会把 Fusion Memory 安装成 `uv tool`，由 uv 管理独立 Python 3.12
+runtime；不会使用 agent 自身的 Python 环境。脚本会通过 ModelScope 下载两个本地
+向量模型到 Fusion Memory home 的 `models/` 目录，再安装完整 Qwen 运行依赖，
+包括 Postgres adapter、本地 Qwen adapter 以及 PyTorch/Transformers 相关依赖。
+安装检查会确认本地模型文件存在，并运行一次最小 Qwen embedding/reranker smoke
+test。默认本地配置是 SQLite + local Qwen embedding/reranker。Postgres/pgvector
+是可选生产配置，不是本地默认安装门槛。
 如果模型下载失败、文件仍是 Git LFS pointer、或 Qwen runtime 依赖不可用，安装会
 返回 not ready，并给出失败步骤和日志路径；不会要求安装 Git LFS，也不会静默降级到
 `local_test`。只有当模型文件和依赖齐全、但当前硬件无法加载/运行本地 Qwen 模型时，

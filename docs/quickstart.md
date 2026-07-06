@@ -19,16 +19,17 @@ cd C:\path\to\memory
 .\install.ps1
 ```
 
-安装完成后会自动运行 `fusion-memory install-check`。安装脚本会先安装基础包，
-通过 ModelScope 下载两个本地向量模型到 `models/Qwen3-Embedding-0.6B` 和
-`models/Qwen3-Reranker-0.6B`，再安装完整 Qwen 运行依赖，包括 Postgres adapter、
-本地 Qwen adapter 以及 PyTorch/Transformers 相关依赖。
+安装完成后会自动运行 `fusion-memory install-check`。安装脚本会把 Fusion Memory
+安装成 `uv tool`，由 uv 管理独立 Python 3.12 runtime；不会使用 agent 自身的
+Python 环境。脚本会通过 ModelScope 下载两个本地向量模型到 Fusion Memory home
+的 `models/` 目录，再安装完整 Qwen 运行依赖，包括 Postgres adapter、本地 Qwen
+adapter 以及 PyTorch/Transformers 相关依赖。
 
 条件满足时会配置：
 
 - 数据库：默认 SQLite，本地数据库文件来自初始化配置。
-- Embedding：默认 repo-local `models/Qwen3-Embedding-0.6B`。
-- Reranker：默认 repo-local `models/Qwen3-Reranker-0.6B`。
+- Embedding：默认 Fusion Memory home-local `models/Qwen3-Embedding-0.6B`。
+- Reranker：默认 Fusion Memory home-local `models/Qwen3-Reranker-0.6B`。
 - Extractor/router：默认内置规则；高级用户可选 OpenAI-compatible API。
 - Query router：默认关闭；需要复杂查询路由时再开启 API。
 - Postgres/pgvector：可选生产配置，适合大量数据、多用户或需要 pgvector 索引的部署。

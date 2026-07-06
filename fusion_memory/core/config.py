@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,25 @@ DEFAULT_RAW_EVIDENCE_QUOTAS = {
 }
 
 
-DEFAULT_MODEL_ROOT = Path(__file__).resolve().parents[2] / "models"
+def _default_home() -> Path:
+    env_home = os.getenv("FUSION_MEMORY_HOME")
+    if env_home:
+        return Path(env_home).expanduser()
+    system = platform.system().lower()
+    if system == "windows":
+        return (
+            Path(os.getenv("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+            / "FusionMemory"
+        )
+    if system == "darwin":
+        return Path.home() / "Library" / "Application Support" / "FusionMemory"
+    return (
+        Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        / "fusion-memory"
+    )
+
+
+DEFAULT_MODEL_ROOT = _default_home() / "models"
 DEFAULT_EMBEDDING_MODEL = str(DEFAULT_MODEL_ROOT / "Qwen3-Embedding-0.6B")
 DEFAULT_EMBEDDING_DIMENSION = 1024
 DEFAULT_RERANKER_MODEL = str(DEFAULT_MODEL_ROOT / "Qwen3-Reranker-0.6B")
