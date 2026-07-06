@@ -165,7 +165,12 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "git lfs pull" in skill
     assert "If install-check returns not_ready" in skill
     assert 'python3 -m pip install -e "$AGENT_DIR/fusion-memory[postgres,qwen]"' in skill
+    assert ".\\install.ps1" in skill
+    assert 'fusion-memory[postgres,qwen]' not in skill.split("On Windows PowerShell:", 1)[1].split(
+        "If the repair attempt still reports not_ready", 1
+    )[0]
     assert "summarize the pip error" in skill
+    assert "Do not paste full pip logs" in skill
     assert "Do not silently fall back to local_test" in skill
     assert "Qwen runtime dependencies are unavailable" in skill
     assert "Postgres/pgvector is unavailable" not in skill

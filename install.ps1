@@ -37,13 +37,16 @@ function Test-CompatiblePython {
         [string]$PythonCommand,
         [string[]]$PythonArgs = @()
     )
-    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; text = ' '.join(str(x) for x in (sys.version, sys.executable, sysconfig.get_platform())).lower(); sys.exit(1 if ('msys' in text or 'mingw' in text or 'ucrt64' in text) else 0)") 2>$null
+    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; text = ' '.join(str(x) for x in (sys.version, sys.executable, sysconfig.get_platform())).lower(); compatible = sys.version_info[:2] in ((3, 11), (3, 12)) and not any(token in text for token in ('msys', 'mingw', 'ucrt64')); sys.exit(0 if compatible else 1)") 2>$null
     return $LASTEXITCODE -eq 0
 }
 
 function Select-CompatiblePython {
     if ($env:PYTHON_BIN) {
-        return @{ Command = $env:PYTHON_BIN; Args = @(); Display = $env:PYTHON_BIN }
+        if (Test-CompatiblePython $env:PYTHON_BIN @()) {
+            return @{ Command = $env:PYTHON_BIN; Args = @(); Display = $env:PYTHON_BIN }
+        }
+        Write-Warning "Ignoring incompatible PYTHON_BIN; looking for CPython 3.11/3.12."
     }
 
     if (Test-IsWindowsProcess) {
@@ -71,12 +74,12 @@ function Assert-CompatiblePython {
         [string]$PythonCommand,
         [string[]]$PythonArgs = @()
     )
-    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys, sysconfig; print(sys.executable); print(sys.version.replace('\n', ' ')); print(sysconfig.get_platform())")
+    Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
     if (-not (Test-CompatiblePython $PythonCommand $PythonArgs)) {
-        Write-Error "MSYS2/Mingw Python is not supported for Fusion Memory's local Qwen runtime because PyTorch wheels are not available for that Python ABI. Install official Windows CPython or conda Python 3.11/3.12, then rerun with `$env:PYTHON_BIN set to that python.exe."
+        Write-Error "Current Python is not compatible with Fusion Memory local Qwen on Windows. Install official CPython or conda Python 3.11/3.12, then rerun .\install.ps1 or set `$env:PYTHON_BIN to that python.exe."
         exit 1
     }
 }
@@ -92,45 +95,52 @@ Write-Host "Using Python: $($PythonSelection.Display)"
 Assert-CompatiblePython $Python $PythonArgs
 
 Invoke-SelectedPython $Python $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')")
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "--upgrade", "pip")
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "-e", "$ScriptDir")
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-Invoke-SelectedPython $Python $PythonArgs @("-m", "pip", "install", "-e", "$ScriptDir[postgres,qwen]")
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available."
-}
-if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
-    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "init", "--wizard")
+$VenvDir = Join-Path $ScriptDir ".fusion-memory-venv"
+$LogDir = Join-Path $ScriptDir ".fusion-memory-logs"
+
+# Qwen and native runtime dependencies are installed in the dedicated memory venv with --only-binary=:all:.
+$OldPythonPath = $env:PYTHONPATH
+try {
+    if ($OldPythonPath) {
+        $env:PYTHONPATH = "$ScriptDir$([System.IO.Path]::PathSeparator)$OldPythonPath"
+    } else {
+        $env:PYTHONPATH = $ScriptDir
+    }
+
+    $InstallerArgs = @(
+        "-m",
+        "fusion_memory.windows_installer",
+        "--python-command",
+        $Python,
+        "--script-dir",
+        $ScriptDir,
+        "--venv-dir",
+        $VenvDir,
+        "--log-dir",
+        $LogDir
+    )
+    foreach ($Arg in $PythonArgs) {
+        $InstallerArgs += @("--python-arg", $Arg)
+    }
+    Invoke-SelectedPython $Python $PythonArgs $InstallerArgs
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-} elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
-    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "install-check", "--force")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+} finally {
+    if ($null -eq $OldPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $OldPythonPath
     }
-} else {
-    Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "install-check", "--force")
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-}
-Invoke-SelectedPython $Python $PythonArgs @("-m", "fusion_memory.cli", "doctor")
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
 }
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."
 Write-Host "Bundled model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
-Write-Host "The installer tries to install full runtime dependencies including Postgres and local Qwen model support."
-Write-Host "If the installer reported compromised mode, this machine could not run the bundled models; set DASHSCOPE_API_KEY for the recommended Aliyun API path."
-Write-Host "Start it with: fusion-memory start"
-Write-Host "Check it with: fusion-memory status"
+Write-Host "Start it with: $VenvDir\Scripts\fusion-memory.exe start"
+Write-Host "Check it with: $VenvDir\Scripts\fusion-memory.exe status"

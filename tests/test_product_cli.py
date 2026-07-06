@@ -1154,28 +1154,36 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn('-e "$SCRIPT_DIR"', install_sh)
         self.assertIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
         self.assertIn("Optional Postgres/Qwen dependencies", install_sh)
-        self.assertIn('"pip", "install", "-e", "$ScriptDir"', install_ps1)
-        self.assertIn('"pip", "install", "-e", "$ScriptDir[postgres,qwen]"', install_ps1)
-        self.assertIn("Optional Postgres/Qwen dependencies", install_ps1)
+        self.assertIn("fusion_memory.windows_installer", install_ps1)
+        self.assertIn(".fusion-memory-venv", install_ps1)
+        self.assertIn("--only-binary=:all:", install_ps1)
+        self.assertNotIn('"pip", "install", "-e", "$ScriptDir[postgres,qwen]"', install_ps1)
+        self.assertNotIn("Optional Postgres/Qwen dependencies", install_ps1)
         self.assertIn("Normalize-ProcessPathEnvironment", install_ps1)
         self.assertIn("Select-CompatiblePython", install_ps1)
         self.assertIn("Assert-CompatiblePython", install_ps1)
-        self.assertIn("MSYS2/Mingw Python", install_ps1)
+        self.assertIn("Current Python is not compatible", install_ps1)
+        self.assertIn("Ignoring incompatible PYTHON_BIN", install_ps1)
+        self.assertLess(
+            install_ps1.index("Test-CompatiblePython $env:PYTHON_BIN"),
+            install_ps1.index("return @{ Command = $env:PYTHON_BIN"),
+        )
         self.assertIn('py -3.12', install_ps1)
         self.assertIn('py -3.11', install_ps1)
         self.assertLess(
             install_ps1.index("Normalize-ProcessPathEnvironment"),
-            install_ps1.index('"pip", "install", "--upgrade", "pip"'),
+            install_ps1.index("fusion_memory.windows_installer"),
         )
         self.assertLess(
             install_ps1.index("Assert-CompatiblePython"),
-            install_ps1.index('"pip", "install", "--upgrade", "pip"'),
+            install_ps1.index("fusion_memory.windows_installer"),
         )
         self.assertNotIn("Start-Process", install_ps1)
         self.assertIn("Remove-Item Env:PATH", install_ps1)
-        self.assertIn('"install-check", "--force"', install_ps1)
-        self.assertIn("doctor", install_ps1)
-        self.assertGreaterEqual(install_ps1.count("$LASTEXITCODE -ne 0"), 5)
+        self.assertIn("--script-dir", install_ps1)
+        self.assertIn("--venv-dir", install_ps1)
+        self.assertIn("--log-dir", install_ps1)
+        self.assertGreaterEqual(install_ps1.count("$LASTEXITCODE -ne 0"), 3)
 
     def test_qwen_extra_does_not_block_python_314(self) -> None:
         import tomllib
