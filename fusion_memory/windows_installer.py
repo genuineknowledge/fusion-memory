@@ -347,16 +347,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def ensure_uv(script_dir: str | Path, *, log_dir: str | Path) -> Path:
+    root = Path(script_dir).resolve()
     env_uv = os.getenv("FUSION_MEMORY_UV_BIN")
     if env_uv and Path(env_uv).is_file():
         return Path(env_uv)
-    tools_dir = Path(script_dir) / ".fusion-memory-tools"
+    tools_dir = root / ".fusion-memory-tools"
     local_uv = tools_dir / ("uv.exe" if _is_windows_host() else "uv")
     if local_uv.is_file():
         return local_uv
     found = shutil.which("uv")
     if found and (not _is_windows_host() or Path(found).name.lower() == "uv.exe"):
         return Path(found)
+    for candidate in _local_uv_candidates(root):
+        if candidate.is_file():
+            return candidate
     if not _is_windows_host():
         raise InstallerError(
             StepResult(
@@ -367,6 +371,39 @@ def ensure_uv(script_dir: str | Path, *, log_dir: str | Path) -> Path:
             )
         )
     return _download_uv(tools_dir, log_dir=log_dir)
+
+
+def _local_uv_candidates(root: Path) -> list[Path]:
+    names = ["uv.exe"] if _is_windows_host() else ["uv", "uv.exe"]
+    roots = [root, *root.parents[:3], Path.cwd()]
+    venv = os.getenv("VIRTUAL_ENV")
+    if venv:
+        roots.append(Path(venv))
+    candidates: list[Path] = []
+    for base in roots:
+        for name in names:
+            candidates.extend(
+                [
+                    base / "Scripts" / name,
+                    base / "bin" / name,
+                    base / ".venv" / "Scripts" / name,
+                    base / ".venv" / "bin" / name,
+                    base / "venv" / "Scripts" / name,
+                    base / "venv" / "bin" / name,
+                    base / ".fusion-memory-tools" / name,
+                ]
+            )
+        for name in names:
+            candidates.append(base / name)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate).lower() if _is_windows_host() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
 
 
 def download_qwen_models(

@@ -358,6 +358,72 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
 
+    def test_health_stays_responsive_while_add_request_is_slow(self) -> None:
+        ready = threading.Event()
+        add_started = threading.Event()
+        release_add = threading.Event()
+        holder = {}
+        outer = self
+
+        class SlowService:
+            storage_backend = "sqlite"
+
+            def add(self, *args, **kwargs):
+                add_started.set()
+                outer.assertTrue(release_add.wait(timeout=10))
+                return {"span_ids": ["span_slow"], "accepted_fact_ids": []}
+
+            def process_server_background_tasks(self, limit: int = 5) -> dict:
+                return {"processed": 0}
+
+            def close(self) -> None:
+                pass
+
+        def run_server() -> None:
+            service = SlowService()
+            server = serve(service, host="127.0.0.1", port=0)
+            holder["server"] = server
+            ready.set()
+            try:
+                server.serve_forever()
+            finally:
+                server.server_close()
+                service.close()
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=5))
+        server = holder["server"]
+        base_url = f"http://127.0.0.1:{server.server_address[1]}"
+        add_error: list[BaseException] = []
+
+        def post_add() -> None:
+            try:
+                _post_or_get(
+                    f"{base_url}/add",
+                    {
+                        "input": {"role": "user", "content": "slow qwen add"},
+                        "scope": {"workspace_id": "w", "user_id": "u", "agent_id": "a"},
+                    },
+                )
+            except BaseException as exc:
+                add_error.append(exc)
+
+        add_thread = threading.Thread(target=post_add, daemon=True)
+        add_thread.start()
+        try:
+            self.assertTrue(add_started.wait(timeout=5))
+            with request.urlopen(f"{base_url}/health", timeout=1.0) as response:
+                health = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(health["ok"])
+        finally:
+            release_add.set()
+            add_thread.join(timeout=5)
+            server.shutdown()
+            thread.join(timeout=2)
+
+        self.assertFalse(add_error)
+
 
 def _post_or_get(url: str, payload: dict | None = None) -> dict:
     if payload is None:

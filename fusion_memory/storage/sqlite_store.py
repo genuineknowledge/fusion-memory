@@ -58,7 +58,7 @@ class SQLiteMemoryStore:
     def __init__(self, path: str | Path = ":memory:", embedder: Embedder | None = None) -> None:
         self.path = str(path)
         self.embedder = embedder or DeterministicEmbedder()
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self._closed = False
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("pragma foreign_keys = on")

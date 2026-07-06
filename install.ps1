@@ -1,22 +1,24 @@
 $ErrorActionPreference = "Stop"
 
 function Normalize-ProcessPathEnvironment {
-    $PathEntries = @(Get-ChildItem Env: | Where-Object { $_.Name -ieq "Path" })
+    $ProcessEnvironment = [Environment]::GetEnvironmentVariables("Process")
+    $PathEntries = @($ProcessEnvironment.Keys | Where-Object { $_ -ieq "Path" })
     if ($PathEntries.Count -eq 0) {
         return
     }
 
-    $Preferred = $PathEntries | Where-Object { $_.Name -ceq "Path" } | Select-Object -First 1
+    $Preferred = $PathEntries | Where-Object { $_ -ceq "Path" } | Select-Object -First 1
     if (-not $Preferred) {
         $Preferred = $PathEntries[0]
     }
-    $PathValue = $Preferred.Value
+    $PathValue = [string]$ProcessEnvironment[$Preferred]
 
     foreach ($Entry in $PathEntries) {
-        Remove-Item -LiteralPath ("Env:" + $Entry.Name) -ErrorAction SilentlyContinue
+        [Environment]::SetEnvironmentVariable([string]$Entry, $null, "Process")
+        Remove-Item -LiteralPath ("Env:" + $Entry) -ErrorAction SilentlyContinue
     }
     Remove-Item Env:PATH -ErrorAction SilentlyContinue
-    $env:Path = $PathValue
+    [Environment]::SetEnvironmentVariable("Path", $PathValue, "Process")
 }
 
 function Get-UvDownloadUrl {
@@ -29,6 +31,7 @@ function Get-UvDownloadUrl {
 
 function Resolve-Uv {
     param(
+        [string]$ScriptDir,
         [string]$ToolsDir,
         [string]$LogFile
     )
@@ -40,6 +43,25 @@ function Resolve-Uv {
     $Found = Get-Command uv -ErrorAction SilentlyContinue
     if ($Found) {
         return [string]$Found.Source
+    }
+
+    $LocalCandidates = @(
+        (Join-Path $ToolsDir "uv.exe"),
+        (Join-Path $ScriptDir ".venv\Scripts\uv.exe"),
+        (Join-Path $ScriptDir "venv\Scripts\uv.exe"),
+        (Join-Path (Split-Path -Parent $ScriptDir) ".venv\Scripts\uv.exe"),
+        (Join-Path (Split-Path -Parent $ScriptDir) "venv\Scripts\uv.exe"),
+        (Join-Path (Get-Location).Path ".venv\Scripts\uv.exe"),
+        (Join-Path (Get-Location).Path "venv\Scripts\uv.exe")
+    )
+    if ($env:VIRTUAL_ENV) {
+        $LocalCandidates += (Join-Path $env:VIRTUAL_ENV "Scripts\uv.exe")
+    }
+    foreach ($Candidate in $LocalCandidates) {
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate)) {
+            Add-Content -Path $LogFile -Value "Using local uv at $Candidate"
+            return $Candidate
+        }
     }
 
     New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
@@ -92,7 +114,7 @@ $Package = if ($env:FUSION_MEMORY_PACKAGE) { $env:FUSION_MEMORY_PACKAGE } else {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Set-Content -Path $LogFile -Value ""
 
-$Uv = Resolve-Uv -ToolsDir $ToolsDir -LogFile $LogFile
+$Uv = Resolve-Uv -ScriptDir $ScriptDir -ToolsDir $ToolsDir -LogFile $LogFile
 & $Uv --version *>> $LogFile
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Fusion Memory installation needs attention. Step: uv bootstrap. Log: $LogFile"

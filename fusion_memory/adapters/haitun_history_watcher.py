@@ -315,7 +315,7 @@ def _daemon_popen_kwargs(
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
         "cwd": cwd,
-        "env": dict(env),
+        "env": _daemon_env(env, os_name=name),
     }
     if name == "nt":
         flags = 0

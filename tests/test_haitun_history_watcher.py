@@ -322,6 +322,31 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
         self.assertEqual(env["Path"], r"C:\Windows\System32")
         self.assertEqual(env["PSI_MEMORY_BASE_URL"], "http://127.0.0.1:8700")
 
+    def test_windows_history_watcher_daemon_starts_without_console_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "watcher.log"
+            with (
+                log_path.open("ab") as handle,
+                patch.object(watcher.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
+                patch.object(watcher.subprocess, "DETACHED_PROCESS", 0x00000008, create=True),
+                patch.object(watcher.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            ):
+                kwargs = watcher._daemon_popen_kwargs(
+                    handle,
+                    cwd=tmp,
+                    env={
+                        "Path": r"C:\Windows\System32",
+                        "PATH": r"C:\msys64\ucrt64\bin",
+                    },
+                    os_name="nt",
+                )
+
+        self.assertEqual(kwargs["creationflags"] & 0x08000000, 0x08000000)
+        self.assertEqual(kwargs["creationflags"] & 0x00000008, 0x00000008)
+        self.assertEqual(kwargs["creationflags"] & 0x00000200, 0x00000200)
+        path_keys = [key for key in kwargs["env"] if key.lower() == "path"]
+        self.assertEqual(path_keys, ["Path"])
+
     def test_cli_exposes_cross_platform_history_watcher_daemon_commands(self) -> None:
         proc = subprocess.run(
             [sys.executable, "-m", "fusion_memory.cli", "--help"],

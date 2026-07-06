@@ -22,6 +22,7 @@ from fusion_memory.adapters.haitun_history_watcher import (
 from fusion_memory.core.config import DEFAULT_CONFIG
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
 from fusion_memory.product import (
+    DEFAULT_SERVICE_START_WAIT_SECONDS,
     backup_data,
     configure_interactive,
     doctor,
@@ -103,7 +104,7 @@ def main() -> None:
     start_cmd = sub.add_parser("start", help="Start the local Fusion Memory service")
     start_cmd.add_argument("--home", default=None, help="Fusion Memory data directory")
     start_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    start_cmd.add_argument("--wait-seconds", type=float, default=10.0)
+    start_cmd.add_argument("--wait-seconds", type=float, default=DEFAULT_SERVICE_START_WAIT_SECONDS)
 
     stop_cmd = sub.add_parser("stop", help="Stop the local Fusion Memory service")
     stop_cmd.add_argument("--home", default=None, help="Fusion Memory data directory")

@@ -21,6 +21,7 @@ CONFIG_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8700
 PORT_FALLBACK_ATTEMPTS = 20
+DEFAULT_SERVICE_START_WAIT_SECONDS = 120.0
 DEFAULT_POSTGRES_DSN = "postgresql://fusion:fusion@127.0.0.1:55433/fusion_memory"
 DEFAULT_QWEN_EMBEDDING_MODEL_NAME = "Qwen3-Embedding-0.6B"
 DEFAULT_QWEN_RERANKER_MODEL_NAME = "Qwen3-Reranker-0.6B"
@@ -454,7 +455,7 @@ def doctor(home: str | Path | None = None) -> dict[str, Any]:
 
 
 def start_service(
-    home: str | Path | None = None, *, wait_seconds: float = 10.0
+    home: str | Path | None = None, *, wait_seconds: float = DEFAULT_SERVICE_START_WAIT_SECONDS
 ) -> dict[str, Any]:
     paths = product_paths(home)
     init_home(home)
@@ -532,13 +533,20 @@ def start_service(
             )
         time.sleep(0.2)
 
+    _terminate_process_tree(process)
+    _STARTED_PROCESSES.pop(process.pid, None)
+    paths.pid.unlink(missing_ok=True)
     return {
         "ok": False,
         "error": "startup_timeout",
-        "message": f"{APP_NAME} is still starting. Run fusion-memory status or check {paths.log}.",
+        "message": (
+            f"{APP_NAME} did not become ready within {wait_seconds:.1f}s and the "
+            "startup process was stopped. Check the local log before retrying."
+        ),
         "pid": process.pid,
         "log": str(paths.log),
         "health": last_health,
+        "terminated": True,
     }
 
 
@@ -1442,6 +1450,41 @@ def _daemon_popen_kwargs(
     else:
         kwargs["start_new_session"] = True
     return kwargs
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    pid = getattr(process, "pid", None)
+    if pid is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
 
 
 def _normalize_process_env(env: Mapping[str, str] | dict[str, str]) -> dict[str, str]:

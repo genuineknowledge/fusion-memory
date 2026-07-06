@@ -905,6 +905,59 @@ class ProductCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", result["message"])
         self.assertNotIn("sentence_transformers", result["message"])
 
+    def test_start_timeout_terminates_unresponsive_startup_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            paths = product_paths(home)
+            init_home(
+                home,
+                port=0,
+                settings={
+                    "db": str(home / "fusion-memory.sqlite3"),
+                    "storage_backend": "sqlite",
+                    "embedding": {"provider": "qwen", "model": "Qwen3-Embedding-0.6B"},
+                    "reranker": {"provider": "qwen", "model": "Qwen3-Reranker-0.6B"},
+                },
+            )
+            process = _FakeProcess(pid=54321)
+
+            with (
+                patch("fusion_memory.product._port_available", return_value=True),
+                patch("fusion_memory.product.service_health", return_value={"ok": False, "message": "timed out"}),
+                patch("fusion_memory.product.subprocess.Popen", return_value=process),
+                patch("fusion_memory.product._terminate_process_tree") as terminate,
+            ):
+                result = start_service(home, wait_seconds=0.01)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "startup_timeout")
+        self.assertTrue(result["terminated"])
+        terminate.assert_called_once_with(process)
+        self.assertFalse(paths.pid.exists())
+
+    def test_start_cli_waits_long_enough_for_qwen_cold_start_by_default(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+
+        old_argv = sys.argv
+        stdout = StringIO()
+        try:
+            sys.argv = ["fusion-memory", "start", "--json"]
+            with (
+                redirect_stdout(stdout),
+                patch(
+                    "fusion_memory.cli.start_service",
+                    return_value={"ok": True, "url": "http://127.0.0.1:8700"},
+                ) as start,
+            ):
+                code = main()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(code, 0)
+        self.assertEqual(start.call_args.kwargs["wait_seconds"], product.DEFAULT_SERVICE_START_WAIT_SECONDS)
+        self.assertGreaterEqual(product.DEFAULT_SERVICE_START_WAIT_SECONDS, 120.0)
+
     def test_safe_product_error_maps_connection_failure_to_database_guidance(
         self,
     ) -> None:

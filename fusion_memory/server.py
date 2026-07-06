@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
@@ -34,7 +34,9 @@ class MemoryServerState:
         self.next_background_task_run = time.monotonic() + self.background_task_interval_seconds
 
 
-class FusionMemoryHTTPServer(HTTPServer):
+class FusionMemoryHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
     def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler], state: MemoryServerState) -> None:
         super().__init__(server_address, handler_class)
         self.state = state

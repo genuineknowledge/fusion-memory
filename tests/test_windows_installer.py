@@ -279,6 +279,54 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(path_keys, ["Path"])
         self.assertEqual(env["Path"], r"C:\Windows\System32")
 
+    def test_run_logged_passes_deduped_windows_path_to_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "install.log"
+
+            class DoneProcess:
+                returncode = 0
+                pid = 24680
+
+                def communicate(self, timeout: float | None = None) -> tuple[str, None]:
+                    return ("ok", None)
+
+            with (
+                patch("fusion_memory.windows_installer._is_windows_host", return_value=True),
+                patch("fusion_memory.windows_installer.subprocess.Popen", return_value=DoneProcess()) as popen,
+            ):
+                result = windows_installer.run_logged(
+                    ["uv.exe", "--version"],
+                    log_path=log_path,
+                    timeout_seconds=1.0,
+                    step_name="uv probe",
+                    env={
+                        "Path": r"C:\Windows\System32",
+                        "PATH": r"C:\msys64\ucrt64\bin",
+                    },
+                )
+
+        self.assertTrue(result.ok)
+        process_env = popen.call_args.kwargs["env"]
+        path_keys = [key for key in process_env if key.lower() == "path"]
+        self.assertEqual(path_keys, ["Path"])
+        self.assertEqual(process_env["Path"], r"C:\Windows\System32")
+
+    def test_ensure_uv_prefers_workspace_uv_before_github_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace_uv = root / ".venv" / "Scripts" / "uv.exe"
+            workspace_uv.parent.mkdir(parents=True)
+            workspace_uv.write_text("", encoding="utf-8")
+
+            with (
+                patch("fusion_memory.windows_installer._is_windows_host", return_value=True),
+                patch("fusion_memory.windows_installer.shutil.which", return_value=None),
+                patch("fusion_memory.windows_installer.request.urlopen", side_effect=AssertionError("download should not run")),
+            ):
+                uv = windows_installer.ensure_uv(root, log_dir=root / ".fusion-memory-logs")
+
+        self.assertEqual(uv, workspace_uv)
+
 
 class _FakeProcess:
     def __init__(self, *, returncode: int | None) -> None:
