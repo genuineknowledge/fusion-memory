@@ -121,7 +121,7 @@ def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
             data = json.loads(body)
             if not isinstance(data, dict):
                 raise ValueError("request body must be a JSON object")
-            return data
+            return _repair_request_payload(data)
 
         def _write_json(self, status: int, payload: Any) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -187,6 +187,75 @@ def _scope(payload: dict[str, Any]) -> Scope:
         session_id=raw.get("session_id"),
         app_id=raw.get("app_id"),
     )
+
+
+def _repair_request_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _repair_likely_mojibake(value)
+    if isinstance(value, list):
+        return [_repair_request_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _repair_request_payload(item) for key, item in value.items()}
+    return value
+
+
+_MOJIBAKE_SIGNATURES = (
+    "浣犲",
+    "鍠滄",
+    "濆啺",
+    "缇庡",
+    "鍜栧",
+    "枃娴嬭",
+    "榛樿",
+    "鐢ㄤ",
+    "腑鏂",
+    "囧洖",
+    "澶嶆",
+)
+_PRIVATE_OR_REPLACEMENT_RE = re.compile(r"[\ue000-\uf8ff\ufffd\x80-\x9f]")
+_LATIN1_MOJIBAKE_RE = re.compile(
+    r"[ÃÂâÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßåæçèéêëìíîïðñòóôõöøùúûüýþÿ]"
+)
+_CJK_RE = re.compile(r"[\u3400-\u9fff]")
+
+
+def _repair_likely_mojibake(text: str) -> str:
+    score = _mojibake_score(text)
+    if score <= 0:
+        return text
+
+    best = text
+    best_score = score
+    for encoding in ("gb18030", "latin-1"):
+        try:
+            candidate = text.encode(encoding).decode("utf-8")
+        except UnicodeError:
+            continue
+        candidate_score = _mojibake_score(candidate)
+        if candidate != text and candidate_score < best_score and _plausible_repair(text, candidate):
+            best = candidate
+            best_score = candidate_score
+    return best
+
+
+def _mojibake_score(text: str) -> int:
+    score = 0
+    score += 5 * len(_PRIVATE_OR_REPLACEMENT_RE.findall(text))
+    score += 2 * len(_LATIN1_MOJIBAKE_RE.findall(text))
+    for signature in _MOJIBAKE_SIGNATURES:
+        if signature in text:
+            score += 4
+    return score
+
+
+def _plausible_repair(original: str, candidate: str) -> bool:
+    if not candidate.strip():
+        return False
+    if _PRIVATE_OR_REPLACEMENT_RE.search(candidate):
+        return False
+    if len(_CJK_RE.findall(original)) and not len(_CJK_RE.findall(candidate)):
+        return False
+    return True
 
 
 def _required(payload: dict[str, Any], key: str) -> Any:

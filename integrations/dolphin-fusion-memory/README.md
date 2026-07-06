@@ -31,8 +31,8 @@ the agent example and the memory integration exercise the same HTTP contract.
 - `PSI_MEMORY_AGENT_ID`: agent scope. Defaults to `haitun`.
 - `PSI_MEMORY_SESSION_ID`: optional session scope. When unset, reads allow
   cross-session retrieval.
-- `PSI_MEMORY_TIMEOUT_SECONDS`: request timeout in seconds. Defaults to `2.0` and is
-  clamped to `0.1..5.0`.
+- `PSI_MEMORY_TIMEOUT_SECONDS`: request timeout in seconds. Defaults to `30.0` and is
+  clamped to `0.1..120.0`.
 - `FUSION_MEMORY_SMOKE_MEMORY_URL`: smoke-script-only override for the Fusion Memory
   URL.
 

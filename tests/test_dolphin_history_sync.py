@@ -79,7 +79,7 @@ class DolphinHistorySyncTests(unittest.TestCase):
         self.assertEqual(second["skipped"], 2)
         self.assertEqual(len(posted), 2)
         self.assertEqual(posted[0]["memory_url"], "http://memory.local:8700")
-        self.assertEqual(posted[0]["timeout_seconds"], 5.0)
+        self.assertEqual(posted[0]["timeout_seconds"], 30.0)
         self.assertEqual(posted[0]["payload"]["input"]["role"], "user")
         self.assertEqual(posted[0]["payload"]["input"]["content"], "My project codename is river.")
         self.assertEqual(posted[0]["payload"]["input"]["turn_id"], "dolphin_history_0")
@@ -139,7 +139,7 @@ class DolphinHistorySyncTests(unittest.TestCase):
 
         def fake_urlopen(req, timeout: float) -> Response:
             opened.append(req.full_url)
-            self.assertEqual(timeout, 5.0)
+            self.assertEqual(timeout, 30.0)
             return Response()
 
         config = DolphinHistorySyncConfig(gateway_url="http://gateway.local:8080/", session_id="session-a")

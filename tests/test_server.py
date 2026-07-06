@@ -159,6 +159,55 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
 
+    def test_server_repairs_windows_mojibake_request_text(self) -> None:
+        ready = threading.Event()
+        holder = {}
+
+        def run_server() -> None:
+            service = MemoryService()
+            server = serve(service, host="127.0.0.1", port=0)
+            holder["service"] = service
+            holder["server"] = server
+            ready.set()
+            try:
+                server.serve_forever()
+            finally:
+                server.server_close()
+                service.close()
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=5))
+        server = holder["server"]
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            scope = {"workspace_id": "w", "user_id": "u", "agent_id": "a"}
+            mojibake = "喜欢喝冰美式咖啡".encode("utf-8").decode("gb18030")
+            add = _post_or_get(
+                f"{base_url}/add",
+                {
+                    "input": {"role": "user", "content": f"Father {mojibake}"},
+                    "scope": scope,
+                },
+            )
+            self.assertTrue(add["span_ids"])
+
+            search = _post_or_get(
+                f"{base_url}/search",
+                {
+                    "query": "冰美式咖啡",
+                    "scope": scope,
+                    "options": {"limit": 3},
+                },
+            )
+            candidate_text = "\n".join(str(candidate.get("text", "")) for candidate in search["candidates"])
+
+            self.assertIn("Father 喜欢喝冰美式咖啡", candidate_text)
+            self.assertNotIn("鍠滄", candidate_text)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
     def test_server_processes_refresh_session_summary_background_tasks(self) -> None:
         ready = threading.Event()
         holder = {}
