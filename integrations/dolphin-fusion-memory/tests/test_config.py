@@ -19,7 +19,7 @@ def test_build_memory_config_defaults() -> None:
     assert cfg.user_id == "user"
     assert cfg.agent_id == "dolphin"
     assert cfg.app_id == "dolphin"
-    assert cfg.timeout_seconds == 2.0
+    assert cfg.timeout_seconds == 30.0
     assert cfg.allow_cross_session is True
     assert cfg.scope["session_id"] is None
 
@@ -34,7 +34,7 @@ def test_build_memory_config_clamps_timeout_and_scope(monkeypatch) -> None:
 
     cfg = build_memory_config()
     assert cfg.base_url == "http://example.invalid:1234"
-    assert cfg.timeout_seconds == 5.0
+    assert cfg.timeout_seconds == 9.5
     assert cfg.allow_cross_session is False
     assert cfg.scope == {
         "workspace_id": "ws-a",
@@ -47,4 +47,9 @@ def test_build_memory_config_clamps_timeout_and_scope(monkeypatch) -> None:
 
 def test_build_memory_config_uses_default_timeout_for_non_positive_values() -> None:
     cfg = build_memory_config({"PSI_MEMORY_TIMEOUT_SECONDS": "0"})
-    assert cfg.timeout_seconds == 2.0
+    assert cfg.timeout_seconds == 30.0
+
+
+def test_build_memory_config_caps_extreme_timeout_values() -> None:
+    cfg = build_memory_config({"PSI_MEMORY_TIMEOUT_SECONDS": "999"})
+    assert cfg.timeout_seconds == 120.0

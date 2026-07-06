@@ -49,7 +49,7 @@ class AgentAdapterDocsTests(unittest.TestCase):
         self.assertIn("not the workspace directory", text)
         self.assertIn("estimate", text)
         self.assertIn("10-20 minutes", text)
-        self.assertIn("SQLite plus bundled local Qwen vector models", text)
+        self.assertIn("SQLite plus local Qwen vector models", text)
         self.assertIn("Postgres/pgvector is optional", text)
         self.assertIn("Postgres integration", text)
         self.assertIn("install or start a PostgreSQL/pgvector server", text)

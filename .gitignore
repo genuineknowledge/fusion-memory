@@ -27,3 +27,5 @@ dist/
 
 docs/alpha-beta/*-latest.json
 docs/superpowers/
+
+/models/

@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8700"
-DEFAULT_TIMEOUT_SECONDS = 2.0
+DEFAULT_TIMEOUT_SECONDS = 30.0
 MIN_TIMEOUT_SECONDS = 0.1
-MAX_TIMEOUT_SECONDS = 5.0
+MAX_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)

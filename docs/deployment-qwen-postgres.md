@@ -3,9 +3,9 @@
 Current target:
 
 - Storage: Postgres + pgvector
-- Embedding: repo-local `models/Qwen3-Embedding-0.6B`
+- Embedding: Fusion Memory home-local `models/Qwen3-Embedding-0.6B`
 - Embedding dimension: 1024
-- Reranker: repo-local `models/Qwen3-Reranker-0.6B`
+- Reranker: Fusion Memory home-local `models/Qwen3-Reranker-0.6B`
 - Extractor: memory-owned configurable LLM extractor
 
 ## Prerequisites
@@ -18,12 +18,13 @@ Current target:
 - Optional GPU for lower local model latency. CPU works for smoke tests but is
   slower.
 
-The repository includes the default local model directories. Do not download
-model weights during normal install. Use a writable model cache outside the
-repository only when replacing or regenerating the bundled model files:
+The installer downloads the default local model directories from ModelScope into
+the Fusion Memory home models directory. The repository does not carry the model
+weights. Override `FUSION_MEMORY_HOME` when you need the models and SQLite data
+under a specific writable directory:
 
 ```bash
-export FUSION_MEMORY_MODEL_CACHE="$HOME/.cache/fusion-memory/models"
+export FUSION_MEMORY_HOME="$HOME/.local/share/fusion-memory"
 ```
 
 The remaining production-specific inputs are the LLM extractor endpoint/model
@@ -58,55 +59,37 @@ python -m fusion_memory.cli verify-postgres postgresql://fusion:fusion@127.0.0.1
 
 The migration now uses `vector(1024)` for `evidence_spans`, `memory_facts`, and `entity_profiles`.
 
-## Install Qwen Dependencies
+## Install Qwen Runtime
 
-Use Python 3.11 or 3.12. Python 3.14 is not recommended for the ML stack.
+Use the project installer. It installs Fusion Memory as a `uv tool` with
+uv-managed Python 3.12, downloads Qwen model weights from ModelScope, and avoids
+using an agent runtime such as MSYS2 Python for the ML stack.
 
 ```bash
 cd /path/to/fusion-memory
-conda create -y -n fusion-memory-qwen python=3.12 pip
-conda activate fusion-memory-qwen
-pip install --no-deps -e . psycopg2-binary sentence-transformers transformers huggingface-hub tokenizers safetensors numpy scipy scikit-learn tqdm pyyaml regex requests filelock fsspec jinja2 networkx sympy typing-extensions
-pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 --extra-index-url https://pypi.org/simple
-pip install tokenizers==0.22.2 typer click hf-xet httpx certifi charset-normalizer idna urllib3 joblib narwhals threadpoolctl rich shellingham annotated-doc anyio httpcore h11 markdown-it-py mdurl pygments
-pip check
+sh install.sh
+fusion-memory install-check --force --json
+fusion-memory doctor --json
 ```
 
-The explicit install sequence avoids the resolver selecting an incompatible
-PyTorch build. Adjust the PyTorch package for your CUDA or CPU runtime.
+Windows PowerShell:
 
-The default model weights are committed under `models/` and tracked with Git
-LFS. The following command is only for maintainers who need to replace those
-bundled files:
-
-```bash
-export FUSION_MEMORY_MODEL_CACHE="$HOME/.cache/fusion-memory/models"
-HF_ENDPOINT=https://hf-mirror.com python - <<'PY'
-import os
-from huggingface_hub import snapshot_download
-
-cache = os.environ["FUSION_MEMORY_MODEL_CACHE"]
-snapshot_download(
-    "Qwen/Qwen3-Embedding-0.6B",
-    local_dir=f"{cache}/Qwen3-Embedding-0.6B",
-)
-snapshot_download(
-    "Qwen/Qwen3-Reranker-0.6B",
-    local_dir=f"{cache}/Qwen3-Reranker-0.6B",
-)
-PY
+```powershell
+Set-Location C:\path\to\fusion-memory
+.\install.ps1
+fusion-memory install-check --force --json
+fusion-memory doctor --json
 ```
 
 ## Qwen Smoke
 
 ```bash
 cd /path/to/fusion-memory
-conda activate fusion-memory-qwen
 python deploy/qwen_smoke.py \
-  --embedding-model "$PWD/models/Qwen3-Embedding-0.6B" \
-  --reranker-model "$PWD/models/Qwen3-Reranker-0.6B" \
+  --embedding-model "${FUSION_MEMORY_HOME:-$HOME/.local/share/fusion-memory}/models/Qwen3-Embedding-0.6B" \
+  --reranker-model "${FUSION_MEMORY_HOME:-$HOME/.local/share/fusion-memory}/models/Qwen3-Reranker-0.6B" \
   --device "${FUSION_MEMORY_QWEN_DEVICE:-cpu}" \
-  --cache-dir "$PWD/models"
+  --cache-dir "${FUSION_MEMORY_HOME:-$HOME/.local/share/fusion-memory}/models"
 ```
 
 Expected:

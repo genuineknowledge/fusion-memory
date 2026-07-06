@@ -40,6 +40,57 @@ class FusionMemoryTests(unittest.TestCase):
         facts = memory.store.list_facts(scope)
         self.assertTrue(any(fact.category == "preference" and fact.predicate == "prefers" and "PostgreSQL" in fact.object for fact in facts))
 
+    def test_chinese_preference_query_uses_current_views_for_answer_context(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+
+        memory.add("Father 喜欢喝冰美式咖啡。", scope, ts("2026-07-06T10:00:00+00:00"))
+        pack = memory.answer_context(
+            "Father 喝什么饮料？",
+            scope,
+            budget={"limit": 6, "allow_cross_session": True},
+        )
+
+        self.assertEqual(pack.coverage["query_type"], "preference")
+        self.assertTrue(pack.current_views)
+        self.assertTrue(pack.facts)
+        self.assertTrue(any("Father" in view["text"] for view in pack.current_views))
+        self.assertTrue(any("冰美式咖啡" in view["text"] for view in pack.current_views))
+        self.assertTrue(any("Father" in fact["text"] for fact in pack.facts))
+        self.assertTrue(any("冰美式咖啡" in fact["text"] for fact in pack.facts))
+
+    def test_chinese_rule_extractor_preserves_named_preference_subject(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+
+        result = memory.add("Father 喜欢喝冰美式咖啡。", scope, ts("2026-07-06T10:00:00+00:00"))
+
+        self.assertTrue(result.accepted_fact_ids)
+        facts = memory.store.list_facts(scope)
+        self.assertTrue(
+            any(
+                fact.category == "preference"
+                and fact.subject == "Father"
+                and "冰美式咖啡" in fact.object
+                for fact in facts
+            )
+        )
+
+    def test_current_views_remain_session_scoped_for_same_subject(self) -> None:
+        memory = MemoryService()
+        session_one = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s1")
+        session_two = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s2")
+        try:
+            memory.add("I prefer Qdrant for Atlas retrieval.", session_one, ts("2026-07-06T10:00:00+00:00"))
+            memory.add("I prefer Pinecone for Atlas retrieval.", session_two, ts("2026-07-06T11:00:00+00:00"))
+
+            views = memory.get_current_views(session_one)
+
+            self.assertTrue(any("Qdrant" in view.text for view in views))
+            self.assertFalse(any("Pinecone" in view.text for view in views))
+        finally:
+            memory.close()
+
     def test_chinese_rule_extractor_accepts_switch_decision_and_event(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
@@ -105,10 +156,10 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertTrue(candidates[0]["temporal_relations"])
         self.assertIn("deadline", {item["relation_type"] for item in candidates[0]["temporal_relations"]})
 
-    def test_event_ordering_dual_shadow_is_disabled_by_default(self) -> None:
+    def test_event_ordering_runtime_flags_do_not_expose_dual_shadow_switch(self) -> None:
         service = MemoryService()
         try:
-            self.assertFalse(getattr(service.retrieval_flags, "dual_event_ordering_shadow", False))
+            self.assertFalse(hasattr(service.retrieval_flags, "dual_event_ordering_shadow"))
             self.assertEqual(getattr(service.retrieval_flags, "production_selector", "legacy"), "legacy")
         finally:
             service.close()
@@ -1140,57 +1191,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertNotIn("cluster_labels", graph_coverage)
         self.assertNotIn("raw_text", graph_coverage)
 
-    def test_event_ordering_dual_shadow_reports_without_replacing_selected_candidates(self) -> None:
-        class Flags:
-            dual_event_ordering_shadow = True
-            production_selector = "legacy"
-
-        service = MemoryService(retrieval_flags=Flags())
-        scope = Scope(workspace_id="ws-dual-shadow", user_id="u", agent_id="a")
-        try:
-            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
-            result = service.search(
-                "What order did I discuss the budget tracker work?",
-                scope,
-                {"query_type_hint": "event_ordering", "limit": 5},
-            )
-
-            self.assertIn("event_ordering_dual_shadow", result.coverage)
-            shadow = result.coverage["event_ordering_dual_shadow"]
-            self.assertEqual(shadow["selected_driver"], "dual_shadow")
-            self.assertIn("candidate_count", shadow)
-            self.assertIn("sources", shadow)
-            self.assertGreaterEqual(len(result.candidates), 1)
-        finally:
-            service.close()
-
-    def test_dual_shadow_does_not_replace_event_ordering_selected_candidates(self) -> None:
-        class Flags:
-            dual_event_ordering_shadow = True
-            production_selector = "legacy"
-
-        service = MemoryService(retrieval_flags=Flags())
-        scope = Scope(workspace_id="shadow-default", user_id="u", agent_id="a")
-        try:
-            service.add(
-                {
-                    "role": "user",
-                    "content": "First I created the schema. Then I added CRUD. Finally I tested errors.",
-                },
-                scope,
-            )
-            result = service.search(
-                "What order did I describe the work?",
-                scope,
-                {"query_type_hint": "event_ordering", "limit": 5},
-            )
-        finally:
-            service.close()
-
-        self.assertIn("event_ordering_dual_shadow", result.coverage)
-        self.assertNotEqual(result.coverage["event_ordering_dual_shadow"].get("selected_driver"), "production")
-        self.assertTrue(result.candidates)
-
     def test_event_ordering_default_search_does_not_select_graph_candidates(self) -> None:
         service = MemoryService()
         scope = Scope(workspace_id="ws-legacy-default", user_id="u", agent_id="a")
@@ -1268,92 +1268,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertEqual(temporal_layer["source_span_ids"], ["span-graph-trace"])
         self.assertNotIn("text", temporal_layer)
         self.assertNotIn("confidence", temporal_layer)
-
-    def test_event_ordering_dual_shadow_reports_fallback_graph_candidates(self) -> None:
-        class Flags:
-            dual_event_ordering_shadow = True
-            production_selector = "legacy"
-
-        service = MemoryService(retrieval_flags=Flags())
-        scope = Scope(workspace_id="ws-dual-shadow-graph", user_id="u", agent_id="a")
-        fallback_graph_candidate = Candidate(
-            id="graph-fallback-span",
-            type="event",
-            text="Fallback graph candidate",
-            source="event_ordering_graph_selector_event",
-            scores={"score": 1.0},
-            source_span_ids=["span-1"],
-            metadata={"graph_fallback": True},
-        )
-        legacy_candidate = Candidate(
-            id="legacy-span",
-            type="event",
-            text="Legacy candidate",
-            source="event_timeline_graph",
-            scores={"score": 1.0},
-            source_span_ids=["span-2"],
-            metadata={},
-        )
-        try:
-            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
-            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [fallback_graph_candidate]
-            service._event_ordering_legacy_recall_for_shadow = lambda query, scope, plan, limit, include_session: ([legacy_candidate], [legacy_candidate.source])
-
-            result = service.search(
-                "What order did I discuss the budget tracker work?",
-                scope,
-                {"query_type_hint": "event_ordering", "limit": 5},
-            )
-
-            shadow = result.coverage["event_ordering_dual_shadow"]
-            self.assertEqual(shadow["graph_candidate_count"], 1)
-            self.assertIn("event_ordering_graph_selector_event", shadow["sources"])
-            self.assertIn("event_timeline_graph", shadow["sources"])
-        finally:
-            service.close()
-
-    def test_event_ordering_dual_shadow_candidate_count_dedupes_overlapping_graph_and_legacy_candidates(self) -> None:
-        class Flags:
-            dual_event_ordering_shadow = True
-            production_selector = "legacy"
-
-        service = MemoryService(retrieval_flags=Flags())
-        scope = Scope(workspace_id="ws-dual-shadow-dedupe", user_id="u", agent_id="a")
-        shared_graph_candidate = Candidate(
-            id="shared-span",
-            type="event",
-            text="I set up the schema and then implemented transaction CRUD.",
-            source="event_ordering_persisted_graph",
-            scores={"score": 1.0},
-            source_span_ids=["span-shared"],
-            metadata={},
-        )
-        shared_legacy_candidate = Candidate(
-            id="legacy-shared-span",
-            type="event",
-            text="I set up the schema and then implemented transaction CRUD.",
-            source="event_timeline_graph",
-            scores={"score": 1.0},
-            source_span_ids=["span-shared"],
-            metadata={},
-        )
-        try:
-            service.add({"role": "user", "content": "First I set up schema. Then I implemented transaction CRUD."}, scope)
-            service._event_ordering_graph_selector_candidates = lambda query, scope, limit, include_session=False: [shared_graph_candidate]
-            service._event_ordering_legacy_recall_for_shadow = lambda query, scope, plan, limit, include_session: ([shared_legacy_candidate], [shared_legacy_candidate.source])
-
-            result = service.search(
-                "What order did I discuss the budget tracker work?",
-                scope,
-                {"query_type_hint": "event_ordering", "limit": 5},
-            )
-
-            shadow = result.coverage["event_ordering_dual_shadow"]
-            self.assertEqual(shadow["graph_candidate_count"], 1)
-            self.assertEqual(shadow["legacy_candidate_count"], 1)
-            self.assertEqual(shadow["candidate_count"], 1)
-        finally:
-            service.close()
 
     def test_event_ordering_shadow_replay_keeps_graph_and_legacy_paths_comparable(self) -> None:
         cases = [

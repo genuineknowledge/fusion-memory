@@ -39,12 +39,12 @@ async def post_json(
             return data if isinstance(data, dict) else {}
     except MemoryToolError:
         raise
-    except (aiohttp.ClientError, TimeoutError):
+    except (aiohttp.ClientError, TimeoutError) as exc:
         raise MemoryToolError(
             error="service_unavailable",
             cause="connection_failed",
             message="Fusion Memory service is not reachable. Run fusion-memory status or fusion-memory start.",
-        )
+        ) from exc
 
 
 def format_context_pack(pack: dict[str, Any], limit: int = 8) -> str:
@@ -90,8 +90,8 @@ def format_error_result(exc: Exception) -> str:
 
 def _normalize_timeout_seconds(value: float) -> float:
     if value <= 0:
-        return 2.0
-    return max(0.1, min(5.0, value))
+        return 30.0
+    return max(0.1, min(120.0, value))
 
 
 def _extract_message(data: Any) -> str | None:

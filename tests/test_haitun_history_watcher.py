@@ -39,6 +39,23 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             self.assertEqual(cfg.workspace_id, "ws")
             self.assertEqual(cfg.timeout_seconds, 3.0)
 
+    def test_config_from_workspace_defaults_and_caps_timeout_for_local_qwen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            default_cfg = config_from_workspace(
+                workspace=workspace,
+                session_id="session-1",
+                env={},
+            )
+            capped_cfg = config_from_workspace(
+                workspace=workspace,
+                session_id="session-1",
+                env={"PSI_MEMORY_TIMEOUT_SECONDS": "999"},
+            )
+
+            self.assertEqual(default_cfg.timeout_seconds, 30.0)
+            self.assertEqual(capped_cfg.timeout_seconds, 120.0)
+
     def test_sync_history_once_posts_new_jsonl_turns_to_http_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -82,15 +82,20 @@ class EvidencePackBuilder:
         spans: list[dict] = []
         conflicts: list[dict] = []
         seen_spans: set[str] = set()
+        seen_fact_ids: set[str] = set()
         estimated_tokens = 0
         selected_scope = None
         for candidate in candidates:
             if candidate.type == "view":
                 current_views.append({"id": candidate.id, "text": candidate.text, "source_span_ids": candidate.source_span_ids})
+                self._append_support_facts(candidate, facts, seen_fact_ids)
             elif candidate.type == "profile":
                 profiles.append({"id": candidate.id, "text": candidate.text, "source_span_ids": candidate.source_span_ids})
+                self._append_support_facts(candidate, facts, seen_fact_ids)
             elif candidate.type == "fact":
-                facts.append({"id": candidate.id, "text": candidate.text, "source_span_ids": candidate.source_span_ids})
+                if candidate.id not in seen_fact_ids:
+                    facts.append({"id": candidate.id, "text": candidate.text, "source_span_ids": candidate.source_span_ids})
+                    seen_fact_ids.add(candidate.id)
             elif candidate.type == "event":
                 event_record = {
                     "id": candidate.id,
@@ -309,6 +314,22 @@ class EvidencePackBuilder:
             debug_trace=trace,
         )
 
+    def _append_support_facts(
+        self,
+        candidate: Candidate,
+        facts: list[dict],
+        seen_fact_ids: set[str],
+    ) -> None:
+        for fact_id in candidate.metadata.get("source_fact_ids", []) or []:
+            fact_id = str(fact_id)
+            if not fact_id or fact_id in seen_fact_ids:
+                continue
+            fact = self.store.get_fact(fact_id)
+            if not fact:
+                continue
+            facts.append({"id": fact.fact_id, "text": fact.text, "source_span_ids": fact.source_span_ids})
+            seen_fact_ids.add(fact.fact_id)
+
     def _span_record(
         self,
         query: str,
@@ -410,7 +431,7 @@ class EvidencePackBuilder:
         if event_ordering_anchor_ids:
             ordered = [
                 span
-                for span in self.store.list_spans(scope)
+                for span in self.store.list_spans(scope, include_session=bool(getattr(scope, "session_id", None)))
                 if span.span_type in {"turn", "tool_result", "document_chunk"}
                 and _span_group_key(span.source_uri, span.turn_id) in groups
             ]
@@ -458,7 +479,7 @@ class EvidencePackBuilder:
                     event_ordering_support_ids.add(span.span_id)
         scope_spans = [
             span
-            for span in self.store.list_spans(scope)
+            for span in self.store.list_spans(scope, include_session=bool(getattr(scope, "session_id", None)))
             if span.span_type in {"turn", "tool_result", "document_chunk"}
             and _span_group_key(span.source_uri, span.turn_id) in groups
             and (

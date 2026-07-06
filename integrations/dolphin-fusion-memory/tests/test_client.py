@@ -48,8 +48,13 @@ async def test_post_json_sends_payload_and_returns_json() -> None:
 
 
 def test_normalize_timeout_seconds_uses_default_for_non_positive_values() -> None:
-    assert _normalize_timeout_seconds(0) == 2.0
-    assert _normalize_timeout_seconds(-1) == 2.0
+    assert _normalize_timeout_seconds(0) == 30.0
+    assert _normalize_timeout_seconds(-1) == 30.0
+
+
+def test_normalize_timeout_seconds_allows_slow_local_qwen_requests() -> None:
+    assert _normalize_timeout_seconds(45.0) == 45.0
+    assert _normalize_timeout_seconds(999.0) == 120.0
 
 
 def test_format_context_pack_includes_search_candidates() -> None:

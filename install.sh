@@ -1,40 +1,76 @@
 #!/usr/bin/env sh
 set -eu
 
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="${PYTHON_BIN:-python}"
-else
-  echo "Python 3.11+ is required. Please install Python first." >&2
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LOG_DIR="$SCRIPT_DIR/.fusion-memory-logs"
+LOG_FILE="$LOG_DIR/install.log"
+UV_BIN="${FUSION_MEMORY_UV_BIN:-uv}"
+FUSION_MEMORY_PACKAGE="${FUSION_MEMORY_PACKAGE:-$SCRIPT_DIR}"
+
+mkdir -p "$LOG_DIR"
+: > "$LOG_FILE"
+
+if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+  echo "Fusion Memory installation needs uv." >&2
+  echo "Set FUSION_MEMORY_UV_BIN or install uv, then rerun install.sh." >&2
   exit 1
 fi
 
-"$PYTHON_BIN" - <<'PY'
-import sys
-if sys.version_info < (3, 11):
-    raise SystemExit("Python 3.11+ is required.")
-PY
+run_step() {
+  step_name="$1"
+  shift
+  echo "$step_name..."
+  {
+    echo
+    echo "=== $step_name ==="
+    printf '%s ' "$@"
+    echo
+    "$@"
+  } >>"$LOG_FILE" 2>&1 || {
+    echo "Fusion Memory installation needs attention." >&2
+    echo "Step: $step_name" >&2
+    echo "Log: $LOG_FILE" >&2
+    exit 1
+  }
+}
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-"$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install -e "$SCRIPT_DIR"
-if ! "$PYTHON_BIN" -m pip install -e "$SCRIPT_DIR[postgres,qwen]"; then
-  echo "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available." >&2
-fi
+run_step "fusion memory tool" "$UV_BIN" tool install --force \
+  --python "3.12" \
+  --managed-python \
+  --no-progress \
+  --with "modelscope-hub>=0.1.6" \
+  --with "psycopg2-binary>=2.9" \
+  --with "torch>=2.5" \
+  --with "transformers>=4.51" \
+  --with "sentence-transformers>=3.4" \
+  --with "safetensors" \
+  --with "tokenizers" \
+  --with "hf-xet" \
+  --with "click" \
+  --with "typer" \
+  --no-build-package "psycopg2-binary" \
+  --no-build-package "torch" \
+  --no-build-package "transformers" \
+  --no-build-package "sentence-transformers" \
+  --no-build-package "safetensors" \
+  --no-build-package "tokenizers" \
+  --no-build-package "hf-xet" \
+  "$FUSION_MEMORY_PACKAGE"
+
+TOOL_BIN_DIR=$("$UV_BIN" tool dir --bin)
+FUSION_MEMORY_CMD="$TOOL_BIN_DIR/fusion-memory"
+
+run_step "local qwen models" "$FUSION_MEMORY_CMD" download-models --json
 if [ "${FUSION_MEMORY_USE_WIZARD:-}" = "1" ]; then
-  "$PYTHON_BIN" -m fusion_memory.cli init --wizard
-elif [ "${FUSION_MEMORY_SKIP_WIZARD:-}" = "1" ]; then
-  "$PYTHON_BIN" -m fusion_memory.cli install-check --force
+  run_step "wizard" "$FUSION_MEMORY_CMD" init --wizard
 else
-  "$PYTHON_BIN" -m fusion_memory.cli install-check --force
+  run_step "install readiness" "$FUSION_MEMORY_CMD" install-check --force
 fi
-"$PYTHON_BIN" -m fusion_memory.cli doctor
+run_step "doctor" "$FUSION_MEMORY_CMD" doctor
 
 echo
 echo "Fusion Memory is installed."
-echo "Bundled model paths: $SCRIPT_DIR/models/Qwen3-Embedding-0.6B and $SCRIPT_DIR/models/Qwen3-Reranker-0.6B"
-echo "The installer tries to install full runtime dependencies including Postgres and local Qwen model support."
-echo "If the installer reported compromised mode, this machine could not run the bundled models; set DASHSCOPE_API_KEY for the recommended Aliyun API path."
+echo "Model paths: Fusion Memory home models directory, or FUSION_MEMORY_HOME/models when FUSION_MEMORY_HOME is set."
+echo "Log: $LOG_FILE"
 echo "Start it with: fusion-memory start"
 echo "Check it with: fusion-memory status"

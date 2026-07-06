@@ -57,6 +57,20 @@ class AlphaBetaHarnessTests(unittest.TestCase):
         self.assertNotIn("RuntimeError", serialized)
         self.assertNotIn("raw traceback", serialized)
 
+    def test_beta_dry_simulation_does_not_require_fusion_agent_checkout(self) -> None:
+        def fake_check(target: str):
+            if target == "fusion-agent":
+                return {"ok": False, "message": "Fusion-Agent checkout was not found."}
+            return {"ok": True, "message": f"{target} files are present."}
+
+        with patch("fusion_memory.alpha_beta.check_agent", side_effect=fake_check):
+            result = run_beta()
+
+        self.assertTrue(result["ok"])
+        checkout = next(item for item in result["checks"] if item["name"] == "fusion_agent_checkout")
+        self.assertTrue(checkout["ok"])
+        self.assertIn("optional", checkout["detail"])
+
     def test_beta_returns_safe_result_when_report_write_fails(self) -> None:
         with patch("fusion_memory.alpha_beta._write_report", side_effect=OSError("report internal failure")):
             result = run_beta(report_path=Path("/tmp/beta.json"))

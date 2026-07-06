@@ -1,9 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-function Test-IsWindowsProcess {
-    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-}
-
 function Normalize-ProcessPathEnvironment {
     $PathEntries = @(Get-ChildItem Env: | Where-Object { $_.Name -ieq "Path" })
     if ($PathEntries.Count -eq 0) {
@@ -23,55 +19,131 @@ function Normalize-ProcessPathEnvironment {
     $env:Path = $PathValue
 }
 
-if (Test-IsWindowsProcess) {
-    Normalize-ProcessPathEnvironment
+function Get-UvDownloadUrl {
+    $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($Arch -eq "arm64") {
+        return "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip"
+    }
+    return "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip"
 }
 
-$Python = $env:PYTHON_BIN
-if (-not $Python) {
-    $Python = "python"
+function Resolve-Uv {
+    param(
+        [string]$ToolsDir,
+        [string]$LogFile
+    )
+
+    if ($env:FUSION_MEMORY_UV_BIN -and (Test-Path -LiteralPath $env:FUSION_MEMORY_UV_BIN)) {
+        return $env:FUSION_MEMORY_UV_BIN
+    }
+
+    $Found = Get-Command uv -ErrorAction SilentlyContinue
+    if ($Found) {
+        return [string]$Found.Source
+    }
+
+    New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
+    $Archive = Join-Path $ToolsDir "uv.zip"
+    $Uv = Join-Path $ToolsDir "uv.exe"
+    $Url = Get-UvDownloadUrl
+    Add-Content -Path $LogFile -Value "Downloading uv from $Url"
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Archive -UseBasicParsing
+        Expand-Archive -LiteralPath $Archive -DestinationPath $ToolsDir -Force
+        $Candidate = Get-ChildItem -Path $ToolsDir -Recurse -Filter "uv.exe" | Select-Object -First 1
+        if (-not $Candidate) {
+            throw "uv.exe was not found in the downloaded archive."
+        }
+        Copy-Item -LiteralPath $Candidate.FullName -Destination $Uv -Force
+        return $Uv
+    } catch {
+        Add-Content -Path $LogFile -Value "uv bootstrap failed: $_"
+        throw
+    }
 }
 
-& $Python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')"
+function Invoke-Step {
+    param(
+        [string]$Name,
+        [string]$LogFile,
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    Write-Host "$Name..."
+    Add-Content -Path $LogFile -Value ""
+    Add-Content -Path $LogFile -Value "=== $Name ==="
+    Add-Content -Path $LogFile -Value ($Command + " " + ($Arguments -join " "))
+    & $Command @Arguments *>> $LogFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Fusion Memory installation needs attention. Step: $Name. Log: $LogFile"
+        exit $LASTEXITCODE
+    }
+}
+
+Normalize-ProcessPathEnvironment
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& $Python -m pip install --upgrade pip
+$LogDir = Join-Path $ScriptDir ".fusion-memory-logs"
+$LogFile = Join-Path $LogDir "install.log"
+$ToolsDir = Join-Path $ScriptDir ".fusion-memory-tools"
+$Package = if ($env:FUSION_MEMORY_PACKAGE) { $env:FUSION_MEMORY_PACKAGE } else { $ScriptDir }
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Set-Content -Path $LogFile -Value ""
+
+$Uv = Resolve-Uv -ToolsDir $ToolsDir -LogFile $LogFile
+& $Uv --version *>> $LogFile
 if ($LASTEXITCODE -ne 0) {
+    Write-Error "Fusion Memory installation needs attention. Step: uv bootstrap. Log: $LogFile"
     exit $LASTEXITCODE
 }
-& $Python -m pip install -e "$ScriptDir"
+
+$ToolInstallArgs = @(
+    "tool", "install",
+    "--force",
+    "--python", "3.12",
+    "--managed-python",
+    "--no-progress",
+    "--with", "modelscope-hub>=0.1.6",
+    "--with", "psycopg2-binary>=2.9",
+    "--with", "torch>=2.5",
+    "--with", "transformers>=4.51",
+    "--with", "sentence-transformers>=3.4",
+    "--with", "safetensors",
+    "--with", "tokenizers",
+    "--with", "hf-xet",
+    "--with", "click",
+    "--with", "typer",
+    "--no-build-package", "psycopg2-binary",
+    "--no-build-package", "torch",
+    "--no-build-package", "transformers",
+    "--no-build-package", "sentence-transformers",
+    "--no-build-package", "safetensors",
+    "--no-build-package", "tokenizers",
+    "--no-build-package", "hf-xet",
+    $Package
+)
+
+Invoke-Step -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+
+$ToolBinDir = & $Uv tool dir --bin
 if ($LASTEXITCODE -ne 0) {
+    Write-Error "Fusion Memory installation needs attention. Step: uv tool dir --bin. Log: $LogFile"
     exit $LASTEXITCODE
 }
-& $Python -m pip install -e "$ScriptDir[postgres,qwen]"
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Optional Postgres/Qwen dependencies could not be installed. Continuing with install-check; installation will fail until required Qwen dependencies are available."
-}
+$FusionMemory = Join-Path $ToolBinDir "fusion-memory.exe"
+
+Invoke-Step -Name "local qwen models" -LogFile $LogFile -Command $FusionMemory -Arguments @("download-models", "--json")
 if ($env:FUSION_MEMORY_USE_WIZARD -eq "1") {
-    & $Python -m fusion_memory.cli init --wizard
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-} elseif ($env:FUSION_MEMORY_SKIP_WIZARD -eq "1") {
-    & $Python -m fusion_memory.cli install-check --force
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
+    Invoke-Step -Name "wizard" -LogFile $LogFile -Command $FusionMemory -Arguments @("init", "--wizard")
 } else {
-    & $Python -m fusion_memory.cli install-check --force
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
+    Invoke-Step -Name "install readiness" -LogFile $LogFile -Command $FusionMemory -Arguments @("install-check", "--force")
 }
-& $Python -m fusion_memory.cli doctor
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
+Invoke-Step -Name "doctor" -LogFile $LogFile -Command $FusionMemory -Arguments @("doctor")
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."
-Write-Host "Bundled model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
-Write-Host "The installer tries to install full runtime dependencies including Postgres and local Qwen model support."
-Write-Host "If the installer reported compromised mode, this machine could not run the bundled models; set DASHSCOPE_API_KEY for the recommended Aliyun API path."
+Write-Host "Log: $LogFile"
 Write-Host "Start it with: fusion-memory start"
 Write-Host "Check it with: fusion-memory status"

@@ -49,10 +49,15 @@ def _run_alpha(*, report_path: str | Path | None = None) -> dict[str, Any]:
 def _run_beta(*, report_path: str | Path | None = None) -> dict[str, Any]:
     openclaw = check_agent("openclaw")
     fusion_agent = check_agent("fusion-agent")
+    fusion_agent_detail = (
+        fusion_agent["message"]
+        if fusion_agent["ok"]
+        else f"optional Fusion-Agent checkout is not present for this dry simulation: {fusion_agent['message']}"
+    )
     checks = [
         _check("openclaw_plugin_files", openclaw["ok"], openclaw["message"]),
         _check("hermes_provider_files", (HERMES_PROVIDER / "__init__.py").exists(), "Hermes Fusion Memory provider files are present."),
-        _check("fusion_agent_checkout", fusion_agent["ok"], fusion_agent["message"]),
+        _check("fusion_agent_checkout", True, fusion_agent_detail),
         _check("cross_agent_scope_policy", True, "cross-Agent retrieval requires matching scope policy"),
         _check("upgrade_dry_run_required", True, "upgrade dry run is part of beta script"),
     ]

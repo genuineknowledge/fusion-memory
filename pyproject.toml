@@ -25,42 +25,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["fusion_memory*"]
 
-[tool.setuptools.data-files]
-"models/Qwen3-Embedding-0.6B" = [
-  "models/Qwen3-Embedding-0.6B/.gitattributes",
-  "models/Qwen3-Embedding-0.6B/README.md",
-  "models/Qwen3-Embedding-0.6B/config.json",
-  "models/Qwen3-Embedding-0.6B/config_sentence_transformers.json",
-  "models/Qwen3-Embedding-0.6B/generation_config.json",
-  "models/Qwen3-Embedding-0.6B/merges.txt",
-  "models/Qwen3-Embedding-0.6B/model.safetensors",
-  "models/Qwen3-Embedding-0.6B/modules.json",
-  "models/Qwen3-Embedding-0.6B/tokenizer.json",
-  "models/Qwen3-Embedding-0.6B/tokenizer_config.json",
-  "models/Qwen3-Embedding-0.6B/vocab.json",
-]
-"models/Qwen3-Embedding-0.6B/1_Pooling" = [
-  "models/Qwen3-Embedding-0.6B/1_Pooling/config.json",
-]
-"models/Qwen3-Reranker-0.6B" = [
-  "models/Qwen3-Reranker-0.6B/.gitattributes",
-  "models/Qwen3-Reranker-0.6B/README.md",
-  "models/Qwen3-Reranker-0.6B/chat_template.jinja",
-  "models/Qwen3-Reranker-0.6B/config.json",
-  "models/Qwen3-Reranker-0.6B/config_sentence_transformers.json",
-  "models/Qwen3-Reranker-0.6B/generation_config.json",
-  "models/Qwen3-Reranker-0.6B/merges.txt",
-  "models/Qwen3-Reranker-0.6B/model.safetensors",
-  "models/Qwen3-Reranker-0.6B/modules.json",
-  "models/Qwen3-Reranker-0.6B/sentence_bert_config.json",
-  "models/Qwen3-Reranker-0.6B/tokenizer.json",
-  "models/Qwen3-Reranker-0.6B/tokenizer_config.json",
-  "models/Qwen3-Reranker-0.6B/vocab.json",
-]
-"models/Qwen3-Reranker-0.6B/1_LogitScore" = [
-  "models/Qwen3-Reranker-0.6B/1_LogitScore/config.json",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

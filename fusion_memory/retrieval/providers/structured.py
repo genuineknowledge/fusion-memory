@@ -163,7 +163,12 @@ class CurrentViewProvider(_StructuredProvider):
                     "score": keyword_score(context.query, view.text) + 0.85,
                 },
                 source_span_ids=view.source_span_ids,
-                metadata={"view_type": view.view_type, "confidence": view.confidence},
+                metadata={
+                    "view_type": view.view_type,
+                    "confidence": view.confidence,
+                    "source_fact_ids": list(getattr(view, "source_fact_ids", [])),
+                    "source_event_ids": list(getattr(view, "source_event_ids", [])),
+                },
             )
             for view in views
         ]
@@ -198,7 +203,11 @@ class EntityProfileProvider(_StructuredProvider):
                     "score": scores.get("score", 0.0) + 0.55,
                 },
                 source_span_ids=profile.source_span_ids,
-                metadata={"profile_type": profile.profile_type, "support_count": profile.support_count},
+                metadata={
+                    "profile_type": profile.profile_type,
+                    "support_count": profile.support_count,
+                    "source_fact_ids": list(getattr(profile, "source_fact_ids", [])),
+                },
             )
             for profile, scores in profile_results
         ]

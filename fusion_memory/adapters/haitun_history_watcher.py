@@ -15,6 +15,10 @@ from urllib import request
 
 from fusion_memory.core.text import stable_hash
 
+DEFAULT_TIMEOUT_SECONDS = 30.0
+MIN_TIMEOUT_SECONDS = 0.1
+MAX_TIMEOUT_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class WatcherConfig:
@@ -27,7 +31,7 @@ class WatcherConfig:
     agent_id: str
     session_id: str
     db_path: Path | str
-    timeout_seconds: float = 2.0
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     app_id: str = "haitun"
 
 
@@ -40,7 +44,7 @@ def config_from_workspace(
     env: Mapping[str, str] | None = None,
 ) -> WatcherConfig:
     env_map = os.environ if env is None else env
-    timeout = _float(env_map.get("PSI_MEMORY_TIMEOUT_SECONDS"), 2.0)
+    timeout = _float(env_map.get("PSI_MEMORY_TIMEOUT_SECONDS"), DEFAULT_TIMEOUT_SECONDS)
     return WatcherConfig(
         workspace=workspace,
         history_path=workspace / "histories" / f"{session_id}.jsonl",
@@ -51,7 +55,7 @@ def config_from_workspace(
         agent_id=env_map.get("PSI_MEMORY_AGENT_ID") or "haitun",
         session_id=session_id,
         db_path=db_path,
-        timeout_seconds=max(0.1, min(5.0, timeout)),
+        timeout_seconds=_clamp_timeout(timeout),
     )
 
 
@@ -484,3 +488,9 @@ def _float(value: str | None, default: float) -> float:
         return float(value) if value else default
     except (TypeError, ValueError):
         return default
+
+
+def _clamp_timeout(value: float) -> float:
+    if value <= 0:
+        return DEFAULT_TIMEOUT_SECONDS
+    return max(MIN_TIMEOUT_SECONDS, min(MAX_TIMEOUT_SECONDS, value))
