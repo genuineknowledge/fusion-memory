@@ -19,11 +19,10 @@ cd C:\path\to\memory
 .\install.ps1
 ```
 
-安装完成后会自动运行 `fusion-memory install-check`。仓库自带两个本地向量模型：
-`models/Qwen3-Embedding-0.6B` 和 `models/Qwen3-Reranker-0.6B`，安装流程不会从其他
-地方下载模型。安装脚本会先安装基础包，再尝试安装完整运行依赖
-`.[postgres,qwen]`，包括 Postgres adapter、本地 Qwen adapter 以及
-PyTorch/Transformers 相关依赖。
+安装完成后会自动运行 `fusion-memory install-check`。安装脚本会先安装基础包，
+通过 ModelScope 下载两个本地向量模型到 `models/Qwen3-Embedding-0.6B` 和
+`models/Qwen3-Reranker-0.6B`，再安装完整 Qwen 运行依赖，包括 Postgres adapter、
+本地 Qwen adapter 以及 PyTorch/Transformers 相关依赖。
 
 条件满足时会配置：
 
@@ -34,15 +33,13 @@ PyTorch/Transformers 相关依赖。
 - Query router：默认关闭；需要复杂查询路由时再开启 API。
 - Postgres/pgvector：可选生产配置，适合大量数据、多用户或需要 pgvector 索引的部署。
 
-如果模型文件缺失，安装检查会返回 not ready，并提示重新运行
-`pip install -e ".[postgres,qwen]"`。如果模型目录中只有 Git LFS pointer 文件，
-先安装 Git LFS 并在仓库中运行 `git lfs pull` 拉取真实权重，再重新运行
-`fusion-memory install-check --force`。当模型文件齐全，但 Python/Qwen ML runtime
-不可导入，或当前硬件无法
+如果模型下载失败、文件仍是 Git LFS pointer、或 Qwen runtime 依赖不可用，安装检查会
+返回 not ready，并给出失败步骤和日志路径；不会要求安装 Git LFS，也不会静默降级到
+`local_test`。当模型文件齐全，但 Python/Qwen ML runtime 不可导入，或当前硬件无法
 加载/运行两个本地 Qwen 模型时，安装会 fallback 到 `compromised` 本地模式：
 SQLite + 内置轻量 embedding/reranker 可以继续试用，但当前 memory 功能是
-compromised 的。安装完成后需要提供 API key 才能接入更完整的模型能力；
-推荐阿里云 DashScope，设置：
+compromised 的。安装完成后需要提供 API key 才能接入更完整的模型能力；推荐阿里云
+DashScope，设置：
 
 ```bash
 export DASHSCOPE_API_KEY=<your-api-key>
@@ -76,7 +73,7 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
 
-The default first run uses SQLite plus bundled local Qwen models.
+The default first run uses SQLite plus local Qwen models downloaded by the installer.
 
 Local test mode uses SQLite and built-in lightweight models. Use it only as a
 temporary fallback when Qwen model dependencies or hardware are not ready:

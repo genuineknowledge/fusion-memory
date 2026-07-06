@@ -41,19 +41,32 @@ function Test-CompatiblePython {
     return $LASTEXITCODE -eq 0
 }
 
+function Test-SafePythonCommand {
+    param([string]$PythonCommand)
+    $Command = Get-Command $PythonCommand -ErrorAction SilentlyContinue
+    if (-not $Command) {
+        return $false
+    }
+    $Source = [string]$Command.Source
+    if ($Source -match "\\WindowsApps\\python(\d+)?\.exe$") {
+        return $false
+    }
+    return $true
+}
+
 function Select-CompatiblePython {
     if ($env:PYTHON_BIN) {
         if (Test-CompatiblePython $env:PYTHON_BIN @()) {
             return @{ Command = $env:PYTHON_BIN; Args = @(); Display = $env:PYTHON_BIN }
         }
-        Write-Warning "Ignoring incompatible PYTHON_BIN; looking for CPython 3.11/3.12."
+        Write-Warning "PYTHON_BIN is not a full Memory runtime; it will be used only to bootstrap the installer."
+        return @{ Command = $env:PYTHON_BIN; Args = @(); Display = "$env:PYTHON_BIN (bootstrap)" }
     }
 
     if (Test-IsWindowsProcess) {
         $Candidates = @(
             @{ Command = "py"; Args = @("-3.12"); Display = "py -3.12" },
-            @{ Command = "py"; Args = @("-3.11"); Display = "py -3.11" },
-            @{ Command = "python"; Args = @(); Display = "python" }
+            @{ Command = "py"; Args = @("-3.11"); Display = "py -3.11" }
         )
         foreach ($Candidate in $Candidates) {
             if (-not (Get-Command $Candidate.Command -ErrorAction SilentlyContinue)) {
@@ -63,24 +76,25 @@ function Select-CompatiblePython {
                 return $Candidate
             }
         }
-        return @{ Command = "python"; Args = @(); Display = "python" }
+        if (Test-SafePythonCommand "python") {
+            return @{ Command = "python"; Args = @(); Display = "python (bootstrap)" }
+        }
+        Write-Error "A Python 3.11+ bootstrap interpreter is required. The Windows Store python alias was ignored to avoid interactive popups."
+        exit 1
     }
 
     return @{ Command = "python"; Args = @(); Display = "python" }
 }
 
-function Assert-CompatiblePython {
+function Assert-BootstrapPython {
     param(
         [string]$PythonCommand,
         [string[]]$PythonArgs = @()
     )
     Invoke-SelectedPython $PythonCommand $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")
     if ($LASTEXITCODE -ne 0) {
+        Write-Error "Python 3.11+ is required to bootstrap Fusion Memory."
         exit $LASTEXITCODE
-    }
-    if (-not (Test-CompatiblePython $PythonCommand $PythonArgs)) {
-        Write-Error "Current Python is not compatible with Fusion Memory local Qwen on Windows. Install official CPython or conda Python 3.11/3.12, then rerun .\install.ps1 or set `$env:PYTHON_BIN to that python.exe."
-        exit 1
     }
 }
 
@@ -92,7 +106,7 @@ $PythonSelection = Select-CompatiblePython
 $Python = $PythonSelection.Command
 $PythonArgs = $PythonSelection.Args
 Write-Host "Using Python: $($PythonSelection.Display)"
-Assert-CompatiblePython $Python $PythonArgs
+Assert-BootstrapPython $Python $PythonArgs
 
 Invoke-SelectedPython $Python $PythonArgs @("-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 'Python 3.11+ is required.')")
 if ($LASTEXITCODE -ne 0) {
@@ -141,6 +155,7 @@ try {
 
 Write-Host ""
 Write-Host "Fusion Memory is installed."
-Write-Host "Bundled model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
+Write-Host "Model paths: $ScriptDir\models\Qwen3-Embedding-0.6B and $ScriptDir\models\Qwen3-Reranker-0.6B"
+Write-Host "Log: $LogDir\install.log"
 Write-Host "Start it with: $VenvDir\Scripts\fusion-memory.exe start"
 Write-Host "Check it with: $VenvDir\Scripts\fusion-memory.exe status"

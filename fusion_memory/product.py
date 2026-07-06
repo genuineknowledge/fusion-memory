@@ -96,13 +96,15 @@ def install_readiness(
 ) -> dict[str, Any]:
     """Initialize the product after install using bundled models when possible.
 
-    The installer must never download model weights. Production mode is selected
-    only when the repository-local embedding/reranker directories are present,
+    Production mode is selected only when the repository-local
+    embedding/reranker directories are present,
     optional ML dependencies are installed by the installer, and the current
-    machine can load/run the two local vector models. The local default uses
-    SQLite plus Qwen. Missing files and missing Qwen runtime dependencies are
-    reported as installation errors; compromised local mode is reserved for
-    complete files and dependencies that fail model runtime/hardware smoke.
+    machine can load/run the two local vector models. The install scripts
+    download the model directories from ModelScope before running this check.
+    The local default uses SQLite plus Qwen. Missing files and missing Qwen
+    runtime dependencies are reported as installation errors; compromised local
+    mode is reserved for complete files and dependencies that fail model
+    runtime/hardware smoke.
     """
 
     embedding_status = _repository_model_status(
@@ -125,11 +127,6 @@ def install_readiness(
         missing.append("full Qwen runtime Python dependencies")
     if missing:
         model_messages = " ".join(missing)
-        lfs_next_step = (
-            " Install Git LFS if needed, run git lfs pull in the Fusion Memory checkout, then rerun fusion-memory install-check --force."
-            if "Git LFS pointer" in model_messages
-            else ""
-        )
         return {
             "ok": False,
             "mode": "not_ready",
@@ -142,14 +139,14 @@ def install_readiness(
             "message": (
                 "Fusion Memory install is not ready because "
                 + ", ".join(missing)
-                + " are missing. Install the full runtime dependencies with "
-                'pip install -e ".[postgres,qwen]" and ensure the bundled model files are present.'
-                + lfs_next_step
+                + " are missing. Rerun the Fusion Memory installer so it can "
+                "download the Qwen model weights from ModelScope and install "
+                "the full runtime dependencies."
             ),
             "next_step": (
-                "Install Git LFS and run git lfs pull, then rerun fusion-memory install-check --force."
+                "Rerun the Fusion Memory installer to download the Qwen model weights from ModelScope, then rerun fusion-memory install-check --force."
                 if "Git LFS pointer" in model_messages
-                else 'Run pip install -e ".[postgres,qwen]", then rerun fusion-memory install-check --force.'
+                else "Rerun the Fusion Memory installer, then rerun fusion-memory install-check --force."
             ),
         }
 
@@ -167,10 +164,10 @@ def install_readiness(
             "hardware_probe": hardware_probe,
             "message": (
                 "Fusion Memory install is not ready because the full Qwen runtime "
-                "dependencies are not importable. Install the qwen extra successfully "
+                "dependencies are not importable. Rerun the Fusion Memory installer "
                 "before reporting installation success."
             ),
-            "next_step": 'Run pip install -e ".[postgres,qwen]", then rerun fusion-memory install-check --force.',
+            "next_step": "Rerun the Fusion Memory installer, then rerun fusion-memory install-check --force.",
         }
 
     smoke = _qwen_runtime_smoke()
@@ -1246,7 +1243,7 @@ def _qwen_model_readiness_check(
     return _check(
         name,
         False,
-        "Qwen model must be a repository-local path under models/; this installer does not download model weights.",
+        "Qwen model must be a local path under models/. Rerun the installer to download model weights from ModelScope.",
     )
 
 

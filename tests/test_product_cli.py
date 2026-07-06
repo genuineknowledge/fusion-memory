@@ -154,7 +154,7 @@ class ProductCliTests(unittest.TestCase):
                     "ok": False,
                     "mode": "not_ready",
                     "message": "model.safetensors is a Git LFS pointer",
-                    "next_step": "Run git lfs pull.",
+                    "next_step": "Rerun the Fusion Memory installer.",
                 },
             ):
                 code = main()
@@ -479,8 +479,8 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(result["mode"], "not_ready")
         self.assertFalse(result["compromised"])
         self.assertFalse((home / "config.json").exists())
-        self.assertIn("Install the full runtime dependencies", result["message"])
-        self.assertIn(".[postgres,qwen]", result["message"])
+        self.assertIn("download the Qwen model weights from ModelScope", result["message"])
+        self.assertNotIn("git lfs", result["message"].lower())
 
     def test_install_readiness_reports_not_ready_when_qwen_dependencies_are_unavailable(
         self,
@@ -512,7 +512,8 @@ class ProductCliTests(unittest.TestCase):
         self.assertFalse(result["compromised"])
         self.assertFalse((home / "config.json").exists())
         self.assertIn("Qwen runtime dependencies", result["message"])
-        self.assertIn(".[postgres,qwen]", result["next_step"])
+        self.assertIn("Rerun the Fusion Memory installer", result["next_step"])
+        self.assertNotIn("git lfs", result["next_step"].lower())
 
     def test_install_readiness_uses_local_full_when_qwen_is_ready_without_postgres(
         self,
@@ -597,7 +598,8 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(result["mode"], "not_ready")
         self.assertFalse(result["compromised"])
         self.assertIn("Git LFS pointer", result["message"])
-        self.assertIn("git lfs pull", result["next_step"])
+        self.assertIn("download the Qwen model weights", result["next_step"])
+        self.assertNotIn("git lfs", result["next_step"].lower())
 
     def test_install_readiness_rejects_tiny_stub_model_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1150,20 +1152,35 @@ class ProductCliTests(unittest.TestCase):
 
         install_sh = (root / "install.sh").read_text(encoding="utf-8")
         install_ps1 = (root / "install.ps1").read_text(encoding="utf-8")
+        windows_installer = (root / "fusion_memory" / "windows_installer.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('-e "$SCRIPT_DIR"', install_sh)
-        self.assertIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
-        self.assertIn("Optional Postgres/Qwen dependencies", install_sh)
+        self.assertNotIn('-e "$SCRIPT_DIR[postgres,qwen]"', install_sh)
+        self.assertNotIn("Optional Postgres/Qwen dependencies", install_sh)
+        self.assertIn("modelscope-hub", install_sh)
+        self.assertIn("--download-models-only", install_sh)
+        self.assertLess(
+            install_sh.index("--download-models-only"),
+            install_sh.index("install-check --force"),
+        )
+        self.assertNotIn("git lfs", install_sh.lower())
         self.assertIn("fusion_memory.windows_installer", install_ps1)
         self.assertIn(".fusion-memory-venv", install_ps1)
-        self.assertIn("--only-binary=:all:", install_ps1)
+        self.assertIn("--only-binary=:all:", windows_installer)
+        self.assertIn("modelscope-hub", windows_installer)
+        self.assertIn("--download-models-only", windows_installer)
+        self.assertNotIn("git lfs", install_ps1.lower())
         self.assertNotIn('"pip", "install", "-e", "$ScriptDir[postgres,qwen]"', install_ps1)
         self.assertNotIn("Optional Postgres/Qwen dependencies", install_ps1)
         self.assertIn("Normalize-ProcessPathEnvironment", install_ps1)
         self.assertIn("Select-CompatiblePython", install_ps1)
-        self.assertIn("Assert-CompatiblePython", install_ps1)
-        self.assertIn("Current Python is not compatible", install_ps1)
-        self.assertIn("Ignoring incompatible PYTHON_BIN", install_ps1)
+        self.assertIn("Assert-BootstrapPython", install_ps1)
+        self.assertIn("Test-SafePythonCommand", install_ps1)
+        self.assertNotIn("Current Python is not compatible", install_ps1)
+        self.assertNotIn("Ignoring incompatible PYTHON_BIN", install_ps1)
+        self.assertIn("bootstrap", install_ps1)
         self.assertLess(
             install_ps1.index("Test-CompatiblePython $env:PYTHON_BIN"),
             install_ps1.index("return @{ Command = $env:PYTHON_BIN"),
@@ -1175,7 +1192,7 @@ class ProductCliTests(unittest.TestCase):
             install_ps1.index("fusion_memory.windows_installer"),
         )
         self.assertLess(
-            install_ps1.index("Assert-CompatiblePython"),
+            install_ps1.index("Assert-BootstrapPython"),
             install_ps1.index("fusion_memory.windows_installer"),
         )
         self.assertNotIn("Start-Process", install_ps1)
