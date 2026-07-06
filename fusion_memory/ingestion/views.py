@@ -28,7 +28,17 @@ class ViewBuilder:
             latest = sorted(category_facts, key=lambda f: f.created_at)[-1]
             views.append(
                 CurrentView(
-                    view_id=deterministic_id("view", scope.workspace_id, scope.user_id, scope.agent_id, view_type, latest.subject),
+                    view_id=deterministic_id(
+                        "view",
+                        scope.workspace_id,
+                        scope.user_id,
+                        scope.agent_id,
+                        scope.run_id,
+                        scope.session_id,
+                        scope.app_id,
+                        view_type,
+                        latest.subject,
+                    ),
                     scope=scope,
                     view_type=view_type,
                     subject=latest.subject,
@@ -65,7 +75,17 @@ class ViewBuilder:
             source_span_ids.extend(fact.source_span_ids)
         return [
             EntityProfile(
-                profile_id=deterministic_id("profile", scope.workspace_id, scope.user_id, "user", "communication_style"),
+                profile_id=deterministic_id(
+                    "profile",
+                    scope.workspace_id,
+                    scope.user_id,
+                    scope.agent_id,
+                    scope.run_id,
+                    scope.session_id,
+                    scope.app_id,
+                    "user",
+                    "communication_style",
+                ),
                 scope=scope,
                 entity_id=scope.user_id or "user",
                 entity_type="user",
@@ -80,4 +100,3 @@ class ViewBuilder:
                 last_observed_at=max((fact.created_at for fact in profile_facts), default=None),
             )
         ]
-

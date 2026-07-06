@@ -144,8 +144,29 @@ class RuleBasedExtractor:
                     },
                 )
             )
+        explicit_pref = _explicit_preference_subject_object(text)
+        if explicit_pref:
+            subject, obj = explicit_pref
+            out.append(
+                self._candidate(
+                    "fact",
+                    f"{subject} prefers {obj}.",
+                    span,
+                    {
+                        "subject": subject,
+                        "predicate": "prefers",
+                        "object": obj,
+                        "category": "preference",
+                        "polarity": _fact_polarity(text),
+                        "value_mentions": _value_mentions(text),
+                        "topic_terms": _topic_terms(text),
+                        "confidence": 0.82,
+                        "salience": 0.78,
+                    },
+                )
+            )
         pref = PREFERENCE_RE.search(text)
-        if pref:
+        if pref and not explicit_pref:
             obj = pref.group(1).strip()
             out.append(
                 self._candidate(
@@ -166,7 +187,7 @@ class RuleBasedExtractor:
                 )
             )
         zh_pref = ZH_PREFERENCE_RE.search(text)
-        if zh_pref and not zh_switch:
+        if zh_pref and not zh_switch and not explicit_pref:
             obj = _clean_zh_object(zh_pref.group(1))
             out.append(
                 self._candidate(
@@ -361,6 +382,50 @@ class RuleBasedExtractor:
             source_span_ids=[span.span_id],
             extractor_name="rule_based_extractor",
         )
+
+
+def _explicit_preference_subject_object(text: str) -> tuple[str, str] | None:
+    patterns = [
+        re.compile(
+            r"\b(?P<subject>I|we)\s+"
+            r"(?:now\s+)?(?:prefer|like|want|use|drink|eat|watch|read|listen\s+to)\s+"
+            r"(?P<object>.+?)(?:[.!?。！？]|$)",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?P<subject>[A-Z][A-Za-z0-9_. -]{1,80})\s+"
+            r"(?:prefers|likes|wants|uses|drinks|eats|watches|reads|listens\s+to)\s+"
+            r"(?P<object>.+?)(?:[.!?。！？]|$)"
+        ),
+        re.compile(
+            r"(?P<subject>我|我们|用户|[A-Za-z][A-Za-z0-9_. -]{0,80}|[\u4e00-\u9fff]{1,20})?\s*"
+            r"(?:现在|目前|以后|默认)?(?:更?喜欢|偏好|倾向于|想用|要用|希望用|打算用|准备用|采用|使用|爱吃|爱喝|常吃|常喝)\s*"
+            r"(?P<object>.+?)(?:[。！？.!?]|$)"
+        ),
+    ]
+    for pattern in patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        subject = _normalize_preference_subject(match.group("subject"))
+        obj = _clean_preference_object(match.group("object"))
+        if subject and obj:
+            return subject, obj
+    return None
+
+
+def _normalize_preference_subject(value: str | None) -> str:
+    subject = (value or "").strip()
+    if not subject or subject.lower() in {"i", "we", "user", "用户"} or subject in {"我", "我们"}:
+        return "user"
+    return subject
+
+
+def _clean_preference_object(value: str) -> str:
+    obj = _clean_zh_object(value)
+    obj = re.sub(r"^(?:to\s+)?(?:use|drink|eat|watch|read|listen\s+to)\s+", "", obj, flags=re.I)
+    obj = re.sub(r"^(?:用|使用|喝|吃|看|读|听)\s*", "", obj)
+    return obj.strip()
 
 
 def _event_type(text: str) -> str:

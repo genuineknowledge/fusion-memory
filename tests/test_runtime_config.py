@@ -8,14 +8,14 @@ from fusion_memory.core.runtime_config import build_runtime_retrieval_flags, mem
 
 
 class RuntimeRetrievalFlagTests(unittest.TestCase):
-    def test_dual_event_ordering_shadow_defaults_off_and_legacy_selector(self) -> None:
+    def test_event_ordering_flags_keep_only_legacy_selector(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             flags = build_runtime_retrieval_flags()
 
-        self.assertFalse(flags.dual_event_ordering_shadow)
+        self.assertFalse(hasattr(flags, "dual_event_ordering_shadow"))
         self.assertEqual(flags.production_selector, "legacy")
 
-    def test_dual_event_ordering_shadow_can_be_enabled_without_changing_selector(self) -> None:
+    def test_dual_event_ordering_shadow_env_is_ignored(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -26,7 +26,7 @@ class RuntimeRetrievalFlagTests(unittest.TestCase):
         ):
             flags = build_runtime_retrieval_flags()
 
-        self.assertTrue(flags.dual_event_ordering_shadow)
+        self.assertFalse(hasattr(flags, "dual_event_ordering_shadow"))
         self.assertEqual(flags.production_selector, "legacy")
 
     def test_event_ordering_selector_rejects_unapproved_values(self) -> None:

@@ -137,7 +137,11 @@ class QueryPlanner:
         query_type = "factual_exact"
         needs_current = False
         must_include = ["raw_evidence"]
-        if any(w in lower for w in ["current", "currently", "now", "现在", "当前", "以后按"]) or intent.needs_current_state:
+        if _is_preference_query(lower):
+            query_type = "preference"
+            needs_current = _preference_query_needs_current(lower)
+            must_include = ["current_view", "raw_evidence"] if needs_current else ["raw_evidence", "facts"]
+        elif any(w in lower for w in ["current", "currently", "now", "现在", "当前", "以后按"]) or intent.needs_current_state:
             if any(w in lower for w in ["prefer", "preference", "喜欢", "偏好", "用什么"]):
                 query_type = "preference"
                 must_include = ["current_view", "raw_evidence"]
@@ -265,6 +269,38 @@ def _apply_query_type_hint(
         "abstention": ("abstention", ["raw_evidence"]),
     }
     return hint_map.get(hint, (query_type, must_include))
+
+
+def _is_preference_query(lower: str) -> bool:
+    if re.search(r"\b(?:how many|how much|count|total|number of)\b", lower):
+        return False
+    if re.search(r"\b(?:prefer|preference|preferences|like|likes)\b", lower):
+        return True
+    if re.search(
+        r"\bwhat\s+(?:do|does|did|should|would)\s+[^?。！？]{0,80}\b(?:prefer|like|use|eat|drink|watch|read|listen)\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\b(?:what|which)\s+(?:drink|food|tool|model|database|framework|library|language|format|style|option|book|movie|music)\b",
+        lower,
+    ):
+        return True
+    if re.search(r"(?:喜欢|偏好|倾向|想要|想用|要用|爱吃|爱喝|常吃|常喝)", lower):
+        return True
+    if re.search(r"(?:喝|吃|用|看|读|听|选择|选|采用|使用)\s*什么", lower):
+        return True
+    if re.search(r"什么(?:饮料|食物|工具|模型|数据库|框架|语言|格式|风格|选项|书|电影|音乐)", lower):
+        return True
+    return False
+
+
+def _preference_query_needs_current(lower: str) -> bool:
+    if re.search(r"\b(?:mention|mentioned|history|historical|over time|across|throughout|list|all)\b", lower):
+        return False
+    if re.search(r"(?:提到|说过|历史|变化|所有|全部|列出|总结)", lower):
+        return False
+    return True
 
 
 def _is_event_ordering_query(lower: str) -> bool:

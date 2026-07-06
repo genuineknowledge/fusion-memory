@@ -15,7 +15,6 @@ from fusion_memory.retrieval.reranker import HTTPReranker, Qwen3Reranker
 
 @dataclass(frozen=True)
 class RuntimeRetrievalFlags:
-    dual_event_ordering_shadow: bool = False
     production_selector: str = "legacy"
 
 
@@ -51,7 +50,6 @@ def build_runtime_retrieval_flags() -> RuntimeRetrievalFlags:
     if selector != "legacy":
         raise ValueError(f"unsupported event ordering selector: {selector}")
     return RuntimeRetrievalFlags(
-        dual_event_ordering_shadow=_bool_env("FUSION_MEMORY_DUAL_EVENT_ORDERING_SHADOW", False),
         production_selector=selector,
     )
 

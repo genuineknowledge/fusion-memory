@@ -177,6 +177,14 @@ def main() -> None:
 
 def _scope(payload: dict[str, Any]) -> Scope:
     raw = payload.get("scope")
+    if raw is None:
+        raw = {
+            key: payload.get(key)
+            for key in ("workspace_id", "user_id", "agent_id", "run_id", "session_id", "app_id")
+            if payload.get(key) is not None
+        }
+        if not raw:
+            raise ValueError("scope is required")
     if not isinstance(raw, dict):
         raise ValueError("scope is required")
     return Scope(

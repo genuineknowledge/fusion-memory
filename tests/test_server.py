@@ -208,6 +208,43 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
 
+    def test_server_accepts_flat_scope_fields_for_client_compatibility(self) -> None:
+        ready = threading.Event()
+        holder = {}
+
+        def run_server() -> None:
+            service = MemoryService()
+            server = serve(service, host="127.0.0.1", port=0)
+            holder["server"] = server
+            ready.set()
+            try:
+                server.serve_forever()
+            finally:
+                server.server_close()
+                service.close()
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=5))
+        server = holder["server"]
+        try:
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            add = _post_or_get(
+                f"{base_url}/add",
+                {
+                    "input": {"role": "user", "content": "I prefer SQLite for local smoke."},
+                    "workspace_id": "w",
+                    "user_id": "u",
+                    "agent_id": "a",
+                    "session_id": "s",
+                },
+            )
+
+            self.assertTrue(add["span_ids"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
     def test_server_processes_refresh_session_summary_background_tasks(self) -> None:
         ready = threading.Event()
         holder = {}

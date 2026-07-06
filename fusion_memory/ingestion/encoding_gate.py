@@ -42,12 +42,8 @@ class EncodingGate:
             reasons.append("low_value_speech_act")
             return self._decision(candidate, "reject", reasons, scores)
         if candidate.candidate_type == "fact":
-            category = candidate.structured.get("category")
             if candidate.structured.get("predicate") == "rejects_memory":
                 reasons.append("explicit_negative_memory_instruction")
-                return self._decision(candidate, "reject", reasons, scores)
-            if category == "preference" and str(candidate.structured.get("subject")) != "user":
-                reasons.append("speaker_attribution")
                 return self._decision(candidate, "reject", reasons, scores)
             if "don't remember that as my preference" in text_lower:
                 reasons.append("explicit_negative_memory_instruction")
