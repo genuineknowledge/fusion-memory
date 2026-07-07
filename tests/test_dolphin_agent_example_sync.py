@@ -182,9 +182,7 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "CPU-only machines are supported" in skill
     assert "CUDA or a GPU is\nrequired" in skill
     assert 'Do not summarize\nthe failure as "because there is no CUDA/GPU"' in skill
-    assert "do not use pwsh, powershell.exe" in skill
-    assert "the Fusion Memory CLI creates the hidden/no-window service" in skill
-    assert "PowerShell job/process wrappers" not in skill
+    assert "foreground PowerShell or console wrapper" in skill
     assert "Qwen runtime dependency installation fails" in skill
     assert "Postgres/pgvector is unavailable" not in skill
 

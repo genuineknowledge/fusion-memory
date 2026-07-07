@@ -1385,8 +1385,8 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("fusion memory tool install fallback", install_ps1)
         self.assertIn("--managed-python", install_ps1)
         self.assertLess(
-            install_ps1.index('New-ToolInstallArgs -Python "3.12" -ManagedPython $true'),
             install_ps1.index("$CompatiblePython = Resolve-CompatiblePython"),
+            install_ps1.index('New-ToolInstallArgs -Python "3.12" -ManagedPython $true'),
         )
         self.assertLess(
             install_ps1.index("Normalize-ProcessPathEnvironment"),
