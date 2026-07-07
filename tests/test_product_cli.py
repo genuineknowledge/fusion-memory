@@ -197,6 +197,39 @@ class ProductCliTests(unittest.TestCase):
         self.assertEqual(calls[0]["models_dir"], Path(tmp) / "models")
         self.assertEqual(calls[0]["log_dir"], Path(tmp) / "logs")
 
+    def test_search_cli_accepts_query_option_for_agent_diagnostics(self) -> None:
+        from fusion_memory.cli import main
+        import sys
+
+        class FakeService:
+            def __init__(self) -> None:
+                self.queries: list[str] = []
+
+            def search(self, query, scope, options):
+                self.queries.append(query)
+                return {"candidates": [{"text": "remembered"}]}
+
+            def close(self) -> None:
+                pass
+
+        old_argv = sys.argv
+        stdout = StringIO()
+        service = FakeService()
+        try:
+            sys.argv = ["fusion-memory", "search", "--query", "what do I remember?"]
+            with (
+                redirect_stdout(stdout),
+                patch("fusion_memory.cli.memory_service_from_env", return_value=service),
+            ):
+                code = main()
+        finally:
+            sys.argv = old_argv
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(service.queries, ["what do I remember?"])
+        self.assertEqual(payload["candidates"][0]["text"], "remembered")
+
     def test_sync_haitun_history_cli_json_runs_once(self) -> None:
         from fusion_memory.cli import main
         import sys
@@ -713,6 +746,71 @@ class ProductCliTests(unittest.TestCase):
         self.assertIn("DASHSCOPE_API_KEY", result["message"])
         self.assertIn("Aliyun", result["message"])
         self.assertIn("compromised", render_human(result))
+
+    def test_install_readiness_cpu_only_probe_does_not_describe_cuda_as_required(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            embedding = home / "models" / "Qwen3-Embedding-0.6B"
+            reranker = home / "models" / "Qwen3-Reranker-0.6B"
+            _write_ready_model_dir(embedding)
+            _write_ready_model_dir(reranker)
+            probe = {
+                "platform": {"system": "Windows"},
+                "torch": {
+                    "available": True,
+                    "cuda_available": False,
+                    "cuda_device_count": 0,
+                    "mps_available": False,
+                },
+            }
+            with (
+                patch(
+                    "fusion_memory.product.default_local_embedding_model_path",
+                    return_value=embedding,
+                ),
+                patch(
+                    "fusion_memory.product.default_local_reranker_model_path",
+                    return_value=reranker,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_dependency_available",
+                    return_value=True,
+                ),
+                patch(
+                    "fusion_memory.product._qwen_runtime_smoke",
+                    return_value={
+                        "ok": False,
+                        "message": "Model process timed out while loading on CPU.",
+                    },
+                ),
+                patch(
+                    "fusion_memory.product._hardware_runtime_probe",
+                    return_value=probe,
+                ),
+            ):
+                result = install_readiness(home, force=True)
+
+        self.assertTrue(result["compromised"])
+        self.assertIn("CPU", result["message"])
+        self.assertIn("CPU-only systems are supported", result["message"])
+        self.assertNotIn("CUDA", result["message"])
+        self.assertNotIn("GPU", result["message"])
+
+    def test_qwen_runtime_shape_smoke_error_is_sanitized_for_humans(self) -> None:
+        from fusion_memory.product import _friendly_runtime_smoke_message
+
+        message = _friendly_runtime_smoke_message(
+            RuntimeError(
+                "cannot reshape tensor of 0 elements into shape [1, 0, -1, 128]"
+            )
+        )
+
+        self.assertIn("Qwen runtime smoke", message)
+        self.assertNotIn("reshape tensor", message)
+        self.assertNotIn("CUDA", message)
+        self.assertNotIn("GPU", message)
 
     def test_install_readiness_compromised_result_includes_hardware_probe(
         self,
@@ -1282,6 +1380,14 @@ class ProductCliTests(unittest.TestCase):
         self.assertNotIn("Current Python is not compatible", install_ps1)
         self.assertNotIn("Ignoring incompatible PYTHON_BIN", install_ps1)
         self.assertIn("bootstrap", install_ps1)
+        self.assertIn("Resolve-CompatiblePython", install_ps1)
+        self.assertIn("Test-CompatiblePython", install_ps1)
+        self.assertIn("fusion memory tool install fallback", install_ps1)
+        self.assertIn("--managed-python", install_ps1)
+        self.assertLess(
+            install_ps1.index("$CompatiblePython = Resolve-CompatiblePython"),
+            install_ps1.index('New-ToolInstallArgs -Python "3.12" -ManagedPython $true'),
+        )
         self.assertLess(
             install_ps1.index("Normalize-ProcessPathEnvironment"),
             install_ps1.index("tool install"),

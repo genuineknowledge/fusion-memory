@@ -80,6 +80,7 @@ def build_uv_tool_install_command(
     *,
     uv_bin: str | Path = "uv",
     python: str = "3.12",
+    managed_python: bool = True,
 ) -> list[str]:
     command = [
         str(uv_bin),
@@ -88,9 +89,10 @@ def build_uv_tool_install_command(
         "--force",
         "--python",
         python,
-        "--managed-python",
         "--no-progress",
     ]
+    if managed_python:
+        command.insert(6, "--managed-python")
     for dependency in UV_TOOL_DEPENDENCIES:
         command.extend(["--with", dependency])
     for package_name in UV_NO_BUILD_PACKAGES:

@@ -84,7 +84,117 @@ function Resolve-Uv {
     }
 }
 
-function Invoke-Step {
+function Test-CompatiblePython {
+    param(
+        [string]$Command,
+        [string[]]$Arguments,
+        [string]$LogFile
+    )
+
+    $Probe = "import sys, sysconfig; text=' '.join(str(x) for x in (sys.version, sys.executable, sysconfig.get_platform())).lower(); compatible=sys.version_info[:2] in ((3, 11), (3, 12)) and not any(token in text for token in ('msys', 'mingw', 'ucrt64')); print(sys.executable if compatible else ''); sys.exit(0 if compatible else 1)"
+    try {
+        $Output = & $Command @Arguments "-c" $Probe 2>> $LogFile
+        if ($LASTEXITCODE -eq 0 -and $Output) {
+            $Python = [string]($Output | Select-Object -Last 1)
+            if ($Python -and (Test-Path -LiteralPath $Python)) {
+                Add-Content -Path $LogFile -Value "Using compatible Python at $Python"
+                return $Python
+            }
+        }
+    } catch {
+        Add-Content -Path $LogFile -Value "Python compatibility probe failed for $Command $($Arguments -join ' '): $_"
+    }
+    return $null
+}
+
+function Resolve-CompatiblePython {
+    param(
+        [string]$LogFile
+    )
+
+    $Candidates = @()
+    if ($env:FUSION_MEMORY_PYTHON_BIN) {
+        $Candidates += [pscustomobject]@{ Command = $env:FUSION_MEMORY_PYTHON_BIN; Arguments = @() }
+    }
+    $Candidates += [pscustomobject]@{ Command = "py"; Arguments = @("-3.12") }
+    $Candidates += [pscustomobject]@{ Command = "py"; Arguments = @("-3.11") }
+    $LocalRoots = @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+    foreach ($Root in $LocalRoots) {
+        foreach ($Version in @("Python312", "Python311")) {
+            $Candidates += [pscustomobject]@{ Command = (Join-Path $Root "Programs\Python\$Version\python.exe"); Arguments = @() }
+            $Candidates += [pscustomobject]@{ Command = (Join-Path $Root "$Version\python.exe"); Arguments = @() }
+        }
+    }
+    foreach ($Name in @("python.exe", "python3.exe")) {
+        $Candidates += [pscustomobject]@{ Command = $Name; Arguments = @() }
+    }
+
+    foreach ($Candidate in $Candidates) {
+        $Command = [string]$Candidate.Command
+        $Arguments = [string[]]$Candidate.Arguments
+        if (-not $Command) {
+            continue
+        }
+        if ($Command -match '[\\/]' -and -not (Test-Path -LiteralPath $Command)) {
+            continue
+        }
+        if ($Command -notmatch '[\\/]') {
+            $Resolved = Get-Command $Command -ErrorAction SilentlyContinue
+            if (-not $Resolved) {
+                continue
+            }
+            if ([string]$Resolved.Source -match "\\WindowsApps\\") {
+                continue
+            }
+            $Command = [string]$Resolved.Source
+        }
+        $Python = Test-CompatiblePython -Command $Command -Arguments $Arguments -LogFile $LogFile
+        if ($Python) {
+            return $Python
+        }
+    }
+    return $null
+}
+
+function New-ToolInstallArgs {
+    param(
+        [string]$Python,
+        [bool]$ManagedPython
+    )
+
+    $Args = @(
+        "tool", "install",
+        "--force",
+        "--python", $Python
+    )
+    if ($ManagedPython) {
+        $Args += "--managed-python"
+    }
+    $Args += @(
+        "--no-progress",
+        "--with", "modelscope-hub>=0.1.6",
+        "--with", "psycopg2-binary>=2.9",
+        "--with", "torch>=2.5",
+        "--with", "transformers>=4.51",
+        "--with", "sentence-transformers>=3.4",
+        "--with", "safetensors",
+        "--with", "tokenizers",
+        "--with", "hf-xet",
+        "--with", "click",
+        "--with", "typer",
+        "--no-build-package", "psycopg2-binary",
+        "--no-build-package", "torch",
+        "--no-build-package", "transformers",
+        "--no-build-package", "sentence-transformers",
+        "--no-build-package", "safetensors",
+        "--no-build-package", "tokenizers",
+        "--no-build-package", "hf-xet",
+        $Package
+    )
+    return $Args
+}
+
+function Invoke-StepResult {
     param(
         [string]$Name,
         [string]$LogFile,
@@ -97,9 +207,25 @@ function Invoke-Step {
     Add-Content -Path $LogFile -Value "=== $Name ==="
     Add-Content -Path $LogFile -Value ($Command + " " + ($Arguments -join " "))
     & $Command @Arguments *>> $LogFile
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Invoke-Step {
+    param(
+        [string]$Name,
+        [string]$LogFile,
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    $Ok = Invoke-StepResult -Name $Name -LogFile $LogFile -Command $Command -Arguments $Arguments
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Fusion Memory installation needs attention. Step: $Name. Log: $LogFile"
         exit $LASTEXITCODE
+    }
+    if (-not $Ok) {
+        Write-Error "Fusion Memory installation needs attention. Step: $Name. Log: $LogFile"
+        exit 1
     }
 }
 
@@ -121,33 +247,20 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$ToolInstallArgs = @(
-    "tool", "install",
-    "--force",
-    "--python", "3.12",
-    "--managed-python",
-    "--no-progress",
-    "--with", "modelscope-hub>=0.1.6",
-    "--with", "psycopg2-binary>=2.9",
-    "--with", "torch>=2.5",
-    "--with", "transformers>=4.51",
-    "--with", "sentence-transformers>=3.4",
-    "--with", "safetensors",
-    "--with", "tokenizers",
-    "--with", "hf-xet",
-    "--with", "click",
-    "--with", "typer",
-    "--no-build-package", "psycopg2-binary",
-    "--no-build-package", "torch",
-    "--no-build-package", "transformers",
-    "--no-build-package", "sentence-transformers",
-    "--no-build-package", "safetensors",
-    "--no-build-package", "tokenizers",
-    "--no-build-package", "hf-xet",
-    $Package
-)
-
-Invoke-Step -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+$CompatiblePython = Resolve-CompatiblePython -LogFile $LogFile
+if ($CompatiblePython) {
+    $ToolInstallArgs = New-ToolInstallArgs -Python $CompatiblePython -ManagedPython $false
+    $ToolInstallOk = Invoke-StepResult -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+    if (-not $ToolInstallOk) {
+        Add-Content -Path $LogFile -Value "Compatible Windows CPython tool install failed; retrying with uv-managed Python 3.12."
+        $ToolInstallArgs = New-ToolInstallArgs -Python "3.12" -ManagedPython $true
+        Invoke-Step -Name "fusion memory tool install fallback" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+    }
+} else {
+    Add-Content -Path $LogFile -Value "No compatible Windows CPython runtime found; using uv-managed Python 3.12."
+    $ToolInstallArgs = New-ToolInstallArgs -Python "3.12" -ManagedPython $true
+    Invoke-Step -Name "fusion memory tool install fallback" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+}
 
 $ToolBinDir = & $Uv tool dir --bin
 if ($LASTEXITCODE -ne 0) {

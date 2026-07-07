@@ -36,8 +36,8 @@ adapter 以及 PyTorch/Transformers 相关依赖。
 
 如果模型下载失败、文件仍是 Git LFS pointer、或 Qwen runtime 依赖不可用，安装检查会
 返回 not ready，并给出失败步骤和日志路径；不会要求安装 Git LFS，也不会静默降级到
-`local_test`。当模型文件齐全，但 Python/Qwen ML runtime 不可导入，或当前硬件无法
-加载/运行两个本地 Qwen 模型时，安装会 fallback 到 `compromised` 本地模式：
+`local_test`。CPU-only 机器是支持路径，不能把“没有 CUDA/GPU”当成安装失败原因；
+当模型文件齐全，但 Python/Qwen ML runtime 不可导入，或 Qwen 本地 smoke test 在当前运行时无法加载/运行两个本地 Qwen 模型时，安装会 fallback 到 `compromised` 本地模式：
 SQLite + 内置轻量 embedding/reranker 可以继续试用，但当前 memory 功能是
 compromised 的。安装完成后需要提供 API key 才能接入更完整的模型能力；推荐阿里云
 DashScope，设置：

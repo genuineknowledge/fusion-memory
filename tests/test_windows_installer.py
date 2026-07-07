@@ -44,6 +44,21 @@ class WindowsInstallerTests(unittest.TestCase):
         self.assertEqual(command[-1], "git+https://github.com/genuineknowledge/fusion-memory.git@v0.1.0")
         self.assertNotIn("git lfs", " ".join(command).lower())
 
+    def test_uv_tool_install_command_can_use_existing_compatible_python_without_managed_python(self) -> None:
+        command = windows_installer.build_uv_tool_install_command(
+            ".",
+            uv_bin="uv.exe",
+            python=r"C:\Users\86137\AppData\Local\Programs\Python\Python312\python.exe",
+            managed_python=False,
+        )
+
+        self.assertIn("--python", command)
+        self.assertIn(
+            r"C:\Users\86137\AppData\Local\Programs\Python\Python312\python.exe",
+            command,
+        )
+        self.assertNotIn("--managed-python", command)
+
     def test_download_qwen_models_uses_modelscope_model_ids_and_local_model_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

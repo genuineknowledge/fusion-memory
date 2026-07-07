@@ -45,8 +45,9 @@ sh install.sh
 ```
 
 On Windows PowerShell, use the same target directory rule but run the PowerShell
-installer. It installs Fusion Memory as a `uv tool` with uv-managed Python 3.12
-instead of using the agent's MSYS2 Python environment:
+installer. It installs Fusion Memory as a `uv tool` with a compatible Windows
+CPython runtime or uv-managed Python 3.12 instead of using the agent's MSYS2
+Python environment:
 
 ```powershell
 $env:AGENT_DIR = "C:\path\to\current-agent-directory"
@@ -58,9 +59,10 @@ Set-Location "$env:AGENT_DIR\fusion-memory"
 Do not use MSYS2/Mingw Python for the full local Qwen runtime on Windows;
 PyTorch wheels are not available for that Python ABI. MSYS2 Python may only be
 used to bootstrap the installer. Do not ask the user to manually install Python
-or Git LFS. If compatible Windows CPython is unavailable, `install.ps1`
-downloads a local `uv.exe` non-interactively and uses uv-managed Python 3.12
-for the Fusion Memory tool runtime.
+or Git LFS. `install.ps1` uses an already installed compatible Windows CPython
+3.11/3.12 when one is available; otherwise it downloads a local `uv.exe`
+non-interactively and uses uv-managed Python 3.12 for the Fusion Memory tool
+runtime.
 
 The default local_full configuration is SQLite plus local Qwen vector models
 stored under the Fusion Memory home models directory:
@@ -75,9 +77,10 @@ Postgres/pgvector is optional for production deployments that need pgvector
 indexes, larger datasets, or multi-user service storage. It is not required for
 the default local setup.
 
-The installer installs Fusion Memory with `uv tool install --managed-python
---python 3.12`, downloads the two Qwen model directories from ModelScope into
-the Fusion Memory home models directory, and installs the Python runtime
+The installer installs Fusion Memory with `uv tool install`; on Windows it first
+uses an already installed compatible Windows CPython 3.11/3.12, and falls back
+to uv-managed Python 3.12 only when no compatible CPython can be used. It downloads the two Qwen model directories from ModelScope into the
+Fusion Memory home models directory, and installs the Python runtime
 dependencies for Postgres integration, local Qwen models, PyTorch, and
 Transformers. It does not install or start a PostgreSQL/pgvector server.
 
@@ -92,6 +95,18 @@ and dependencies are present but this hardware/runtime cannot load or run both
 local vector models does installation fall back to compromised local mode. In
 compromised mode Fusion Memory still runs with SQLite plus built-in lightweight
 embedding/reranker, but memory quality is compromised.
+CPU-only machines are supported; do not tell the user that CUDA or a GPU is
+required. If Qwen local smoke fails on CPU-only hardware, report it as a local
+Qwen smoke/runtime readiness failure and mention the log path. Do not summarize
+the failure as "because there is no CUDA/GPU"; CUDA availability is diagnostic
+metadata, not the installation rule.
+
+On Windows, Fusion Memory hides the service and history watcher it starts in
+the background. A visible terminal during install/check commands usually comes
+from the host agent's foreground PowerShell or console wrapper. Do not start an
+extra terminal or PowerShell process wrapper for Fusion Memory; use the plain
+installer/CLI commands, and use a hidden/no-window host tool only if the agent
+runtime provides one.
 
 If install-check returns not_ready, make one explicit repair attempt by rerunning
 the installer before stopping:

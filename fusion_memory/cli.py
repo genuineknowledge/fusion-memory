@@ -162,12 +162,14 @@ def main() -> None:
     add.add_argument("--time")
 
     search = sub.add_parser("search", help="Search memory")
-    search.add_argument("query")
+    search.add_argument("query", nargs="?")
+    search.add_argument("--query", dest="query_option")
     search.add_argument("--limit", type=int, default=DEFAULT_CONFIG.retrieval_output_n)
     search.add_argument("--allow-cross-session", action="store_true")
 
     context = sub.add_parser("answer-context", help="Build an evidence pack")
-    context.add_argument("query")
+    context.add_argument("query", nargs="?")
+    context.add_argument("--query", dest="query_option")
     context.add_argument("--limit", type=int, default=DEFAULT_CONFIG.retrieval_output_n)
     context.add_argument("--allow-cross-session", action="store_true")
 
@@ -370,10 +372,10 @@ def main() -> None:
                 result = service.add({"role": args.role, "content": args.content}, scope, session_time)
                 print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
             elif args.command == "search":
-                result = service.search(args.query, scope, options={"limit": args.limit, "allow_cross_session": args.allow_cross_session})
+                result = service.search(_query_arg(args), scope, options={"limit": args.limit, "allow_cross_session": args.allow_cross_session})
                 print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
             elif args.command == "answer-context":
-                pack = service.answer_context(args.query, scope, budget={"limit": args.limit, "allow_cross_session": args.allow_cross_session})
+                pack = service.answer_context(_query_arg(args), scope, budget={"limit": args.limit, "allow_cross_session": args.allow_cross_session})
                 print(json.dumps(_jsonable(pack), ensure_ascii=False, indent=2))
             elif args.command == "get":
                 print(json.dumps(_jsonable(service.get(args.object_id, args.type)), ensure_ascii=False, indent=2))
@@ -426,6 +428,7 @@ def main() -> None:
                 print(json.dumps(output, ensure_ascii=False, indent=2))
         finally:
             service.close()
+        return 0
     except Exception as exc:
         payload = {"ok": False, **safe_product_error(exc)}
         return _print_product_result(payload, json_output=getattr(args, "json", False))
@@ -441,6 +444,13 @@ def _jsonable(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def _query_arg(args: argparse.Namespace) -> str:
+    query = getattr(args, "query_option", None) or getattr(args, "query", None)
+    if not query:
+        raise ValueError("query is required")
+    return str(query)
 
 
 def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:

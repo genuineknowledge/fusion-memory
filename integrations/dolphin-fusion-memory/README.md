@@ -56,18 +56,22 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting this workspace.
 
-The Fusion Memory installer installs Fusion Memory as a `uv tool` with a
-uv-managed Python 3.12 runtime, then downloads the Qwen model directories from
-ModelScope into the Fusion Memory home `models/` directory. It installs the full
+The Fusion Memory installer installs Fusion Memory as a `uv tool`. On Windows it
+first uses an already installed compatible Windows CPython 3.11/3.12 when one
+is available, then falls back to uv-managed Python 3.12 if no compatible CPython
+can be used.
+It then downloads the Qwen model directories from ModelScope into the Fusion Memory home `models/` directory. It installs the full
 local Qwen runtime dependencies, including Postgres adapter, local Qwen adapter,
 PyTorch, and Transformers. If model download or dependency installation fails,
 install-check reports not ready with the failed step and log path. The installer
 does not require Git LFS and does not silently fall back to `local_test`.
 The default local configuration uses SQLite plus local Qwen models;
 Postgres/pgvector is optional for production deployments. Only when model files
-and dependencies are present but this hardware/runtime cannot load or run both
+and dependencies are present but the local Qwen smoke test cannot load or run both
 local vector models does it fall back to a compromised local mode with built-in
 lightweight retrieval and print the API-key next step.
+CPU-only machines are supported; CUDA/GPU is not required for installation,
+though local Qwen startup and inference may be slower on CPU.
 Recommended API provider: Aliyun DashScope; set `DASHSCOPE_API_KEY` before
 configuring API-backed providers.
 

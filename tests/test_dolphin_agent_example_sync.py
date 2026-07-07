@@ -146,6 +146,7 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "Fusion Memory home models directory" in skill
     assert "uv tool" in skill
     assert "uv-managed Python 3.12" in skill
+    assert "compatible Windows CPython" in skill
     assert "Postgres/pgvector is optional" in skill
     assert "Do not use MSYS2/Mingw Python" in skill
     assert "Do not ask the user to manually install Python" in skill
@@ -178,6 +179,10 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "Do not paste" in skill
     assert "full uv, dependency, or model download logs" in skill
     assert "Do not silently fall back to local_test" in skill
+    assert "CPU-only machines are supported" in skill
+    assert "CUDA or a GPU is\nrequired" in skill
+    assert 'Do not summarize\nthe failure as "because there is no CUDA/GPU"' in skill
+    assert "foreground PowerShell or console wrapper" in skill
     assert "Qwen runtime dependency installation fails" in skill
     assert "Postgres/pgvector is unavailable" not in skill
 

@@ -816,7 +816,8 @@ def _compromised_install_result(
                 "installed in compromised local mode because "
                 + reason
                 + ". Fusion Memory will use SQLite plus built-in lightweight embedding/reranker. "
-                "To restore full memory quality, use the local Qwen models with the qwen "
+                + _cpu_runtime_note(hardware_probe)
+                + "To restore full memory quality, use the local Qwen models with the qwen "
                 "runtime dependencies, or provide API model settings. Postgres/pgvector is "
                 "optional for production storage. Recommended API option: Aliyun "
                 "DashScope; set DASHSCOPE_API_KEY or map it through FUSION_MEMORY_MODEL_API_KEY "
@@ -825,6 +826,23 @@ def _compromised_install_result(
         }
     )
     return result
+
+
+def _cpu_runtime_note(hardware_probe: dict[str, Any]) -> str:
+    torch_probe = hardware_probe.get("torch")
+    if not isinstance(torch_probe, dict):
+        return ""
+    if (
+        bool(torch_probe.get("available"))
+        and not bool(torch_probe.get("cuda_available"))
+        and not bool(torch_probe.get("mps_available"))
+    ):
+        return (
+            "CPU-only systems are supported, but local Qwen startup and inference "
+            "can be slow; this fallback means the model smoke check did not finish "
+            "successfully in the current runtime. "
+        )
+    return ""
 
 
 def _postgres_readiness_ok(report: dict[str, dict[str, Any]]) -> bool:
@@ -1274,6 +1292,15 @@ def _qwen_runtime_smoke(home: str | Path | None = None) -> dict[str, Any]:
 def _friendly_runtime_smoke_message(exc: BaseException) -> str:
     text = str(exc).strip()
     lowered = text.lower()
+    if (
+        "cannot reshape tensor" in lowered
+        or "shape [1, 0" in lowered
+        or "0 elements" in lowered
+    ):
+        return (
+            "Qwen runtime smoke failed while loading or scoring the local "
+            "embedding/reranker models."
+        )
     if (
         "out of memory" in lowered
         or "cuda" in lowered
