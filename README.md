@@ -53,9 +53,9 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting the agent workspace.
 
-安装脚本会把 Fusion Memory 安装成 `uv tool`。Windows 上会优先使用已安装且兼容的
-Windows CPython 3.11/3.12；如果没有可用 CPython，或该路径安装失败，才会退到
-uv-managed Python 3.12，不会使用 agent 自身的 MSYS2 Python 环境。脚本会通过 ModelScope 下载两个本地
+安装脚本会把 Fusion Memory 安装成 `uv tool`。Windows 上会先使用 uv-managed
+Python 3.12；只有当该运行时创建失败时，才会自动改用已安装且兼容的 Windows
+CPython 3.11/3.12，不会使用 agent 自身的 MSYS2 Python 环境。脚本会通过 ModelScope 下载两个本地
 向量模型到 Fusion Memory home 的 `models/` 目录，再安装完整 Qwen 运行依赖，
 包括 Postgres adapter、本地 Qwen adapter 以及 PyTorch/Transformers 相关依赖。
 安装检查会确认本地模型文件存在，并运行一次最小 Qwen embedding/reranker smoke

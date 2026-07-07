@@ -57,9 +57,8 @@ export PSI_MEMORY_BASE_URL=http://127.0.0.1:8700
 If port `8700` is already in use, `fusion-memory start --json` tries the next available local port and returns the actual `url`; set `PSI_MEMORY_BASE_URL` to that returned URL before starting this workspace.
 
 The Fusion Memory installer installs Fusion Memory as a `uv tool`. On Windows it
-first uses an already installed compatible Windows CPython 3.11/3.12 when one
-is available, then falls back to uv-managed Python 3.12 if no compatible CPython
-can be used.
+first uses uv-managed Python 3.12, then falls back to an already installed
+compatible Windows CPython 3.11/3.12 only if managed Python creation fails.
 It then downloads the Qwen model directories from ModelScope into the Fusion Memory home `models/` directory. It installs the full
 local Qwen runtime dependencies, including Postgres adapter, local Qwen adapter,
 PyTorch, and Transformers. If model download or dependency installation fails,

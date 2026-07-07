@@ -45,9 +45,9 @@ sh install.sh
 ```
 
 On Windows PowerShell, use the same target directory rule but run the PowerShell
-installer. It installs Fusion Memory as a `uv tool` with a compatible Windows
-CPython runtime or uv-managed Python 3.12 instead of using the agent's MSYS2
-Python environment:
+installer. It installs Fusion Memory as a `uv tool` with uv-managed Python 3.12
+first, with compatible Windows CPython 3.11/3.12 only as a fallback instead of
+using the agent's MSYS2 Python environment:
 
 ```powershell
 $env:AGENT_DIR = "C:\path\to\current-agent-directory"
@@ -59,10 +59,10 @@ Set-Location "$env:AGENT_DIR\fusion-memory"
 Do not use MSYS2/Mingw Python for the full local Qwen runtime on Windows;
 PyTorch wheels are not available for that Python ABI. MSYS2 Python may only be
 used to bootstrap the installer. Do not ask the user to manually install Python
-or Git LFS. `install.ps1` uses an already installed compatible Windows CPython
-3.11/3.12 when one is available; otherwise it downloads a local `uv.exe`
-non-interactively and uses uv-managed Python 3.12 for the Fusion Memory tool
-runtime.
+or Git LFS. `install.ps1` resolves or downloads a local `uv.exe`
+non-interactively and first uses uv-managed Python 3.12 for the Fusion Memory
+tool runtime. It probes compatible Windows CPython 3.11/3.12 only if
+uv-managed Python creation fails.
 
 The default local_full configuration is SQLite plus local Qwen vector models
 stored under the Fusion Memory home models directory:
@@ -78,9 +78,10 @@ indexes, larger datasets, or multi-user service storage. It is not required for
 the default local setup.
 
 The installer installs Fusion Memory with `uv tool install`; on Windows it first
-uses an already installed compatible Windows CPython 3.11/3.12, and falls back
-to uv-managed Python 3.12 only when no compatible CPython can be used. It downloads the two Qwen model directories from ModelScope into the
-Fusion Memory home models directory, and installs the Python runtime
+uses uv-managed Python 3.12, and falls back to an already installed compatible
+Windows CPython 3.11/3.12 only if managed Python creation fails. It downloads
+the two Qwen model directories from ModelScope into the Fusion Memory home
+models directory, and installs the Python runtime
 dependencies for Postgres integration, local Qwen models, PyTorch, and
 Transformers. It does not install or start a PostgreSQL/pgvector server.
 
@@ -102,11 +103,8 @@ the failure as "because there is no CUDA/GPU"; CUDA availability is diagnostic
 metadata, not the installation rule.
 
 On Windows, Fusion Memory hides the service and history watcher it starts in
-the background. A visible terminal during install/check commands usually comes
-from the host agent's foreground PowerShell or console wrapper. Do not start an
-extra terminal or PowerShell process wrapper for Fusion Memory; use the plain
-installer/CLI commands, and use a hidden/no-window host tool only if the agent
-runtime provides one.
+the background. When starting memory service or passive sync, do not use pwsh, powershell.exe, PowerShell jobs, or shell backgrounding to keep the process
+alive. Run the finite Fusion Memory CLI command and let it return: the Fusion Memory CLI creates the hidden/no-window service and watcher internally.
 
 If install-check returns not_ready, make one explicit repair attempt by rerunning
 the installer before stopping:
@@ -227,9 +225,9 @@ fusion-memory status-haitun-history-watcher \
 Do not continue as if cross-session persistence is active until this process is
 reported as running with an OS pid, pid_file, and log_file, or the user
 explicitly chooses to continue without passive sync. On Windows, do not use
-PowerShell job/process wrappers to manage this watcher; the Fusion Memory CLI
-writes the real OS pid itself. On Linux/macOS, do not hand-write shell
-backgrounding; use the same CLI background command.
+pwsh, powershell.exe, PowerShell jobs, or shell backgrounding to manage this
+watcher; the Fusion Memory CLI writes the real OS pid itself. On Linux/macOS,
+do not hand-write shell backgrounding; use the same CLI background command.
 
 ## Persistence (Required After Start)
 

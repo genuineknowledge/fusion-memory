@@ -247,18 +247,16 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$CompatiblePython = Resolve-CompatiblePython -LogFile $LogFile
-if ($CompatiblePython) {
-    $ToolInstallArgs = New-ToolInstallArgs -Python $CompatiblePython -ManagedPython $false
-    $ToolInstallOk = Invoke-StepResult -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
-    if (-not $ToolInstallOk) {
-        Add-Content -Path $LogFile -Value "Compatible Windows CPython tool install failed; retrying with uv-managed Python 3.12."
-        $ToolInstallArgs = New-ToolInstallArgs -Python "3.12" -ManagedPython $true
-        Invoke-Step -Name "fusion memory tool install fallback" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+$ToolInstallArgs = New-ToolInstallArgs -Python "3.12" -ManagedPython $true
+$ToolInstallOk = Invoke-StepResult -Name "fusion memory tool install" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
+if (-not $ToolInstallOk) {
+    Add-Content -Path $LogFile -Value "uv-managed Python 3.12 tool install failed; probing for an existing compatible Windows CPython runtime."
+    $CompatiblePython = Resolve-CompatiblePython -LogFile $LogFile
+    if (-not $CompatiblePython) {
+        Write-Error "Fusion Memory installation needs attention. Step: fusion memory tool install. Log: $LogFile"
+        exit 1
     }
-} else {
-    Add-Content -Path $LogFile -Value "No compatible Windows CPython runtime found; using uv-managed Python 3.12."
-    $ToolInstallArgs = New-ToolInstallArgs -Python "3.12" -ManagedPython $true
+    $ToolInstallArgs = New-ToolInstallArgs -Python $CompatiblePython -ManagedPython $false
     Invoke-Step -Name "fusion memory tool install fallback" -LogFile $LogFile -Command $Uv -Arguments $ToolInstallArgs
 }
 
