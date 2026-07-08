@@ -267,7 +267,7 @@ def _watcher_daemon_command(
     config: WatcherConfig, *, poll_interval_seconds: float
 ) -> list[str]:
     return [
-        sys.executable,
+        _daemon_python_executable(),
         "-m",
         "fusion_memory.cli",
         "--db",
@@ -280,6 +280,18 @@ def _watcher_daemon_command(
         "--poll-interval-seconds",
         str(max(0.1, poll_interval_seconds)),
     ]
+
+
+def _daemon_python_executable(executable: str | None = None) -> str:
+    resolved = executable or sys.executable
+    if os.name != "nt":
+        return resolved
+    lower = resolved.lower()
+    if lower.endswith("pythonw.exe"):
+        return resolved
+    if lower.endswith("python.exe"):
+        return resolved[: -len("python.exe")] + "pythonw.exe"
+    return resolved
 
 
 def _watcher_result(

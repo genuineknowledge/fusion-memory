@@ -347,6 +347,39 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
         path_keys = [key for key in kwargs["env"] if key.lower() == "path"]
         self.assertEqual(path_keys, ["Path"])
 
+    def test_windows_history_watcher_daemon_uses_pythonw_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            cfg = config_from_workspace(
+                workspace=workspace,
+                session_id="session-1",
+                db_path=workspace / "memory.sqlite3",
+                base_url="http://127.0.0.1:9876",
+                env={"Path": r"C:\Windows\System32"},
+            )
+            fake_process = _FakeProcess(pid=24680)
+
+            with (
+                patch.object(watcher.os, "name", "nt"),
+                patch.object(watcher.sys, "executable", r"C:\Users\agent\.fusion-memory-venv\Scripts\python.exe"),
+                patch.object(watcher, "_process_exists", return_value=False),
+                patch.object(watcher.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
+                patch.object(watcher.subprocess, "DETACHED_PROCESS", 0x00000008, create=True),
+                patch.object(watcher.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+                patch.object(watcher.subprocess, "Popen", return_value=fake_process) as popen,
+            ):
+                result = watcher.start_history_watcher_daemon(
+                    cfg,
+                    poll_interval_seconds=0.5,
+                )
+
+        self.assertTrue(result["ok"], result)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], r"C:\Users\agent\.fusion-memory-venv\Scripts\pythonw.exe")
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs["creationflags"] & 0x08000000, 0x08000000)
+        self.assertEqual(kwargs["creationflags"] & 0x00000008, 0x00000008)
+
     def test_cli_exposes_cross_platform_history_watcher_daemon_commands(self) -> None:
         proc = subprocess.run(
             [sys.executable, "-m", "fusion_memory.cli", "--help"],
