@@ -1252,6 +1252,56 @@ class ProductCliTests(unittest.TestCase):
             self.assertIn("--port", popen.call_args.args[0])
             self.assertIn(str(busy_port + 1), popen.call_args.args[0])
 
+    def test_start_service_stops_unhealthy_recorded_pid_before_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            port = _free_port()
+            paths = product_paths(home)
+            init_home(
+                home,
+                port=port,
+                settings={
+                    "db": str(home / "fusion-memory.sqlite3"),
+                    "storage_backend": "sqlite",
+                    "embedding": {"provider": "deterministic"},
+                    "reranker": {"provider": "lexical"},
+                },
+            )
+            paths.pid.write_text("24680", encoding="utf-8")
+            fake_process = _FakeProcess(pid=4321)
+            health_calls = 0
+
+            def fake_health(host: str, checked_port: int, *, timeout: float = 1.0):
+                nonlocal health_calls
+                health_calls += 1
+                return {
+                    "ok": health_calls >= 3,
+                    "url": f"http://{host}:{checked_port}/health",
+                    "message": "timed out",
+                }
+
+            with (
+                patch("fusion_memory.product.service_health", side_effect=fake_health),
+                patch(
+                    "fusion_memory.product.stop_service",
+                    return_value={"ok": True, "stopped": True, "pid": 24680},
+                ) as stop,
+                patch("fusion_memory.product._port_available", return_value=True),
+                patch(
+                    "fusion_memory.product.subprocess.Popen",
+                    return_value=fake_process,
+                ) as popen,
+            ):
+                started = start_service(home, wait_seconds=0.1)
+                configured_port = load_config(home)["port"]
+
+        self.assertTrue(started["ok"], started)
+        stop.assert_called_once_with(home, wait_seconds=10.0)
+        self.assertEqual(started["port"], port)
+        self.assertEqual(configured_port, port)
+        self.assertIn("--port", popen.call_args.args[0])
+        self.assertIn(str(port), popen.call_args.args[0])
+
     def test_daemon_popen_kwargs_uses_unix_session_detach(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "service.log"

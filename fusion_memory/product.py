@@ -469,6 +469,31 @@ def start_service(
             "pid": _read_pid(paths.pid),
         }
 
+    recorded_pid = _read_pid(paths.pid)
+    if recorded_pid is not None:
+        stopped = stop_service(home, wait_seconds=10.0)
+        if not stopped.get("ok"):
+            return {
+                "ok": False,
+                "error": "stale_service_stop_failed",
+                "message": (
+                    f"{APP_NAME} found a recorded service pid but could not stop it. "
+                    "Run fusion-memory stop, then retry fusion-memory start."
+                ),
+                "pid": recorded_pid,
+                "stop": stopped,
+                "log": str(paths.log),
+            }
+        health = service_health(config["host"], int(config["port"]))
+        if health["ok"]:
+            return {
+                "ok": True,
+                "already_running": True,
+                "recovered": True,
+                "url": _base_url(config),
+                "pid": _read_pid(paths.pid),
+            }
+
     if not _port_available(config["host"], int(config["port"])):
         original_port = int(config["port"])
         fallback_port = _next_available_port(str(config["host"]), original_port + 1)

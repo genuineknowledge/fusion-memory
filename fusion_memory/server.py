@@ -32,6 +32,9 @@ class MemoryServerState:
         self.background_task_interval_seconds = max(0.0, background_task_interval_seconds)
         self.background_task_batch_size = max(1, background_task_batch_size)
         self.next_background_task_run = time.monotonic() + self.background_task_interval_seconds
+        self.background_task_launch_lock = threading.Lock()
+        self.background_task_thread: threading.Thread | None = None
+        self.last_background_task_error: str | None = None
 
 
 class FusionMemoryHTTPServer(ThreadingHTTPServer):
@@ -51,8 +54,28 @@ class FusionMemoryHTTPServer(ThreadingHTTPServer):
         if now < self.state.next_background_task_run:
             return
         self.state.next_background_task_run = now + interval
+        with self.state.background_task_launch_lock:
+            thread = self.state.background_task_thread
+            if thread is not None and thread.is_alive():
+                return
+            self.state.background_task_thread = threading.Thread(
+                target=self._run_background_tasks,
+                daemon=True,
+            )
+            self.state.background_task_thread.start()
+
+    def _run_background_tasks(self) -> None:
         with self.state.lock:
-            self.state.service.process_server_background_tasks(limit=self.state.background_task_batch_size)
+            try:
+                self.state.service.process_server_background_tasks(limit=self.state.background_task_batch_size)
+            except Exception as exc:
+                self.state.last_background_task_error = f"{exc.__class__.__name__}: {exc}"
+
+    def server_close(self) -> None:
+        thread = self.state.background_task_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        super().server_close()
 
 
 def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
@@ -127,11 +150,14 @@ def make_handler(state: MemoryServerState) -> type[BaseHTTPRequestHandler]:
 
         def _write_json(self, status: int, payload: Any) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
 
     return FusionMemoryHandler
 

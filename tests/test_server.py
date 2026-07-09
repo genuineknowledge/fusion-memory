@@ -14,11 +14,55 @@ from fusion_memory.product import runtime_status_payload
 from fusion_memory.server import serve
 
 
+class _DisconnectingWriter:
+    def write(self, _body: bytes) -> None:
+        raise ConnectionAbortedError(10053, "connection aborted")
+
+
+class _SlowBackgroundTaskService:
+    storage_backend = "sqlite"
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+
+    def process_server_background_tasks(self, *, limit: int = 5) -> dict[str, int]:
+        self.started.set()
+        time.sleep(0.25)
+        return {"processed": limit}
+
+
 class ServerTests(unittest.TestCase):
+    def test_write_json_ignores_client_disconnect(self) -> None:
+        service = MemoryService()
+        server = serve(service, host="127.0.0.1", port=0)
+        handler = object.__new__(server.RequestHandlerClass)
+        handler.wfile = _DisconnectingWriter()
+        handler.send_response = lambda _status: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        try:
+            server.RequestHandlerClass._write_json(handler, 200, {"ok": True})
+        finally:
+            server.server_close()
+            service.close()
+
     def test_runtime_status_defaults_to_sqlite_backend(self) -> None:
         status = runtime_status_payload()
 
         self.assertEqual(status["database"]["backend"], "sqlite")
+
+    def test_server_background_tasks_do_not_block_accept_loop(self) -> None:
+        service = _SlowBackgroundTaskService()
+        server = serve(service, host="127.0.0.1", port=0, background_task_interval_seconds=0.01)
+        server.state.next_background_task_run = time.monotonic() - 1
+        started = time.monotonic()
+        try:
+            server.service_actions()
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(service.started.wait(timeout=1))
+        finally:
+            server.server_close()
 
     def test_status_endpoint_reports_readiness(self) -> None:
         ready = threading.Event()
