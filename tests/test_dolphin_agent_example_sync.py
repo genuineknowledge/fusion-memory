@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_WORKSPACE = ROOT / "integrations" / "dolphin-fusion-memory" / "workspace"
 SYNCED_FILES = [
     "systems/system.py",
-    "tools/_client.py",
-    "tools/_config.py",
+    "tools/_fusion_memory_client.py",
+    "tools/_fusion_memory_config.py",
     "tools/memory_add.py",
     "tools/memory_search.py",
     "tools/memory_answer_context.py",
@@ -31,8 +31,8 @@ COPY_USAGE_PHRASES = [
     "Copy Into Another Workspace",
     "memory-only workspace",
     "memory_*.py",
-    "tools/_client.py",
-    "tools/_config.py",
+    "tools/_fusion_memory_client.py",
+    "tools/_fusion_memory_config.py",
     "skills/fusion-memory-setup",
 ]
 AUTO_PERSISTENCE_PHRASES = [
@@ -71,7 +71,10 @@ def test_psi_agent_fusion_memory_example_matches_canonical_adapter() -> None:
             f"{relative_path} is out of sync with the canonical Haitun adapter"
         )
 
-    for relative_path in ("tools/_client.py", "tools/_config.py"):
+    for relative_path in (
+        "tools/_fusion_memory_client.py",
+        "tools/_fusion_memory_config.py",
+    ):
         synced = (agent_workspace / relative_path).read_text()
         assert "PSI_MEMORY_BASE_URL" in synced or "post_json" in synced
 
@@ -135,7 +138,10 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
 
     assert 'AGENT_DIR="/path/to/current-agent-directory"' in skill
     assert "not the workspace directory" in skill
-    assert 'git clone https://github.com/genuineknowledge/fusion-memory.git "$AGENT_DIR/fusion-memory"' in skill
+    assert (
+        'git clone https://github.com/genuineknowledge/fusion-memory.git "$AGENT_DIR/fusion-memory"'
+        in skill
+    )
     assert "wey-bo" not in skill
     assert "git@" not in skill
     assert "identity" not in skill.lower()
@@ -151,14 +157,15 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "Do not use MSYS2/Mingw Python" in skill
     assert "Do not ask the user to manually install Python" in skill
     assert "uv.exe" in skill
-    assert ".fusion-memory-venv" not in skill
+    assert "Do not ask the user to create, activate, or repair `.fusion-memory-venv`" in skill
+    assert "installer-owned legacy state" in skill
     assert "--background --json" in skill
     assert "fusion-memory status-haitun-history-watcher" in skill
     assert "nohup" not in skill
     assert "kill -0" not in skill
     assert "Start-Process" not in skill
     assert "HTTP /add" in skill
-    assert 'fusion-memory sync-haitun-history' in skill
+    assert "fusion-memory sync-haitun-history" in skill
     assert 'fusion-memory --db "$FM_DB" sync-haitun-history' not in skill
     assert "Persistence (Required After Start)" in skill
     assert "After verifying, immediately start the passive sync process" in skill
@@ -170,11 +177,14 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
     assert "ModelScope" in skill
     assert "git lfs pull" not in skill.lower()
     assert "If install-check returns not_ready" in skill
-    assert 'sh install.sh' in skill
+    assert "sh install.sh" in skill
     assert ".\\install.ps1" in skill
-    assert 'fusion-memory[postgres,qwen]' not in skill.split("On Windows PowerShell:", 1)[1].split(
-        "If the repair attempt still reports not_ready", 1
-    )[0]
+    assert (
+        "fusion-memory[postgres,qwen]"
+        not in skill.split("On Windows PowerShell:", 1)[1].split(
+            "If the repair attempt still reports not_ready", 1
+        )[0]
+    )
     assert "summarize the failed install step" in skill
     assert "Do not paste" in skill
     assert "full uv, dependency, or model download logs" in skill
@@ -188,7 +198,9 @@ def test_first_use_setup_skill_uses_public_repository_and_documents_compromised_
 
 
 @pytest.mark.anyio
-async def test_canonical_memory_workspace_prompt_asks_before_enabling_persistence() -> None:
+async def test_canonical_memory_workspace_prompt_asks_before_enabling_persistence() -> (
+    None
+):
     path = CANONICAL_WORKSPACE / "systems" / "system.py"
     spec = importlib.util.spec_from_file_location("canonical_memory_system", path)
     assert spec is not None

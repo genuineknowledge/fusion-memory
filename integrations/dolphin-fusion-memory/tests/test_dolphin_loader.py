@@ -17,5 +17,5 @@ async def test_dolphin_loader_discovers_only_public_tools() -> None:
     assert {name for name in tools if registry.get(name) is not None} == set(tools)
     assert "source" not in tools["memory_add"].parameters.get("required", [])
     assert "source" in tools["memory_add"].parameters["properties"]
-    assert "_config" not in tools
-    assert "_client" not in tools
+    assert "_fusion_memory_config" not in tools
+    assert "_fusion_memory_client" not in tools

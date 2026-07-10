@@ -50,13 +50,19 @@ def _clamp_timeout(raw: str | None) -> float:
         return FUSION_MEMORY_DEFAULT_TIMEOUT_SECONDS
     if value <= 0:
         return FUSION_MEMORY_DEFAULT_TIMEOUT_SECONDS
-    return max(FUSION_MEMORY_MIN_TIMEOUT_SECONDS, min(FUSION_MEMORY_MAX_TIMEOUT_SECONDS, value))
+    return max(
+        FUSION_MEMORY_MIN_TIMEOUT_SECONDS, min(FUSION_MEMORY_MAX_TIMEOUT_SECONDS, value)
+    )
 
 
-def build_fusion_memory_config(env: Mapping[str, str] | None = None) -> FusionMemoryConfig:
+def build_fusion_memory_config(
+    env: Mapping[str, str] | None = None,
+) -> FusionMemoryConfig:
     env = os.environ if env is None else env
     return FusionMemoryConfig(
-        base_url=(env.get("PSI_MEMORY_BASE_URL") or FUSION_MEMORY_DEFAULT_BASE_URL).rstrip("/"),
+        base_url=(
+            env.get("PSI_MEMORY_BASE_URL") or FUSION_MEMORY_DEFAULT_BASE_URL
+        ).rstrip("/"),
         timeout_seconds=_clamp_timeout(env.get("PSI_MEMORY_TIMEOUT_SECONDS")),
         workspace_id=env.get("PSI_MEMORY_WORKSPACE_ID") or "dolphin",
         user_id=env.get("PSI_MEMORY_USER_ID")

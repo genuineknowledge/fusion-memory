@@ -153,8 +153,8 @@ the system prompt instructions:
 
 ```bash
 mkdir -p ./my-workspace/tools ./my-workspace/systems ./my-workspace/skills
-cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_client.py ./my-workspace/tools/
-cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_config.py ./my-workspace/tools/
+cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_fusion_memory_client.py ./my-workspace/tools/
+cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/_fusion_memory_config.py ./my-workspace/tools/
 cp /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/tools/memory_*.py ./my-workspace/tools/
 cp -R /public/home/wwb/memory/integrations/dolphin-fusion-memory/workspace/skills/fusion-memory-setup ./my-workspace/skills/
 ```

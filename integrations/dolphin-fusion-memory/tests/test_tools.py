@@ -18,7 +18,7 @@ if str(TOOLS_DIR) not in sys.path:
 if str(SYSTEMS_DIR) not in sys.path:
     sys.path.insert(0, str(SYSTEMS_DIR))
 
-MemoryConfig = importlib.import_module("_config").MemoryConfig
+MemoryConfig = importlib.import_module("_fusion_memory_config").MemoryConfig
 memory_add = importlib.import_module("memory_add")
 memory_search = importlib.import_module("memory_search")
 memory_answer_context = importlib.import_module("memory_answer_context")

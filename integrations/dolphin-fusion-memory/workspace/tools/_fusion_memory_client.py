@@ -78,7 +78,12 @@ def format_context_pack(pack: dict[str, Any], limit: int = 8) -> str:
 
 def format_error_result(exc: Exception) -> str:
     if isinstance(exc, FusionMemoryToolError):
-        payload = {"ok": False, "error": exc.error, "cause": exc.cause, "message": exc.message}
+        payload = {
+            "ok": False,
+            "error": exc.error,
+            "cause": exc.cause,
+            "message": exc.message,
+        }
     else:
         payload = {
             "ok": False,

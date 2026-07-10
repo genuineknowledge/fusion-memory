@@ -9,7 +9,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1] / "workspace" / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from _config import build_memory_config
+from _fusion_memory_config import build_memory_config
 
 
 def test_build_memory_config_defaults() -> None:

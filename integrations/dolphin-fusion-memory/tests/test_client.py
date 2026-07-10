@@ -12,7 +12,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1] / "workspace" / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
-from _client import _normalize_timeout_seconds, format_context_pack, post_json
+from _fusion_memory_client import _normalize_timeout_seconds, format_context_pack, post_json
 
 
 @pytest.mark.anyio
