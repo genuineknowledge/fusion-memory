@@ -119,6 +119,7 @@ async def sync_history_once_async(
                 raise RuntimeError("MCP memory_add_batch did not confirm success")
             submitted.add(batch["batch_hash"])
             checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
+            save_checkpoint(config.checkpoint_path, checkpoint)
             submitted_count += 1
         _update_checkpoint_metadata(config, messages, checkpoint)
         save_checkpoint(config.checkpoint_path, checkpoint)
@@ -143,6 +144,7 @@ def _sync_history_with_callback(
         submit_add({"input": {"messages": batch["messages"]}, "metadata": _batch_metadata(config, batch)})
         submitted.add(batch["batch_hash"])
         checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
+        save_checkpoint(config.checkpoint_path, checkpoint)
         submitted_count += 1
     _update_checkpoint_metadata(config, messages, checkpoint)
     save_checkpoint(config.checkpoint_path, checkpoint)
@@ -505,7 +507,12 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
 
 def save_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
 
 
 def _read_history_messages(path: Path) -> list[dict[str, Any]]:

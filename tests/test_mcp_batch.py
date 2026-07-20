@@ -97,6 +97,61 @@ def test_unstructured_mcp_result_is_not_treated_as_success():
     assert _tool_result(result)["ok"] is False
 
 
+@pytest.mark.anyio
+async def test_json_text_without_structured_content_cannot_advance_checkpoint(tmp_path: Path):
+    config = watcher_config(tmp_path)
+    raw_result = SimpleNamespace(
+        isError=False,
+        structuredContent=None,
+        content=[SimpleNamespace(text='{"ok": true, "result": {"batch_id": "b1"}}')],
+    )
+    client = RecordingMcpClient(results=[_tool_result(raw_result)])
+
+    with pytest.raises(RuntimeError):
+        await sync_history_once_async(config, client=client)
+
+    assert client.results == []
+    assert load_checkpoint(config.checkpoint_path)["submitted_batches"] == []
+
+
+@pytest.mark.anyio
+async def test_each_confirmed_batch_is_checkpointed_before_the_next_attempt(tmp_path: Path):
+    config = watcher_config(tmp_path)
+    config.history_path.write_text(
+        json.dumps({"role": "user", "content": "first"})
+        + "\n"
+        + json.dumps({"role": "user", "content": "second"})
+        + "\n",
+        encoding="utf-8",
+    )
+    client = RecordingMcpClient(
+        results=[
+            {"ok": True, "result": {"batch_id": "first"}},
+            {"ok": False},
+            {"ok": True, "result": {"batch_id": "second"}},
+        ]
+    )
+
+    with pytest.raises(RuntimeError):
+        await sync_history_once_async(config, client=client)
+
+    partial = load_checkpoint(config.checkpoint_path)
+    assert partial["submitted_batches"] == [client.calls[0]["batch_id"]]
+    assert "line_count" not in partial
+
+    result = await sync_history_once_async(config, client=client)
+
+    assert result["submitted_count"] == 1
+    assert [call["batch_id"] for call in client.calls] == [
+        client.calls[0]["batch_id"],
+        client.calls[1]["batch_id"],
+        client.calls[1]["batch_id"],
+    ]
+    completed = load_checkpoint(config.checkpoint_path)
+    assert completed["submitted_batches"] == [client.calls[0]["batch_id"], client.calls[1]["batch_id"]]
+    assert completed["line_count"] == 2
+
+
 def test_legacy_memory_base_url_gets_mcp_path(tmp_path: Path):
     config = config_from_workspace(
         workspace=tmp_path,
@@ -281,10 +336,12 @@ class FailingBatchWriter:
 class RecordingMcpClient:
     def __init__(self, results: list[dict[str, Any]]) -> None:
         self.results = list(results)
+        self.calls: list[dict[str, Any]] = []
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         assert name == "memory_add_batch"
         assert arguments["batch_id"]
+        self.calls.append(arguments)
         return self.results.pop(0)
 
 

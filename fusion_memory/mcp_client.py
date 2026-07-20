@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any
@@ -78,14 +77,4 @@ def _tool_result(result: Any) -> dict[str, Any]:
         structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
-    for item in getattr(result, "content", ()):
-        text = getattr(item, "text", None)
-        if not isinstance(text, str):
-            continue
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(decoded, dict):
-            return decoded
     return {"ok": False, "error": {"code": "unstructured_mcp_result", "retryable": True}}
