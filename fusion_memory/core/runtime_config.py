@@ -11,11 +11,19 @@ from fusion_memory.core.embedding import HTTPEmbeddingClient, Qwen3EmbeddingClie
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
 from fusion_memory.retrieval.reranker import HTTPReranker, Qwen3Reranker
+from fusion_memory.storage.postgres_pool import PostgresConnectionPool
 
 
 @dataclass(frozen=True)
 class RuntimeRetrievalFlags:
     production_selector: str = "legacy"
+
+
+@dataclass(frozen=True)
+class PostgresPoolSettings:
+    min_connections: int = 1
+    max_connections: int = 8
+    acquire_timeout_seconds: float = 5.0
 
 
 def memory_service_from_env(
@@ -30,10 +38,23 @@ def memory_service_from_env(
     opt into Qwen/HTTP adapters without hard-coding endpoints or secrets.
     """
 
+    backend = storage_backend or os.getenv("FUSION_MEMORY_STORAGE_BACKEND", "sqlite")
+    postgres_pool = None
+    postgres_acquire_timeout_seconds = 5.0
+    if backend == "postgres":
+        settings = postgres_pool_settings_from_env()
+        postgres_acquire_timeout_seconds = settings.acquire_timeout_seconds
+        postgres_pool = PostgresConnectionPool(
+            str(db_path),
+            min_connections=settings.min_connections,
+            max_connections=settings.max_connections,
+        )
     return MemoryService(
         db_path,
         config=config,
-        storage_backend=storage_backend or os.getenv("FUSION_MEMORY_STORAGE_BACKEND", "sqlite"),
+        storage_backend=backend,
+        postgres_pool=postgres_pool,
+        postgres_acquire_timeout_seconds=postgres_acquire_timeout_seconds,
         embedder=_build_embedder(),
         reranker=_build_reranker(),
         extractor=_build_extractor(),
@@ -52,6 +73,19 @@ def build_runtime_retrieval_flags() -> RuntimeRetrievalFlags:
     return RuntimeRetrievalFlags(
         production_selector=selector,
     )
+
+
+def postgres_pool_settings_from_env() -> PostgresPoolSettings:
+    settings = PostgresPoolSettings(
+        min_connections=_int_env("FUSION_MEMORY_PG_MIN_CONNECTIONS", 1),
+        max_connections=_int_env("FUSION_MEMORY_PG_MAX_CONNECTIONS", 8),
+        acquire_timeout_seconds=_float_env("FUSION_MEMORY_PG_ACQUIRE_TIMEOUT_SECONDS", 5.0),
+    )
+    if settings.min_connections < 0 or settings.max_connections < 1 or settings.min_connections > settings.max_connections:
+        raise ValueError("invalid Postgres connection pool bounds")
+    if settings.acquire_timeout_seconds <= 0:
+        raise ValueError("FUSION_MEMORY_PG_ACQUIRE_TIMEOUT_SECONDS must be positive")
+    return settings
 
 
 def _build_embedder() -> Any | None:

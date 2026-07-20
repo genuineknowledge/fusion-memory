@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from contextlib import contextmanager, nullcontext
+from typing import Any, Callable, Iterator, Mapping
 
 from fusion_memory.core.chronology import (
     ChronologyEventEdge,
@@ -27,6 +28,7 @@ from fusion_memory.core.models import (
     new_id,
 )
 from fusion_memory.core.text import keyword_score, stable_hash
+from fusion_memory.storage.postgres_pool import PostgresConnectionPool, RetryableOperationError
 
 
 DEFAULT_POSTGRES_MIGRATION = Path(__file__).parent / "migrations" / "postgres" / "001_init.sql"
@@ -53,6 +55,18 @@ POSTGRES_TABLES = [
 
 class PostgresBackendUnavailable(RuntimeError):
     pass
+
+
+class _PostgresRepository:
+    """Common transaction ownership behavior for standalone and bound facades."""
+
+    def _commit_if_owner(self) -> None:
+        if getattr(self, "_manage_transaction", True):
+            self.connect().commit()
+
+    def _rollback_if_owner(self) -> None:
+        if getattr(self, "_manage_transaction", True):
+            self.connect().rollback()
 
 
 @dataclass
@@ -146,7 +160,7 @@ class PostgresMigrationRunner:
         self.close()
 
 
-class PostgresEvidenceRepository:
+class PostgresEvidenceRepository(_PostgresRepository):
     """Postgres/pgvector CRUD boundary for Layer 1 evidence spans.
 
     The local MVP uses SQLite by default, but production deployments need a
@@ -228,10 +242,10 @@ class PostgresEvidenceRepository:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -326,7 +340,7 @@ class PostgresEvidenceRepository:
             cursor.close()
 
 
-class PostgresFactRepository:
+class PostgresFactRepository(_PostgresRepository):
     """Postgres/pgvector CRUD boundary for Layer 3 facts and fact relations."""
 
     def __init__(
@@ -404,10 +418,10 @@ class PostgresFactRepository:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -520,10 +534,10 @@ class PostgresFactRepository:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -555,7 +569,7 @@ class PostgresFactRepository:
             cursor.close()
 
 
-class PostgresEventRepository:
+class PostgresEventRepository(_PostgresRepository):
     """Postgres CRUD boundary for Layer 4 events and temporal edges."""
 
     def __init__(self, dsn: str, *, connect: Callable[[str], Any] | None = None) -> None:
@@ -616,10 +630,10 @@ class PostgresEventRepository:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -710,10 +724,10 @@ class PostgresEventRepository:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -757,7 +771,7 @@ class PostgresEventRepository:
             cursor.close()
 
 
-class PostgresViewProfileRepository:
+class PostgresViewProfileRepository(_PostgresRepository):
     """Postgres CRUD/search boundary for Layer 5 views, profiles, and entities."""
 
     def __init__(
@@ -826,10 +840,10 @@ class PostgresViewProfileRepository:
                     _dt_to_pg(view.updated_at),
                 ),
             )
-            self.connect().commit()
+            self._commit_if_owner()
             return cursor.rowcount > 0
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -891,10 +905,10 @@ class PostgresViewProfileRepository:
                     embedding,
                 ),
             )
-            self.connect().commit()
+            self._commit_if_owner()
             return cursor.rowcount > 0
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1016,9 +1030,9 @@ class PostgresViewProfileRepository:
                     _dt_to_pg(now),
                 ),
             )
-            self.connect().commit()
+            self._commit_if_owner()
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1053,7 +1067,7 @@ class PostgresViewProfileRepository:
             cursor.close()
 
 
-class PostgresRuntimeRepository:
+class PostgresRuntimeRepository(_PostgresRepository):
     """Postgres CRUD boundary for encoding, utility examples, traces, audit, and background tasks."""
 
     def __init__(self, dsn: str, *, connect: Callable[[str], Any] | None = None) -> None:
@@ -1336,10 +1350,10 @@ class PostgresRuntimeRepository:
         try:
             cursor.execute(sql, params)
             changed = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return changed
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1354,7 +1368,7 @@ class PostgresRuntimeRepository:
             cursor.close()
 
 
-class PostgresMemoryStore:
+class PostgresMemoryStore(_PostgresRepository):
     """SQLiteMemoryStore-compatible facade over production Postgres repositories."""
 
     def __init__(
@@ -1363,11 +1377,18 @@ class PostgresMemoryStore:
         *,
         connect: Callable[[str], Any] | None = None,
         embedder: Embedder | None = None,
+        pool: PostgresConnectionPool | None = None,
+        acquire_timeout_seconds: float = 5.0,
+        lock_timeout_seconds: float = 5.0,
     ) -> None:
         self.dsn = dsn
         self._connect = connect or _default_connect
         self.embedder = embedder or DeterministicEmbedder()
+        self.pool = pool
+        self.acquire_timeout_seconds = acquire_timeout_seconds
+        self.lock_timeout_seconds = lock_timeout_seconds
         self.conn: Any | None = None
+        self._owns_connection = True
         shared_connect = lambda dsn: self.connect()
         self.evidence = PostgresEvidenceRepository(dsn, connect=shared_connect, embedder=self.embedder)
         self.facts = PostgresFactRepository(dsn, connect=shared_connect, embedder=self.embedder)
@@ -1375,15 +1396,63 @@ class PostgresMemoryStore:
         self.views_profiles = PostgresViewProfileRepository(dsn, connect=shared_connect, embedder=self.embedder)
         self.runtime = PostgresRuntimeRepository(dsn, connect=shared_connect)
 
+    @contextmanager
+    def operation(self, *, user_id: str | None = None, write: bool = False) -> Iterator["PostgresMemoryStore"]:
+        """Run one logical request in a single Postgres transaction."""
+        if self.pool is None:
+            connection_context = nullcontext(self.connect())
+        else:
+            connection_context = self.pool.connection(self.acquire_timeout_seconds)
+        with connection_context as connection:
+            bound = self.for_connection(connection, manage_transaction=False)
+            try:
+                if write and user_id:
+                    self._acquire_user_write_lock(connection, user_id)
+                yield bound
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def for_connection(self, connection: Any, *, manage_transaction: bool = False) -> "PostgresMemoryStore":
+        facade = PostgresMemoryStore(
+            self.dsn,
+            connect=lambda _dsn: connection,
+            embedder=self.embedder,
+            acquire_timeout_seconds=self.acquire_timeout_seconds,
+            lock_timeout_seconds=self.lock_timeout_seconds,
+        )
+        facade.conn = connection
+        facade._owns_connection = False
+        facade._manage_transaction = manage_transaction
+        for repository in [facade.evidence, facade.facts, facade.events, facade.views_profiles, facade.runtime]:
+            repository.conn = connection
+            repository._manage_transaction = manage_transaction
+        return facade
+
+    def _acquire_user_write_lock(self, connection: Any, user_id: str) -> None:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("set local lock_timeout = %s", (f"{int(self.lock_timeout_seconds * 1000)}ms",))
+            cursor.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (user_id,))
+        except Exception as exc:
+            if _is_lock_not_available(exc):
+                raise RetryableOperationError("write for this user is busy", code="user_write_busy") from exc
+            raise
+        finally:
+            cursor.close()
+
     def connect(self) -> Any:
         if self.conn is None:
             self.conn = self._connect(self.dsn)
         return self.conn
 
     def close(self) -> None:
-        if self.conn is not None:
+        if self.conn is not None and self._owns_connection:
             self.conn.close()
-            self.conn = None
+        self.conn = None
+        if self.pool is not None:
+            self.pool.close()
         for repo in [self.evidence, self.facts, self.events, self.views_profiles, self.runtime]:
             repo.conn = None
 
@@ -1489,9 +1558,9 @@ class PostgresMemoryStore:
                 f"on conflict(topic_id) do update set {updates}",
                 list(values.values()),
             )
-            self.connect().commit()
+            self._commit_if_owner()
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1516,9 +1585,9 @@ class PostgresMemoryStore:
                 f"on conflict(phase_id) do update set {updates}",
                 list(values.values()),
             )
-            self.connect().commit()
+            self._commit_if_owner()
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1551,9 +1620,9 @@ class PostgresMemoryStore:
                 f"on conflict(node_id) do update set {updates}",
                 list(values.values()),
             )
-            self.connect().commit()
+            self._commit_if_owner()
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1580,10 +1649,10 @@ class PostgresMemoryStore:
                 ),
             )
             inserted = cursor.rowcount > 0
-            self.connect().commit()
+            self._commit_if_owner()
             return inserted
         except Exception:
-            self.connect().rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1759,9 +1828,9 @@ class PostgresMemoryStore:
             for table in scoped_tables:
                 cursor.execute(f"delete from {table} where {where}", params)
                 counts[table] = cursor.rowcount if cursor.rowcount >= 0 else 0
-            conn.commit()
+            self._commit_if_owner()
         except Exception:
-            conn.rollback()
+            self._rollback_if_owner()
             raise
         finally:
             cursor.close()
@@ -1876,6 +1945,14 @@ def _default_connect(dsn: str) -> Any:
             "or use the local SQLite backend."
         ) from exc
     return psycopg2.connect(dsn)
+
+
+def _is_lock_not_available(error: Exception) -> bool:
+    try:
+        from psycopg2.errors import LockNotAvailable
+    except ImportError:
+        return False
+    return isinstance(error, LockNotAvailable)
 
 
 def _split_sql_statements(sql: str) -> list[str]:

@@ -70,6 +70,7 @@ from fusion_memory.retrieval.structured_annotations import select_event_ordering
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer, UtilityTrainingReport
 from fusion_memory.retrieval.utility_scorer import utility_example
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
+from fusion_memory.storage.postgres_pool import PostgresConnectionPool
 from fusion_memory.storage.sqlite_store import SQLiteMemoryStore, dt_from_str
 from fusion_memory.api.service_helpers import (
     _source_coverage,
@@ -178,6 +179,8 @@ class MemoryService:
         storage_backend: str = "sqlite",
         store: Any | None = None,
         store_connect: Any | None = None,
+        postgres_pool: PostgresConnectionPool | None = None,
+        postgres_acquire_timeout_seconds: float = 5.0,
         query_intent_refiner: Any | None = None,
         query_intent_refiner_min_confidence: float = 0.70,
         query_intent_refiner_mode: str = "auto",
@@ -190,7 +193,13 @@ class MemoryService:
         elif storage_backend == "sqlite":
             self.store = SQLiteMemoryStore(db_path, embedder=embedder)
         elif storage_backend == "postgres":
-            self.store = PostgresMemoryStore(str(db_path), embedder=embedder, connect=store_connect)
+            self.store = PostgresMemoryStore(
+                str(db_path),
+                embedder=embedder,
+                connect=store_connect,
+                pool=postgres_pool,
+                acquire_timeout_seconds=postgres_acquire_timeout_seconds,
+            )
         else:
             raise ValueError(f"unsupported storage_backend: {storage_backend}")
         self.storage_backend = storage_backend
