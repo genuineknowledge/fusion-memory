@@ -8,6 +8,7 @@ from pathlib import Path
 from fusion_memory import MemoryService, Scope
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer
 from fusion_memory.storage.postgres_store import POSTGRES_TABLES, PostgresMigrationRunner
+from fusion_memory.storage.token_store import PostgresTokenStore
 
 
 class UtilityAndMigrationTests(unittest.TestCase):
@@ -112,3 +113,129 @@ class FakePostgresConnection:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_migration_runner_serializes_duplicate_startup_with_transaction_lock(tmp_path: Path) -> None:
+    migration_dir = tmp_path / "postgres"
+    migration_dir.mkdir()
+    migration = migration_dir / "001_test.sql"
+    migration.write_text("create table migration_test (id text);", encoding="utf-8")
+    state = SharedMigrationState()
+
+    first = PostgresMigrationRunner("postgresql://example/fusion", connect=lambda _dsn: StatefulMigrationConnection(state), migration_path=migration)
+    second = PostgresMigrationRunner("postgresql://example/fusion", connect=lambda _dsn: StatefulMigrationConnection(state), migration_path=migration)
+
+    first.migrate()
+    second.migrate()
+
+    assert state.executed_migration_bodies == 1
+    assert state.lock_count == 2
+    assert state.version_queries_after_lock
+
+
+def test_token_store_verification_updates_last_used_in_a_short_transaction() -> None:
+    connection = TokenStoreConnection()
+    store = PostgresTokenStore(lambda: connection, pepper="pepper")
+
+    record = store.verify_digest("digest")
+
+    assert record is not None
+    assert record.token_id == "token-1"
+    assert connection.committed is True
+    assert connection.rolled_back is False
+    assert connection.updated_last_used is True
+    assert connection.closed is True
+
+
+class SharedMigrationState:
+    def __init__(self) -> None:
+        self.versions: set[str] = set()
+        self.executed_migration_bodies = 0
+        self.lock_count = 0
+        self.version_queries_after_lock = True
+
+
+class StatefulMigrationConnection:
+    def __init__(self, state: SharedMigrationState) -> None:
+        self.state = state
+
+    def cursor(self):
+        return StatefulMigrationCursor(self.state)
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+class StatefulMigrationCursor:
+    def __init__(self, state: SharedMigrationState) -> None:
+        self.state = state
+        self._row = None
+        self._locked = False
+
+    def execute(self, statement: str, params=None) -> None:
+        normalized = " ".join(statement.split()).lower()
+        if "pg_advisory_xact_lock" in normalized:
+            self._locked = True
+            self.state.lock_count += 1
+        elif normalized.startswith("select 1 from fusion_memory_schema_migrations"):
+            self.state.version_queries_after_lock &= self._locked
+            version = params[0] if params else statement.split("'")[-2]
+            self._row = (1,) if version in self.state.versions else None
+        elif normalized.startswith("insert into fusion_memory_schema_migrations"):
+            version = params[0] if params else statement.split("'")[-2]
+            self.state.versions.add(version)
+        elif normalized.startswith("create table migration_test"):
+            self.state.executed_migration_bodies += 1
+
+    def fetchone(self):
+        return self._row
+
+    def close(self) -> None:
+        pass
+
+
+class TokenStoreConnection:
+    def __init__(self) -> None:
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+        self.updated_last_used = False
+
+    def cursor(self):
+        return TokenStoreCursor(self)
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TokenStoreCursor:
+    def __init__(self, conn: TokenStoreConnection) -> None:
+        self.conn = conn
+
+    def execute(self, statement: str, params=None) -> None:
+        if statement.strip().lower().startswith("update memory_api_tokens set last_used_at"):
+            self.conn.updated_last_used = True
+
+    def fetchone(self):
+        return (
+            "token-1",
+            "digest",
+            "user-a",
+            ["memory:read"],
+            None,
+            None,
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            None,
+        )
+
+    def close(self) -> None:
+        pass

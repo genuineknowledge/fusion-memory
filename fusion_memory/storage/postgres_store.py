@@ -93,6 +93,7 @@ class PostgresMigrationRunner:
         cursor = conn.cursor()
         applied_statements = 0
         try:
+            cursor.execute("select pg_advisory_xact_lock(hashtext('fusion_memory_schema_migrations'))")
             cursor.execute(
                 """
                 create table if not exists fusion_memory_schema_migrations (
