@@ -33,6 +33,45 @@ def test_batch_rejects_oversized_top_level_metadata(monkeypatch):
         _check_batch_payload_size([{"content": "ok"}], "batch-1", {"history": "x" * 100})
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"content": "ok", "role": ["user"]},
+        {"content": "ok", "source": {"path": "history.jsonl"}},
+        {"content": "ok", "source": {"path": "history.jsonl"}, "source_uri": "history://session-1"},
+        {"content": "ok", "source_uri": 7},
+        {"content": "ok", "timestamp": ["2026-07-20T12:00:00+00:00"]},
+        {"content": "ok", "turn_id": 3},
+        {"content": "ok", "timestamp": "not-a-timestamp"},
+    ],
+)
+def test_batch_rejects_malformed_optional_history_fields(message):
+    with pytest.raises(ValueError, match="must be a non-empty string|timestamp must be ISO-8601"):
+        _bounded_messages([message])
+
+
+def test_batch_normalizes_valid_history_source_alias_and_timestamp():
+    assert _bounded_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "remember this",
+                "source": "history://session-1",
+                "timestamp": "2026-07-20T12:00:00+00:00",
+                "turn_id": "turn-7",
+            }
+        ]
+    ) == [
+        {
+            "role": "assistant",
+            "content": "remember this",
+            "source_uri": "history://session-1",
+            "timestamp": "2026-07-20T12:00:00+00:00",
+            "turn_id": "turn-7",
+        }
+    ]
+
+
 @pytest.mark.anyio
 async def test_add_batch_reports_batch_id_count_and_add_result():
     class Service:

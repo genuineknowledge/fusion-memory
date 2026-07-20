@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -324,15 +325,36 @@ def _bounded_messages(value: Any) -> list[dict[str, Any]]:
         if unexpected:
             raise ValueError("unsupported message fields")
         content = _required_text(message.get("content"))
-        normalized = {key: value for key, value in message.items() if key in allowed_fields and key != "source"}
-        normalized["content"] = content
-        if "source" in message and "source_uri" not in normalized:
-            normalized["source_uri"] = message["source"]
+        normalized: dict[str, str] = {"content": content}
+        for field in ("role", "source_uri", "timestamp", "turn_id"):
+            if field not in message:
+                continue
+            field_value = _history_string(message[field], field)
+            if field == "timestamp":
+                _validate_history_timestamp(field_value)
+            normalized[field] = field_value
+        if "source" in message:
+            source = _history_string(message["source"], "source")
+            if "source_uri" not in normalized:
+                normalized["source_uri"] = source
         total_bytes += _json_byte_length(normalized)
         if total_bytes > max_bytes:
             raise ValueError("batch exceeds configured byte limit")
         messages.append(normalized)
     return messages
+
+
+def _history_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _validate_history_timestamp(value: str) -> None:
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO-8601") from exc
 
 
 def _bounded_batch_metadata(value: Any) -> dict[str, Any] | None:
