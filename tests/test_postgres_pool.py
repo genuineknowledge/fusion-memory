@@ -101,6 +101,22 @@ def test_write_operation_uses_authenticated_user_advisory_lock() -> None:
     ]
 
 
+@pytest.mark.parametrize("user_id", [None, ""])
+def test_write_operation_requires_an_authenticated_user_id(user_id: str | None) -> None:
+    connection = FakeConnection()
+    store = PostgresMemoryStore(
+        "dsn",
+        pool=PostgresConnectionPool("dsn", pool=FakeDriverPool(connection), max_connections=1),
+    )
+
+    with pytest.raises(ValueError, match="authenticated user_id"):
+        with store.operation(user_id=user_id, write=True):
+            pass
+
+    assert connection.commits == 0
+    assert connection.rollbacks == 0
+
+
 def test_pool_timeout_is_retryable() -> None:
     pool = PostgresConnectionPool("dsn", pool=FakeDriverPool(FakeConnection()), max_connections=1)
     assert pool._semaphore.acquire(blocking=False)

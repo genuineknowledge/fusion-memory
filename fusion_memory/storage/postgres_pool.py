@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import threading
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
+
+
+T = TypeVar("T")
 
 
 class PoolAcquireTimeout(RuntimeError):
@@ -70,3 +74,42 @@ class PostgresConnectionPool:
         # psycopg2.extensions.TRANSACTION_STATUS_INERROR is 3. Avoid importing
         # psycopg2 here so injected fake connections remain supported.
         return bool(get_status and get_status() == 3)
+
+
+class PostgresOperationExecutor:
+    """Run complete Postgres operations in a bounded synchronous worker pool.
+
+    Task 5 should create a fresh ``MemoryService(store=bound_store, ...)`` in
+    ``callback``. The callback then runs wholly inside one pooled transaction.
+    """
+
+    def __init__(self, store: Any, *, max_workers: int = 8, acquire_timeout_seconds: float = 5.0) -> None:
+        if max_workers < 1 or acquire_timeout_seconds <= 0:
+            raise ValueError("invalid Postgres operation executor bounds")
+        self._store = store
+        self._acquire_timeout_seconds = acquire_timeout_seconds
+        self._slots = threading.BoundedSemaphore(max_workers)
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="fusion-memory-pg")
+
+    def run(
+        self,
+        callback: Callable[[Any], T],
+        *,
+        user_id: str | None = None,
+        write: bool = False,
+    ) -> T:
+        """Execute ``callback(bound_store)`` after bounded worker acquisition."""
+        if not self._slots.acquire(timeout=self._acquire_timeout_seconds):
+            raise PoolAcquireTimeout("Postgres operation worker pool is exhausted")
+        try:
+            future = self._executor.submit(self._run_operation, callback, user_id, write)
+            return future.result()
+        finally:
+            self._slots.release()
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True)
+
+    def _run_operation(self, callback: Callable[[Any], T], user_id: str | None, write: bool) -> T:
+        with self._store.operation(user_id=user_id, write=write) as bound_store:
+            return callback(bound_store)

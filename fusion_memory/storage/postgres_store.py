@@ -1399,6 +1399,8 @@ class PostgresMemoryStore(_PostgresRepository):
     @contextmanager
     def operation(self, *, user_id: str | None = None, write: bool = False) -> Iterator["PostgresMemoryStore"]:
         """Run one logical request in a single Postgres transaction."""
+        if write and not (user_id and user_id.strip()):
+            raise ValueError("write operations require an authenticated user_id")
         if self.pool is None:
             connection_context = nullcontext(self.connect())
         else:
@@ -1406,7 +1408,7 @@ class PostgresMemoryStore(_PostgresRepository):
         with connection_context as connection:
             bound = self.for_connection(connection, manage_transaction=False)
             try:
-                if write and user_id:
+                if write:
                     self._acquire_user_write_lock(connection, user_id)
                 yield bound
                 connection.commit()
