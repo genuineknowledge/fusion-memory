@@ -324,6 +324,8 @@ def _bounded_messages(value: Any) -> list[dict[str, Any]]:
         unexpected = set(message) - allowed_fields
         if unexpected:
             raise ValueError("unsupported message fields")
+        if "source" in message and "source_uri" in message:
+            raise ValueError("provide only one of source or source_uri")
         content = _required_text(message.get("content"))
         normalized: dict[str, str] = {"content": content}
         for field in ("role", "source_uri", "timestamp", "turn_id"):

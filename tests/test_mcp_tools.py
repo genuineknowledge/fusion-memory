@@ -46,7 +46,7 @@ def test_batch_rejects_oversized_top_level_metadata(monkeypatch):
     ],
 )
 def test_batch_rejects_malformed_optional_history_fields(message):
-    with pytest.raises(ValueError, match="must be a non-empty string|timestamp must be ISO-8601"):
+    with pytest.raises(ValueError, match="must be a non-empty string|timestamp must be ISO-8601|only one of source or source_uri"):
         _bounded_messages([message])
 
 
@@ -70,6 +70,13 @@ def test_batch_normalizes_valid_history_source_alias_and_timestamp():
             "turn_id": "turn-7",
         }
     ]
+
+
+def test_batch_rejects_duplicate_source_aliases_before_byte_accounting(monkeypatch):
+    monkeypatch.setenv("FUSION_MEMORY_MCP_MAX_BATCH_BYTES", "64")
+
+    with pytest.raises(ValueError, match="only one of source or source_uri"):
+        _bounded_messages([{"content": "ok", "source": "x" * 100, "source_uri": "history://session-1"}])
 
 
 @pytest.mark.anyio
