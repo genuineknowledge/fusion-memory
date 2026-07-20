@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import anyio
+
 from fusion_memory import Scope
 from fusion_memory.alpha_beta import run_alpha, run_beta
 from fusion_memory.agent_installer import install_agent
@@ -38,6 +40,8 @@ from fusion_memory.product import (
 from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
+from fusion_memory.health import ProductionHealthRuntime, health_report, mcp_health_check, restart_unhealthy_units
+from fusion_memory.mcp_runtime import runtime_from_env
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
 from fusion_memory.storage.token_store import PostgresTokenStore, TokenRecord
 from fusion_memory.storage.postgres_verifier import verify_postgres_backend
@@ -242,6 +246,10 @@ def main() -> None:
     mcp_server.add_argument("--path", default="/mcp")
     mcp_server.add_argument("--public-url", default=os.getenv("FUSION_MEMORY_MCP_PUBLIC_URL"))
 
+    health = sub.add_parser("health", help="Check Postgres, model pools, and authenticated MCP liveness")
+    health.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    health.add_argument("--restart-unhealthy", action="store_true", help="Restart configured unhealthy user units")
+
     token = sub.add_parser("token", help="Manage MCP bearer tokens")
     token_sub = token.add_subparsers(dest="token_command", required=True)
     token_create_cmd = token_sub.add_parser("create", help="Create a bearer token")
@@ -401,6 +409,27 @@ def main() -> None:
                 path=args.path,
                 public_url=args.public_url,
             )
+        if args.command == "health":
+            runtime, pool = runtime_from_env()
+            try:
+                report = health_report(
+                    ProductionHealthRuntime(
+                        runtime,
+                        pool,
+                        timeout_seconds=_float_env("FUSION_MEMORY_HEALTH_TIMEOUT_SECONDS", 5.0),
+                    )
+                )
+                report["mcp"] = anyio.run(mcp_health_check)
+                report["ok"] = bool(report["ok"]) and bool(report["mcp"]["ok"])
+                if args.restart_unhealthy:
+                    report["restarts"] = restart_unhealthy_units(report)
+                return _print_product_result(report, json_output=args.json)
+            finally:
+                close = getattr(runtime, "close", None)
+                if callable(close):
+                    close()
+                elif callable(getattr(pool, "close", None)):
+                    pool.close()
         if args.command == "token":
             store = _token_store_from_args(args)
             if args.token_command == "create":

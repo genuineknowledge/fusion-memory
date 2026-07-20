@@ -1,0 +1,13 @@
+[Unit]
+Description=Fusion Memory dependency health and recovery check
+Wants=fusion-memory-mcp.service
+After=fusion-memory-mcp.service fusion-memory-embedding@default.service fusion-memory-reranker@default.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/fusion-memory/mcp.env
+ExecStart=%h/.local/bin/fusion-memory health --restart-unhealthy
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal

@@ -209,6 +209,115 @@ python -m fusion_memory.cli migrate-postgres postgresql://user:pass@localhost:54
 python -m fusion_memory.cli verify-postgres postgresql://user:pass@localhost:5432/fusion_memory
 ```
 
+## Remote MCP deployment with systemd
+
+Production deployment uses a fresh Postgres/pgvector database and user-level
+systemd units. It does not import SQLite data and does not start the legacy REST
+server. MCP Streamable HTTP at `/mcp` is the only public memory transport.
+
+Install the units and allow the user manager to survive SSH disconnects and
+restart services after failures:
+
+```bash
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/fusion-memory"
+cp deploy/systemd/* "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+sudo loginctl enable-linger <user>
+```
+
+Create one protected environment file per model worker. For the default
+instances used by the MCP unit, create `embedding-default.env` and
+`reranker-default.env` under `~/.config/fusion-memory/` with the appropriate
+local model paths:
+
+```ini
+FUSION_MEMORY_MODEL_HOST=127.0.0.1
+FUSION_MEMORY_MODEL_PORT=<worker-port>
+FUSION_MEMORY_MODEL_PATH=<absolute-model-path>
+FUSION_MEMORY_MODEL_DEVICE=<cpu-or-device>
+FUSION_MEMORY_MODEL_MAX_CONCURRENCY=1
+```
+
+Create `~/.config/fusion-memory/mcp.env` with the fresh Postgres DSN, token
+pepper, local model endpoints, MCP bind settings and health configuration. The
+health bearer token must have only the `memory:read` scope. The restart
+allowlists name the only units the timer may restart:
+
+```ini
+FUSION_MEMORY_PG_DSN=<postgres-dsn>
+FUSION_MEMORY_TOKEN_PEPPER=<random-secret>
+FUSION_MEMORY_MCP_PUBLIC_URL=https://memory.example.com/mcp
+FUSION_MEMORY_MCP_HOST=127.0.0.1
+FUSION_MEMORY_MCP_PORT=8700
+FUSION_MEMORY_EMBEDDING_PROVIDER=http
+FUSION_MEMORY_EMBEDDING_ENDPOINTS=http://127.0.0.1:<embedding-port>/v1/embeddings
+FUSION_MEMORY_RERANKER_PROVIDER=http
+FUSION_MEMORY_RERANKER_ENDPOINTS=http://127.0.0.1:<reranker-port>/v1/rerank
+FUSION_MEMORY_HEALTH_MCP_URL=http://127.0.0.1:8700/mcp
+FUSION_MEMORY_HEALTH_TOKEN=<read-only-health-token>
+FUSION_MEMORY_MCP_UNIT=fusion-memory-mcp.service
+FUSION_MEMORY_EMBEDDING_UNITS=fusion-memory-embedding@default.service
+FUSION_MEMORY_RERANKER_UNITS=fusion-memory-reranker@default.service
+```
+
+Protect every environment file because it contains credentials or operational
+configuration:
+
+```bash
+chmod 600 "$HOME/.config/fusion-memory/"*.env
+```
+
+Initialize only a fresh Postgres database, then create bearer tokens. Capture
+new token plaintext once into the protected environment file that consumes it;
+never commit it, pass it on a process command line, or write it to logs:
+
+```bash
+docker compose -f deploy/docker-compose.postgres.yml up -d
+fusion-memory migrate-postgres "$FUSION_MEMORY_PG_DSN"
+fusion-memory token create --user-id <user-id> --scopes memory:read,memory:write,memory:sync
+fusion-memory token create --user-id <health-user-id> --scopes memory:read
+systemctl --user enable --now fusion-memory-embedding@default.service
+systemctl --user enable --now fusion-memory-reranker@default.service
+curl --fail http://127.0.0.1:<embedding-port>/health
+curl --fail http://127.0.0.1:<reranker-port>/health
+systemctl --user enable --now fusion-memory-mcp.service
+```
+
+Rotate a token by creating its replacement, updating the protected consumer
+environment file, restarting that consumer, and then revoking the old token:
+
+```bash
+fusion-memory token list --user-id <user-id>
+fusion-memory token revoke --token-id <old-token-id>
+```
+
+For each Haitun session, create
+`~/.config/fusion-memory/history-sync-<instance>.env` with
+`FUSION_MEMORY_HAITUN_WORKSPACE`, `FUSION_MEMORY_SESSION_ID`,
+`FUSION_MEMORY_MCP_URL`, `FUSION_MEMORY_TOKEN`, and
+`FUSION_MEMORY_WORKSPACE_ID`. The unit reads the token only from this protected
+file and runs `sync-haitun-history` in foreground watch mode:
+
+```bash
+systemctl --user enable --now fusion-memory-history-sync@<instance>.service
+```
+
+Enable the recovery timer after MCP and model workers are healthy. Each run
+performs bounded Postgres and endpoint checks plus an authenticated local MCP
+initialize/ping. It restarts only failed units named in the three allowlist
+variables above:
+
+```bash
+systemctl --user enable --now fusion-memory-health.timer
+fusion-memory health --json
+journalctl --user -u fusion-memory-mcp.service -u fusion-memory-health.service
+```
+
+Terminate TLS at a reverse proxy and proxy only the exact `/mcp` route to
+`http://127.0.0.1:8700/mcp`. Do not expose model-worker ports, do not proxy
+legacy REST routes, do not start `fusion-memory-server`, and do not run any
+SQLite import command.
+
 常驻 HTTP service wrapper：
 
 ```bash

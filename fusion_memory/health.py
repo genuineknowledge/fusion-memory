@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import subprocess
+import time
+from typing import Any, Protocol
+
+import anyio
+
+from fusion_memory.mcp_client import MemoryMcpClient
+
+
+class HealthRuntime(Protocol):
+    def postgres_health(self) -> dict[str, object]: ...
+
+    def embedding_health(self) -> dict[str, object]: ...
+
+    def reranker_health(self) -> dict[str, object]: ...
+
+    def background_health(self) -> dict[str, object]: ...
+
+
+def health_report(runtime: HealthRuntime) -> dict[str, dict[str, object] | bool]:
+    """Collect bounded, secret-free health results from a runtime adapter."""
+    checks: dict[str, dict[str, object]] = {}
+    for name in ("postgres", "embedding", "reranker", "background"):
+        try:
+            result = getattr(runtime, f"{name}_health")()
+            if not isinstance(result, dict):
+                raise TypeError("health check must return a dictionary")
+            checks[name] = dict(result)
+        except Exception as exc:
+            checks[name] = {"ok": False, "error": type(exc).__name__}
+    return {"ok": all(bool(check.get("ok")) for check in checks.values()), **checks}
+
+
+class ProductionHealthRuntime:
+    """Health adapter around the production MCP runtime and bounded PG pool."""
+
+    def __init__(self, runtime: Any, postgres_pool: Any, *, timeout_seconds: float = 5.0) -> None:
+        self.runtime = runtime
+        self.postgres_pool = postgres_pool
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+
+    def postgres_health(self) -> dict[str, object]:
+        started = time.perf_counter()
+        with self.postgres_pool.connection(self.timeout_seconds) as connection:
+            cursor = connection.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                row = cursor.fetchone() if callable(getattr(cursor, "fetchone", None)) else (1,)
+            finally:
+                close = getattr(cursor, "close", None)
+                if callable(close):
+                    close()
+                rollback = getattr(connection, "rollback", None)
+                if callable(rollback):
+                    rollback()
+        return {"ok": bool(row and row[0] == 1), "latency_ms": (time.perf_counter() - started) * 1000}
+
+    def embedding_health(self) -> dict[str, object]:
+        return self._endpoint_health(0, "embedding")
+
+    def reranker_health(self) -> dict[str, object]:
+        return self._endpoint_health(1, "reranker")
+
+    def background_health(self) -> dict[str, object]:
+        interval = float(getattr(self.runtime, "health_check_interval_seconds", 0.0))
+        pools = tuple(getattr(self.runtime, "endpoint_pools", ()))
+        tasks = [
+            {
+                "name": f"endpoint-health-{index}",
+                "ok": callable(getattr(pool, "healthy_endpoints", None)),
+            }
+            for index, pool in enumerate(pools)
+        ]
+        return {"ok": interval > 0 and bool(tasks) and all(task["ok"] for task in tasks), "tasks": tasks, "interval_seconds": interval}
+
+    def _endpoint_health(self, index: int, name: str) -> dict[str, object]:
+        pools = tuple(getattr(self.runtime, "endpoint_pools", ()))
+        if index >= len(pools):
+            return {"ok": False, "healthy_endpoints": 0, "endpoints": [], "error": f"{name}_pool_missing"}
+        pool = pools[index]
+        try:
+            healthy = list(pool.healthy_endpoints())
+            snapshot = list(pool.snapshot()) if callable(getattr(pool, "snapshot", None)) else []
+            return {"ok": bool(healthy), "healthy_endpoints": len(healthy), "endpoints": snapshot}
+        except Exception as exc:
+            return {"ok": False, "healthy_endpoints": 0, "endpoints": [], "error": type(exc).__name__}
+
+
+async def mcp_health_check(
+    url: str | None = None,
+    token: str | None = None,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object]:
+    """Authenticate, initialize, and ping the local MCP endpoint."""
+    endpoint = (url if url is not None else os.getenv("FUSION_MEMORY_HEALTH_MCP_URL", "")).strip()
+    bearer = (token if token is not None else os.getenv("FUSION_MEMORY_HEALTH_TOKEN", "")).strip()
+    if not endpoint or not bearer:
+        return {"ok": False, "error": "health_mcp_configuration_missing"}
+    client = MemoryMcpClient(endpoint, bearer, "__health__", "__health__", timeout_seconds=timeout_seconds)
+    try:
+        ping = getattr(client, "ping", None)
+        if callable(ping):
+            await ping()
+        else:
+            session = await client._ensure_session()
+            await session.send_ping()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    finally:
+        await client.close()
+
+
+_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
+
+
+def restart_unhealthy_units(report: dict[str, Any]) -> dict[str, object]:
+    """Restart only failed units explicitly named in protected environment config."""
+    requested: list[str] = []
+    if not bool(report.get("embedding", {}).get("ok")):
+        requested.extend(_configured_units("FUSION_MEMORY_EMBEDDING_UNITS"))
+    if not bool(report.get("reranker", {}).get("ok")):
+        requested.extend(_configured_units("FUSION_MEMORY_RERANKER_UNITS"))
+    if any(not bool(report.get(name, {}).get("ok")) for name in ("postgres", "background", "mcp")):
+        requested.extend(_configured_units("FUSION_MEMORY_MCP_UNIT"))
+
+    restarts: list[dict[str, object]] = []
+    for unit in dict.fromkeys(requested):
+        completed = subprocess.run(["systemctl", "--user", "restart", unit], check=False, capture_output=True, text=True)
+        restarts.append({"unit": unit, "ok": completed.returncode == 0, "returncode": completed.returncode})
+    return {"ok": all(bool(item["ok"]) for item in restarts), "restarted": restarts}
+
+
+def _configured_units(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    values = shlex.split(raw) if name != "FUSION_MEMORY_MCP_UNIT" else [raw.strip()] if raw.strip() else []
+    return [value for value in values if _UNIT_RE.fullmatch(value)]
+
+
+def run_health(*, restart_unhealthy: bool = False) -> dict[str, object]:
+    from fusion_memory.mcp_runtime import runtime_from_env
+
+    runtime, pool = runtime_from_env()
+    try:
+        report: dict[str, object] = health_report(
+            ProductionHealthRuntime(
+                runtime,
+                pool,
+                timeout_seconds=float(os.getenv("FUSION_MEMORY_HEALTH_TIMEOUT_SECONDS", "5")),
+            )
+        )
+        report["mcp"] = anyio.run(mcp_health_check)
+        report["ok"] = bool(report["ok"]) and bool(report["mcp"]["ok"])
+        if restart_unhealthy:
+            report["restarts"] = restart_unhealthy_units(report)
+        return report
+    finally:
+        close = getattr(runtime, "close", None)
+        if callable(close):
+            close()
+        elif callable(getattr(pool, "close", None)):
+            pool.close()

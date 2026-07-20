@@ -1,0 +1,16 @@
+[Unit]
+Description=Fusion Memory reranker worker (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/fusion-memory/reranker-%i.env
+ExecStart=%h/.local/bin/fusion-memory reranker-server --host ${FUSION_MEMORY_MODEL_HOST} --port ${FUSION_MEMORY_MODEL_PORT} --model ${FUSION_MEMORY_MODEL_PATH} --device ${FUSION_MEMORY_MODEL_DEVICE} --max-concurrency ${FUSION_MEMORY_MODEL_MAX_CONCURRENCY}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

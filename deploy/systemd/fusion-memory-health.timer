@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Fusion Memory health and recovery checks
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=fusion-memory-health.service
+
+[Install]
+WantedBy=timers.target
