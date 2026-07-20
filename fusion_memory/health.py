@@ -149,7 +149,8 @@ def restart_unhealthy_units(report: dict[str, Any]) -> dict[str, object]:
         raw_failed = details.get("failed_units")
         if not raw_failed:
             raw_failed = _failed_units(component, list(details.get("endpoints", []))) if isinstance(details.get("endpoints", []), list) else []
-        failed = [unit for unit in raw_failed if isinstance(unit, str) and _UNIT_RE.fullmatch(unit)]
+        allowed = set(units)
+        failed = [unit for unit in raw_failed if isinstance(unit, str) and _UNIT_RE.fullmatch(unit) and unit in allowed]
         if failed:
             requested.extend(failed)
         elif len(units) == 1:

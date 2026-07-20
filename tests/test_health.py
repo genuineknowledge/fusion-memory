@@ -145,6 +145,24 @@ def test_restart_unhealthy_rejects_malformed_allowlist_quoting(monkeypatch):
     assert result["configuration_errors"]
 
 
+def test_restart_unhealthy_keeps_failed_units_inside_allowlist(monkeypatch):
+    from fusion_memory.health import restart_unhealthy_units
+
+    monkeypatch.setenv("FUSION_MEMORY_EMBEDDING_UNITS", "fusion-memory-embedding@a.service fusion-memory-embedding@b.service")
+    with patch("fusion_memory.health.subprocess.run") as run:
+        result = restart_unhealthy_units(
+            {
+                "embedding": {"ok": False, "failed_units": ["untrusted.service"]},
+                "reranker": {"ok": True},
+                "postgres": {"ok": True},
+                "background": {"ok": True},
+            }
+        )
+    run.assert_not_called()
+    assert result["restarted"] == []
+    assert result["skipped"]
+
+
 def test_mcp_health_check_requires_background_liveness(monkeypatch):
     from fusion_memory import health
 
