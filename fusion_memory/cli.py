@@ -39,6 +39,7 @@ from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
+from fusion_memory.storage.token_store import PostgresTokenStore, TokenRecord
 from fusion_memory.storage.postgres_verifier import verify_postgres_backend
 
 sync_haitun_history_once = sync_history_once
@@ -230,6 +231,20 @@ def main() -> None:
     pg_verify.add_argument("dsn", help="Postgres DSN, for example postgresql://user:pass@localhost:5432/fusion_memory")
     pg_verify.add_argument("--skip-migrate", action="store_true", help="Skip migration and only run the service smoke")
 
+    token = sub.add_parser("token", help="Manage MCP bearer tokens")
+    token_sub = token.add_subparsers(dest="token_command", required=True)
+    token_create_cmd = token_sub.add_parser("create", help="Create a bearer token")
+    _add_token_database_args(token_create_cmd)
+    token_create_cmd.add_argument("--user-id", required=True)
+    token_create_cmd.add_argument("--scopes", required=True)
+    token_create_cmd.add_argument("--expires-at", default=None)
+    token_list_cmd = token_sub.add_parser("list", help="List bearer tokens")
+    _add_token_database_args(token_list_cmd)
+    token_list_cmd.add_argument("--user-id", required=True)
+    token_revoke_cmd = token_sub.add_parser("revoke", help="Revoke a bearer token")
+    _add_token_database_args(token_revoke_cmd)
+    token_revoke_cmd.add_argument("--token-id", required=True)
+
     _rewrite_compat_command_aliases(sys.argv)
     args = parser.parse_args()
     try:
@@ -354,6 +369,17 @@ def main() -> None:
             report = verify_postgres_backend(args.dsn, migrate=not args.skip_migrate)
             print(json.dumps(_jsonable(report), ensure_ascii=False, indent=2))
             return
+        if args.command == "token":
+            store = _token_store_from_args(args)
+            if args.token_command == "create":
+                expires_at = datetime.fromisoformat(args.expires_at) if args.expires_at else None
+                plaintext = token_create(store, args.user_id, _parse_token_scopes(args.scopes), expires_at)
+                print(json.dumps({"token": plaintext}, ensure_ascii=False))
+            elif args.token_command == "list":
+                print(json.dumps(token_list(store, args.user_id), default=_jsonable, ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps({"revoked": token_revoke(store, args.token_id)}, ensure_ascii=False))
+            return
 
         scope = Scope(
             workspace_id=args.workspace_id,
@@ -440,6 +466,73 @@ def _jsonable(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+_VALID_TOKEN_SCOPES = {"memory:read", "memory:write", "memory:sync"}
+
+
+def token_create(store: PostgresTokenStore, user_id: str, scopes: tuple[str, ...], expires_at: datetime | None) -> str:
+    validate_token_scopes(scopes)
+    plaintext, _record = store.create_token(user_id, scopes, expires_at)
+    return plaintext
+
+
+def token_list(store: PostgresTokenStore, user_id: str) -> list[dict[str, object]]:
+    return [_token_record_output(record) for record in store.list_tokens(user_id)]
+
+
+def token_revoke(store: PostgresTokenStore, token_id: str) -> bool:
+    return store.revoke_token(token_id)
+
+
+def validate_token_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
+    unknown = set(scopes) - _VALID_TOKEN_SCOPES
+    if unknown:
+        raise ValueError(f"unsupported token scopes: {', '.join(sorted(unknown))}")
+    if "memory:sync" in scopes and "memory:write" not in scopes:
+        raise ValueError("memory:sync requires memory:write")
+    return scopes
+
+
+def _token_record_output(record: TokenRecord) -> dict[str, object]:
+    return {
+        "token_id": record.token_id,
+        "user_id": record.user_id,
+        "scopes": list(record.scopes),
+        "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+        "revoked_at": record.revoked_at.isoformat() if record.revoked_at else None,
+        "created_at": record.created_at.isoformat(),
+        "last_used_at": record.last_used_at.isoformat() if record.last_used_at else None,
+    }
+
+
+def _parse_token_scopes(value: str) -> tuple[str, ...]:
+    scopes = tuple(scope.strip() for scope in value.split(",") if scope.strip())
+    if not scopes:
+        raise ValueError("at least one scope is required")
+    return validate_token_scopes(scopes)
+
+
+def _add_token_database_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--dsn", default=None, help="Postgres DSN; defaults to FUSION_MEMORY_PG_DSN")
+
+
+def _token_store_from_args(args: argparse.Namespace) -> PostgresTokenStore:
+    dsn = args.dsn or os.getenv("FUSION_MEMORY_PG_DSN")
+    pepper = os.getenv("FUSION_MEMORY_TOKEN_PEPPER")
+    if not dsn:
+        raise ValueError("Postgres DSN is required via --dsn or FUSION_MEMORY_PG_DSN")
+    if not pepper:
+        raise ValueError("FUSION_MEMORY_TOKEN_PEPPER is required")
+
+    def connect():
+        try:
+            import psycopg2
+        except ImportError as exc:
+            raise RuntimeError("Postgres token commands require fusion-memory[postgres]") from exc
+        return psycopg2.connect(dsn)
+
+    return PostgresTokenStore(connect, pepper=pepper)
 
 
 def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:

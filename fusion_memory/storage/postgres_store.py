@@ -89,13 +89,36 @@ class PostgresMigrationRunner:
         return self.conn
 
     def migrate(self) -> PostgresMigrationReport:
-        sql = self.migration_path.read_text(encoding="utf-8")
-        statements = _split_sql_statements(sql)
         conn = self.connect()
         cursor = conn.cursor()
+        applied_statements = 0
         try:
-            for statement in statements:
-                cursor.execute(statement)
+            cursor.execute(
+                """
+                create table if not exists fusion_memory_schema_migrations (
+                    version text primary key,
+                    applied_at timestamptz not null default now()
+                )
+                """
+            )
+            for migration in sorted(self.migration_path.parent.glob("*.sql")):
+                _execute_migration_query(
+                    cursor,
+                    "select 1 from fusion_memory_schema_migrations where version = %s",
+                    (migration.name,),
+                )
+                row = cursor.fetchone() if hasattr(cursor, "fetchone") else None
+                if row is not None:
+                    continue
+                statements = _split_sql_statements(migration.read_text(encoding="utf-8"))
+                for statement in statements:
+                    cursor.execute(statement)
+                _execute_migration_query(
+                    cursor,
+                    "insert into fusion_memory_schema_migrations (version) values (%s)",
+                    (migration.name,),
+                )
+                applied_statements += len(statements)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -105,7 +128,7 @@ class PostgresMigrationRunner:
         return PostgresMigrationReport(
             backend="postgres",
             migration_path=str(self.migration_path),
-            applied_statements=len(statements),
+            applied_statements=applied_statements,
             tables=list(POSTGRES_TABLES),
         )
 
@@ -1832,6 +1855,15 @@ class PostgresMemoryStore:
         error: str | None = None,
     ) -> dict[str, Any] | None:
         return self.runtime.update_background_task(task_id, status=status, result=result, error=error)
+
+
+def _execute_migration_query(cursor: Any, statement: str, params: tuple[str]) -> None:
+    try:
+        cursor.execute(statement, params)
+    except TypeError:
+        # Existing injected migration cursors only accept a single SQL argument.
+        literal = params[0].replace("'", "''")
+        cursor.execute(statement.replace("%s", f"'{literal}'"))
 
 
 def _default_connect(dsn: str) -> Any:
