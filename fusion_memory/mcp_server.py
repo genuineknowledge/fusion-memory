@@ -25,6 +25,7 @@ from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
 from fusion_memory.storage.postgres_pool import PoolAcquireTimeout, RetryableOperationError
 from fusion_memory.storage.postgres_store import PostgresBackendUnavailable
 from fusion_memory.storage.token_store import PostgresTokenStore
+from fusion_memory.storage.batch_ledger import BatchIdConflictError
 
 
 MAX_SEARCH_LIMIT = 32
@@ -205,6 +206,8 @@ async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) ->
             _check_batch_payload_size(messages, batch_id, metadata)
             result = await runtime.add_batch(scope, messages, batch_id, metadata)
         return {"ok": True, "result": _json_safe(result)}
+    except BatchIdConflictError:
+        return _error("batch_id_conflict", retryable=False)
     except (ValueError, TypeError) as exc:
         return _error("invalid_request", retryable=False, message=str(exc))
     except AuthorizationError:

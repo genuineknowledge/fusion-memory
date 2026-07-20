@@ -319,6 +319,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             if args.background:
@@ -339,6 +340,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(
@@ -353,6 +355,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(status_history_watcher_daemon(config), json_output=args.json)
@@ -361,6 +364,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(stop_history_watcher_daemon(config), json_output=args.json)
@@ -566,7 +570,7 @@ def _token_store_from_args(args: argparse.Namespace) -> PostgresTokenStore:
 def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true")
@@ -577,7 +581,7 @@ def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:
 def _add_haitun_history_watcher_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--json", action="store_true")
 
@@ -585,8 +589,23 @@ def _add_haitun_history_watcher_args(parser: argparse.ArgumentParser) -> None:
 def _add_haitun_history_watcher_status_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--json", action="store_true")
+
+
+def _add_haitun_mcp_url_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mcp-url",
+        dest="mcp_url",
+        default=None,
+        help="Fusion Memory MCP URL; defaults to FUSION_MEMORY_MCP_URL",
+    )
+    parser.add_argument(
+        "--memory-url",
+        dest="memory_url",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
 
 def _rewrite_compat_command_aliases(argv: list[str]) -> None:

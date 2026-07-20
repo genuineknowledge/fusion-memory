@@ -50,6 +50,7 @@ POSTGRES_TABLES = [
     "chronology_phases",
     "chronology_event_nodes",
     "chronology_event_edges",
+    "fusion_memory_mcp_batches",
 ]
 
 

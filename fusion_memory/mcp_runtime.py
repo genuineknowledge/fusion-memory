@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import asdict, is_dataclass
 from contextlib import asynccontextmanager
 from typing import Any, Callable
 
@@ -21,6 +22,7 @@ from fusion_memory.core.runtime_config import (
 )
 from fusion_memory.storage.postgres_pool import PostgresConnectionPool, PostgresOperationExecutor
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
+from fusion_memory.storage.batch_ledger import BatchIngestor, BatchLedger
 
 
 class FusionMemoryRuntime:
@@ -46,6 +48,7 @@ class FusionMemoryRuntime:
         self.health_check_interval_seconds = health_check_interval_seconds
         self._close_lock = threading.Lock()
         self._closed = False
+        self._fallback_batch_ledger = _MemoryBatchLedger()
 
     async def add(self, scope: Scope, content: str, source: str | None) -> Any:
         return await self._run(
@@ -83,16 +86,33 @@ class FusionMemoryRuntime:
         # The server, rather than an arbitrary message payload, owns the
         # idempotency/provenance identifier recorded with this operation.
         provenance["batch_id"] = batch_id
-        add_result = await self._run(
-            scope,
-            write=True,
-            operation=lambda service: service.add({"messages": messages}, scope, metadata=provenance),
-        )
-        return {
-            "batch_id": batch_id,
-            "message_count": len(messages),
-            "add_result": add_result,
-        }
+        def operation(service: MemoryService) -> Any:
+            store = getattr(service, "store", None)
+            connection = getattr(store, "conn", None)
+            if connection is None and store is not None:
+                connect = getattr(store, "connect", None)
+                if callable(connect):
+                    connection = connect()
+            ledger = BatchLedger(connection) if connection is not None else self._fallback_batch_ledger
+
+            def write_batch(batch_messages: list[dict[str, Any]], batch_metadata: dict[str, Any] | None) -> dict[str, Any]:
+                result = service.add({"messages": batch_messages}, scope, metadata=batch_metadata)
+                if is_dataclass(result):
+                    return asdict(result)
+                if not isinstance(result, dict):
+                    raise TypeError("memory add batch result must be a dictionary")
+                return result
+
+            ingestor = BatchIngestor(ledger=ledger, write_messages=write_batch)
+            result = ingestor.ingest(
+                user_id=scope.user_id or "",
+                batch_id=batch_id,
+                messages=messages,
+                metadata=provenance,
+            )
+            return {"batch_id": batch_id, "message_count": len(messages), "add_result": result}
+
+        return await self._run(scope, write=True, operation=operation)
 
     async def _run(self, scope: Scope, *, write: bool, operation: Callable[[MemoryService], Any]) -> Any:
         def execute() -> Any:
@@ -219,3 +239,28 @@ def _request_local_adapter(shared: Any, factory: Callable[[], Any]) -> Any:
     if callable(request_local):
         return request_local()
     return factory()
+
+
+class _MemoryBatchLedger:
+    """Fallback ledger for database-free unit fakes; Postgres uses BatchLedger."""
+
+    def __init__(self) -> None:
+        self._rows: dict[tuple[str, str], tuple[str, dict[str, Any] | None, bool]] = {}
+        self._lock = threading.Lock()
+
+    def claim_or_get(self, user_id: str, batch_id: str, request_hash: str):
+        from fusion_memory.storage.batch_ledger import BatchClaim, BatchIdConflictError
+
+        with self._lock:
+            row = self._rows.get((user_id, batch_id))
+            if row is None:
+                self._rows[(user_id, batch_id)] = (request_hash, None, False)
+                return BatchClaim(False, None)
+            if row[0] != request_hash:
+                raise BatchIdConflictError("batch_id_conflict")
+            return BatchClaim(row[2], row[1])
+
+    def complete(self, user_id: str, batch_id: str, result: dict[str, Any]) -> None:
+        with self._lock:
+            request_hash, _, _ = self._rows[(user_id, batch_id)]
+            self._rows[(user_id, batch_id)] = (request_hash, result, True)
