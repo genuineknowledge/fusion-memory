@@ -236,6 +236,12 @@ def main() -> None:
     reranker_server = sub.add_parser("reranker-server", help="Run one long-lived local reranker model server")
     _add_model_server_args(reranker_server)
 
+    mcp_server = sub.add_parser("mcp-server", help="Run the authenticated Fusion Memory MCP server")
+    mcp_server.add_argument("--host", default="127.0.0.1")
+    mcp_server.add_argument("--port", type=int, default=8700)
+    mcp_server.add_argument("--path", default="/mcp")
+    mcp_server.add_argument("--public-url", default=os.getenv("FUSION_MEMORY_MCP_PUBLIC_URL"))
+
     token = sub.add_parser("token", help="Manage MCP bearer tokens")
     token_sub = token.add_subparsers(dest="token_command", required=True)
     token_create_cmd = token_sub.add_parser("create", help="Create a bearer token")
@@ -382,6 +388,15 @@ def main() -> None:
             from fusion_memory.model_server import run_reranker_server
 
             return run_reranker_server(args.host, args.port, args.model, args.device, args.max_concurrency)
+        if args.command == "mcp-server":
+            from fusion_memory.mcp_server import run_mcp_server
+
+            return run_mcp_server(
+                host=args.host,
+                port=args.port,
+                path=args.path,
+                public_url=args.public_url,
+            )
         if args.command == "token":
             store = _token_store_from_args(args)
             if args.token_command == "create":

@@ -1389,6 +1389,7 @@ class PostgresMemoryStore(_PostgresRepository):
         self.lock_timeout_seconds = lock_timeout_seconds
         self.conn: Any | None = None
         self._owns_connection = True
+        self._pool_closed = False
         shared_connect = lambda dsn: self.connect()
         self.evidence = PostgresEvidenceRepository(dsn, connect=shared_connect, embedder=self.embedder)
         self.facts = PostgresFactRepository(dsn, connect=shared_connect, embedder=self.embedder)
@@ -1453,8 +1454,9 @@ class PostgresMemoryStore(_PostgresRepository):
         if self.conn is not None and self._owns_connection:
             self.conn.close()
         self.conn = None
-        if self.pool is not None:
+        if self.pool is not None and not self._pool_closed:
             self.pool.close()
+            self._pool_closed = True
         for repo in [self.evidence, self.facts, self.events, self.views_profiles, self.runtime]:
             repo.conn = None
 

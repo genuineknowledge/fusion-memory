@@ -37,8 +37,9 @@ class PostgresTokenStore:
         token_id = secrets.token_urlsafe(16)
         digest = token_digest(token, self._pepper)
         conn = self._connection_factory()
-        cursor = conn.cursor()
+        cursor = None
         try:
+            cursor = conn.cursor()
             cursor.execute(
                 """
                 insert into memory_api_tokens (token_id, token_hash, user_id, scopes, expires_at)
@@ -54,13 +55,17 @@ class PostgresTokenStore:
             conn.rollback()
             raise
         finally:
-            cursor.close()
-            conn.close()
+            try:
+                if cursor is not None:
+                    cursor.close()
+            finally:
+                conn.close()
 
     def verify_digest(self, digest: str) -> TokenRecord | None:
         conn = self._connection_factory()
-        cursor = conn.cursor()
+        cursor = None
         try:
+            cursor = conn.cursor()
             cursor.execute(
                 """
                 select token_id, token_hash, user_id, scopes, expires_at, revoked_at, created_at, last_used_at
@@ -84,13 +89,17 @@ class PostgresTokenStore:
             conn.rollback()
             raise
         finally:
-            cursor.close()
-            conn.close()
+            try:
+                if cursor is not None:
+                    cursor.close()
+            finally:
+                conn.close()
 
     def list_tokens(self, user_id: str) -> list[TokenRecord]:
         conn = self._connection_factory()
-        cursor = conn.cursor()
+        cursor = None
         try:
+            cursor = conn.cursor()
             cursor.execute(
                 """
                 select token_id, token_hash, user_id, scopes, expires_at, revoked_at, created_at, last_used_at
@@ -105,13 +114,17 @@ class PostgresTokenStore:
             conn.rollback()
             raise
         finally:
-            cursor.close()
-            conn.close()
+            try:
+                if cursor is not None:
+                    cursor.close()
+            finally:
+                conn.close()
 
     def revoke_token(self, token_id: str) -> bool:
         conn = self._connection_factory()
-        cursor = conn.cursor()
+        cursor = None
         try:
+            cursor = conn.cursor()
             cursor.execute(
                 "update memory_api_tokens set revoked_at = now() where token_id = %s and revoked_at is null",
                 (token_id,),
@@ -123,8 +136,11 @@ class PostgresTokenStore:
             conn.rollback()
             raise
         finally:
-            cursor.close()
-            conn.close()
+            try:
+                if cursor is not None:
+                    cursor.close()
+            finally:
+                conn.close()
 
 
 def _record_from_row(row: Any) -> TokenRecord:

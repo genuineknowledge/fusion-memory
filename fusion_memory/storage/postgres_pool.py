@@ -37,6 +37,8 @@ class PostgresConnectionPool:
         self.dsn = dsn
         self.max_connections = max_connections
         self._semaphore = threading.BoundedSemaphore(max_connections)
+        self._close_lock = threading.Lock()
+        self._closed = False
         if pool is None:
             try:
                 from psycopg2.pool import ThreadedConnectionPool
@@ -64,6 +66,10 @@ class PostgresConnectionPool:
         self._pool.putconn(connection, close=self._connection_is_broken(connection))
 
     def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         self._pool.closeall()
 
     @staticmethod
