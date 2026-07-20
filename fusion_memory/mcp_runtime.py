@@ -47,8 +47,30 @@ class FusionMemoryRuntime:
         self.endpoint_pools = endpoint_pools
         self.health_check_interval_seconds = health_check_interval_seconds
         self._close_lock = threading.Lock()
+        self._supervisor_lock = threading.Lock()
+        self._supervisor_alive = False
+        self._supervisor_error: str | None = None
         self._closed = False
         self._fallback_batch_ledger = _MemoryBatchLedger()
+
+    def mark_supervisor_alive(self) -> None:
+        with self._supervisor_lock:
+            self._supervisor_alive = True
+            self._supervisor_error = None
+
+    def mark_supervisor_unhealthy(self, error: BaseException | str | None = None) -> None:
+        with self._supervisor_lock:
+            self._supervisor_alive = False
+            self._supervisor_error = type(error).__name__ if isinstance(error, BaseException) else (str(error) if error else None)
+
+    def background_health(self) -> dict[str, object]:
+        with self._supervisor_lock:
+            result: dict[str, object] = {"ok": self._supervisor_alive, "supervisor_alive": self._supervisor_alive}
+            if self._supervisor_error:
+                result["error"] = self._supervisor_error
+            return result
+
+    supervisor_health = background_health
 
     async def add(self, scope: Scope, content: str, source: str | None) -> Any:
         return await self._run(
@@ -161,49 +183,68 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
         min_connections=settings.min_connections,
         max_connections=settings.max_connections,
     )
-    store = PostgresMemoryStore(dsn, pool=pool, acquire_timeout_seconds=settings.acquire_timeout_seconds)
-    config = MemoryConfig(storage_backend="postgres")
-    shared_embedder = _build_embedder()
-    shared_reranker = _build_reranker()
-    retrieval_flags = build_runtime_retrieval_flags()
+    store: PostgresMemoryStore | None = None
+    executor: PostgresOperationExecutor | None = None
+    try:
+        store = PostgresMemoryStore(dsn, pool=pool, acquire_timeout_seconds=settings.acquire_timeout_seconds)
+        config = MemoryConfig(storage_backend="postgres")
+        shared_embedder = _build_embedder()
+        shared_reranker = _build_reranker()
+        retrieval_flags = build_runtime_retrieval_flags()
 
-    def make_service(bound_store: Any) -> MemoryService:
-        return MemoryService(
-            store=bound_store,
-            storage_backend="postgres",
-            # MemoryService owns mutable planners and traces; its configuration must
-            # not be shared with another request either.
-            config=MemoryConfig(**config.snapshot()),
-            embedder=_request_local_adapter(shared_embedder, _build_embedder),
-            reranker=_request_local_adapter(shared_reranker, _build_reranker),
-            extractor=_build_extractor(),
-            async_extractor=_build_async_extractor(),
-            query_intent_refiner=_build_query_intent_refiner(),
-            query_intent_refiner_mode=os.getenv("FUSION_MEMORY_QUERY_INTENT_MODE", "off"),
-            retrieval_flags=retrieval_flags,
+        def make_service(bound_store: Any) -> MemoryService:
+            return MemoryService(
+                store=bound_store,
+                storage_backend="postgres",
+                # MemoryService owns mutable planners and traces; its configuration must
+                # not be shared with another request either.
+                config=MemoryConfig(**config.snapshot()),
+                embedder=_request_local_adapter(shared_embedder, _build_embedder),
+                reranker=_request_local_adapter(shared_reranker, _build_reranker),
+                extractor=_build_extractor(),
+                async_extractor=_build_async_extractor(),
+                query_intent_refiner=_build_query_intent_refiner(),
+                query_intent_refiner_mode=os.getenv("FUSION_MEMORY_QUERY_INTENT_MODE", "off"),
+                retrieval_flags=retrieval_flags,
+            )
+
+        worker_limit = _positive_int_env("FUSION_MEMORY_MCP_WORKER_LIMIT", settings.max_connections)
+        executor = PostgresOperationExecutor(
+            store,
+            max_workers=worker_limit,
+            acquire_timeout_seconds=settings.acquire_timeout_seconds,
         )
-
-    worker_limit = _positive_int_env("FUSION_MEMORY_MCP_WORKER_LIMIT", settings.max_connections)
-    executor = PostgresOperationExecutor(
-        store,
-        max_workers=worker_limit,
-        acquire_timeout_seconds=settings.acquire_timeout_seconds,
-    )
-    # The root store owns the pool. The runtime owns the root store and must
-    # therefore not retain a second pool closer.
-    endpoint_pools = tuple(
-        endpoint_pool
-        for adapter in (shared_embedder, shared_reranker)
-        if (endpoint_pool := getattr(adapter, "pool", None)) is not None
-    )
-    return FusionMemoryRuntime(
-        executor,
-        make_service,
-        worker_limit=worker_limit,
-        closers=(executor.close, store.close),
-        endpoint_pools=endpoint_pools,
-        health_check_interval_seconds=_positive_float_env("FUSION_MEMORY_MCP_HEALTH_INTERVAL_SECONDS", 5.0),
-    ), pool
+        # Preserve the semantic embedding/reranker positions even when one
+        # adapter has no endpoint pool. The MCP supervisor filters None itself.
+        endpoint_pools = (
+            getattr(shared_embedder, "pool", None),
+            getattr(shared_reranker, "pool", None),
+        )
+        return FusionMemoryRuntime(
+            executor,
+            make_service,
+            worker_limit=worker_limit,
+            closers=(executor.close, store.close),
+            endpoint_pools=endpoint_pools,
+            health_check_interval_seconds=_positive_float_env("FUSION_MEMORY_MCP_HEALTH_INTERVAL_SECONDS", 5.0),
+        ), pool
+    except BaseException:
+        if executor is not None:
+            try:
+                executor.close()
+            except BaseException:
+                pass
+        if store is not None:
+            try:
+                store.close()
+            except BaseException:
+                pass
+        else:
+            try:
+                pool.close()
+            except BaseException:
+                pass
+        raise
 
 
 def _postgres_dsn_from_env() -> str:

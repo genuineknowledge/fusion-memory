@@ -1,6 +1,6 @@
 [Unit]
 Description=Fusion Memory Haitun history sync (%i)
-Requires=fusion-memory-mcp.service
+Wants=fusion-memory-mcp.service
 After=fusion-memory-mcp.service
 
 [Service]

@@ -39,7 +39,10 @@ PYTHONDONTWRITEBYTECODE=1 python -m compileall -q fusion_memory tests
 
 ## 快速开始
 
-面向新手的默认 SQLite 本地服务：
+面向新手的默认 SQLite 本地服务（legacy compatibility/development only；not production，且不属于 MCP systemd deployment）：
+
+The SQLite/local REST quickstart is legacy compatibility/development only, is
+not production, and is not part of the MCP systemd deployment.
 
 ```bash
 git clone https://github.com/genuineknowledge/fusion-memory.git
@@ -205,8 +208,8 @@ python -m fusion_memory.cli --db fusion-memory.sqlite3 --workspace-id w --user-i
 Postgres：
 
 ```bash
-python -m fusion_memory.cli migrate-postgres postgresql://user:pass@localhost:5432/fusion_memory
-python -m fusion_memory.cli verify-postgres postgresql://user:pass@localhost:5432/fusion_memory
+python -m fusion_memory.cli migrate-postgres "$FUSION_MEMORY_PG_DSN"
+python -m fusion_memory.cli verify-postgres "$FUSION_MEMORY_PG_DSN"
 ```
 
 ## Remote MCP deployment with systemd
@@ -318,7 +321,10 @@ Terminate TLS at a reverse proxy and proxy only the exact `/mcp` route to
 legacy REST routes, do not start `fusion-memory-server`, and do not run any
 SQLite import command.
 
-常驻 HTTP service wrapper：
+常驻 HTTP service wrapper（legacy compatibility/development only；not production，且不属于 MCP systemd deployment）：
+
+The `fusion_memory.server` wrapper is legacy compatibility/development only,
+not production, and not part of the MCP systemd deployment.
 
 ```bash
 source deploy/fusion-memory.local.env
@@ -377,7 +383,7 @@ Postgres 使用同样的模型注入方式：
 
 ```python
 memory = MemoryService(
-    "postgresql://user:pass@localhost:5432/fusion_memory",
+    "<postgres-dsn>",
     storage_backend="postgres",
     extractor=extractor,
     embedder=embedder,

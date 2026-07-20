@@ -122,6 +122,11 @@ def create_mcp_server(
             metadata=metadata,
         )
 
+    @server.tool(structured_output=True)
+    async def memory_health() -> dict[str, Any]:
+        """Return authenticated, read-scoped MCP supervisor liveness."""
+        return await _call_tool(runtime, {"memory:read"}, health=True)
+
     return server
 
 
@@ -200,6 +205,12 @@ async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) ->
         elif "query" in payload:
             result = await runtime.search(scope, _required_text(payload["query"]), _limit(payload["limit"]))
         else:
+            if payload.pop("health", False):
+                check = getattr(runtime, "background_health", None)
+                result = check() if callable(check) else {"ok": False, "error": "supervisor_state_unavailable"}
+                if not isinstance(result, dict):
+                    result = {"ok": False, "error": "invalid_supervisor_state"}
+                return {"ok": True, "result": {"background": _json_safe(result)}}
             messages = _bounded_messages(payload["messages"])
             batch_id = _required_text(payload["batch_id"])
             metadata = _bounded_batch_metadata(payload.get("metadata"))
@@ -243,19 +254,26 @@ def _runtime_lifespan(runtime: Any):
 @asynccontextmanager
 async def _health_supervisor(runtime: Any) -> AsyncIterator[None]:
     pools = tuple(pool for pool in getattr(runtime, "endpoint_pools", ()) if callable(getattr(pool, "healthy_endpoints", None)))
-    if not pools:
-        yield
-        return
     interval = float(getattr(runtime, "health_check_interval_seconds", 5.0))
     if interval <= 0:
         interval = 5.0
+    mark_alive = getattr(runtime, "mark_supervisor_alive", None)
+    mark_unhealthy = getattr(runtime, "mark_supervisor_unhealthy", None)
     async with anyio.create_task_group() as task_group:
+        if callable(mark_alive):
+            mark_alive()
         for pool in pools:
             task_group.start_soon(_supervise_endpoint_pool, pool, interval)
         try:
             yield
+        except BaseException as exc:
+            if callable(mark_unhealthy):
+                mark_unhealthy(exc)
+            raise
         finally:
             task_group.cancel_scope.cancel()
+            if callable(mark_unhealthy):
+                mark_unhealthy()
 
 
 async def _supervise_endpoint_pool(pool: Any, interval: float) -> None:

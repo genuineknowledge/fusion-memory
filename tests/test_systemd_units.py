@@ -34,6 +34,16 @@ def test_history_sync_unit_uses_environment_file_not_token_argument():
     assert "--session-id ${FUSION_MEMORY_SESSION_ID}" in text
     assert "Restart=on-failure" in text
     assert "WantedBy=default.target" in text
+    assert "Wants=fusion-memory-mcp.service" in text
+    assert "Requires=fusion-memory-mcp.service" not in text
+
+
+def test_readme_labels_legacy_local_paths_and_avoids_plaintext_dsns():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "legacy compatibility/development only" in text
+    assert "not production" in text
+    assert "postgresql://user:pass@" not in text
+    assert "$FUSION_MEMORY_PG_DSN" in text
 
 
 def test_health_timer_restarts_after_mcp_and_models():

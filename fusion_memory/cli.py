@@ -420,7 +420,11 @@ def main() -> None:
                     )
                 )
                 report["mcp"] = anyio.run(mcp_health_check)
-                report["ok"] = bool(report["ok"]) and bool(report["mcp"]["ok"])
+                if isinstance(report["mcp"], dict) and isinstance(report["mcp"].get("background"), dict):
+                    report["background"] = dict(report["mcp"]["background"])
+                report["ok"] = all(
+                    bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")
+                ) and bool(report["mcp"]["ok"])
                 if args.restart_unhealthy:
                     report["restarts"] = restart_unhealthy_units(report)
                 return _print_product_result(report, json_output=args.json)

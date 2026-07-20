@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from typing import Any
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from mcp.server.auth.provider import AccessToken
 
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
-from fusion_memory.mcp_server import _pooled_connection_factory, create_mcp_app, create_mcp_server, run_mcp_server
+from fusion_memory.mcp_server import _health_supervisor, _pooled_connection_factory, create_mcp_app, create_mcp_server, run_mcp_server
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
 from fusion_memory.storage.token_store import PostgresTokenStore
 
@@ -56,6 +57,9 @@ class FakeMemoryRuntime:
         self.items.extend((scope, str(message.get("content") or "")) for message in messages)
         return {"batch_id": batch_id, "message_count": len(messages)}
 
+    def background_health(self) -> dict[str, object]:
+        return {"ok": True, "tasks": []}
+
 
 @pytest.fixture
 def fake_runtime() -> FakeMemoryRuntime:
@@ -98,7 +102,15 @@ async def mcp_client_factory(mcp_app):
 async def test_tools_list_contains_memory_tools(mcp_client_factory):
     async with mcp_client_factory(token="token-a", session_id="s1") as client:
         names = {tool.name for tool in (await client.list_tools()).tools}
-    assert {"memory_add", "memory_search", "memory_answer_context", "memory_add_batch"} <= names
+    assert {"memory_add", "memory_search", "memory_answer_context", "memory_add_batch", "memory_health"} <= names
+
+
+@pytest.mark.anyio
+async def test_memory_health_requires_read_scope_and_reports_supervisor_state(mcp_client_factory):
+    async with mcp_client_factory(token="token-read", session_id="s1") as client:
+        result = await client.call_tool("memory_health", {})
+    assert result.structuredContent["ok"] is True
+    assert result.structuredContent["result"]["background"]["ok"] is True
 
 
 @pytest.mark.anyio
@@ -189,6 +201,28 @@ async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdow
                     await client.initialize()
                     assert await __import__("anyio").to_thread.run_sync(started.wait, 0.2)
                     release.set()
+
+
+@pytest.mark.anyio
+async def test_supervisor_state_is_false_after_shutdown_and_failure(monkeypatch):
+    runtime = FusionMemoryRuntime(object(), lambda _store: object(), endpoint_pools=())
+    async with _health_supervisor(runtime):
+        assert runtime.background_health()["ok"] is True
+    assert runtime.background_health()["ok"] is False
+
+    class Pool:
+        def healthy_endpoints(self):
+            return []
+
+    async def fail_supervisor(*args, **kwargs):
+        raise RuntimeError("unexpected supervisor failure")
+
+    monkeypatch.setattr("fusion_memory.mcp_server._supervise_endpoint_pool", fail_supervisor)
+    failed_runtime = FusionMemoryRuntime(object(), lambda _store: object(), endpoint_pools=(Pool(),))
+    with pytest.raises(BaseException):
+        async with _health_supervisor(failed_runtime):
+            await __import__("anyio").sleep(0.05)
+    assert failed_runtime.background_health()["ok"] is False
 
 
 @pytest.mark.anyio
@@ -288,6 +322,93 @@ def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
 
     assert isinstance(runtime, FusionMemoryRuntime)
     assert captured["dsn"] == "postgresql://memory"
+
+
+def test_runtime_from_env_preserves_embedding_and_reranker_slots(monkeypatch):
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class RerankerPool:
+        def healthy_endpoints(self):
+            return ["http://reranker"]
+
+        def snapshot(self):
+            return [{"healthy": True}]
+
+    reranker_pool = RerankerPool()
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: object())
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: SimpleNamespace(pool=reranker_pool))
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+
+    runtime, pool = runtime_from_env()
+    assert runtime.endpoint_pools == (None, reranker_pool)
+    from fusion_memory.health import ProductionHealthRuntime
+
+    health = ProductionHealthRuntime(runtime, pool)
+    assert health.embedding_health()["error"] == "embedding_pool_missing"
+    assert health.reranker_health()["healthy_endpoints"] == 1
+
+
+def test_runtime_from_env_closes_resources_when_model_builder_fails(monkeypatch):
+    calls: list[str] = []
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            calls.append("pool")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self.pool = kwargs.get("pool")
+
+        def close(self):
+            calls.append("store")
+            if self.pool is not None:
+                self.pool.close()
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            calls.append("executor-built")
+
+        def close(self):
+            calls.append("executor")
+
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: object())
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: (_ for _ in ()).throw(RuntimeError("model failed")))
+    with pytest.raises(RuntimeError, match="model failed"):
+        runtime_from_env()
+    assert calls == ["store", "pool"]
 
 
 def test_runtime_factory_creates_request_local_extractor_and_refiner(monkeypatch):

@@ -79,12 +79,93 @@ def test_restart_unhealthy_restarts_only_failed_configured_units(monkeypatch):
         result = restart_unhealthy_units(
             {"postgres": {"ok": True}, "embedding": {"ok": False}, "reranker": {"ok": True}, "background": {"ok": False}}
         )
-    assert calls == [
-        ["systemctl", "--user", "restart", "fusion-memory-embedding@a.service"],
-        ["systemctl", "--user", "restart", "fusion-memory-embedding@b.service"],
-        ["systemctl", "--user", "restart", "fusion-memory-mcp.service"],
-    ]
+    assert calls == [["systemctl", "--user", "restart", "fusion-memory-mcp.service"]]
     assert result["ok"] is True
+
+
+def test_restart_unhealthy_maps_failed_endpoint_snapshot_to_unit(monkeypatch):
+    from fusion_memory.health import restart_unhealthy_units
+
+    monkeypatch.setenv("FUSION_MEMORY_EMBEDDING_UNITS", "fusion-memory-embedding@a.service fusion-memory-embedding@b.service")
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    report = {
+        "embedding": {
+            "ok": False,
+            "endpoints": [{"healthy": True}, {"healthy": False}],
+            "failed_units": ["fusion-memory-embedding@b.service"],
+        },
+        "reranker": {"ok": True},
+        "postgres": {"ok": True},
+        "background": {"ok": True},
+    }
+    with patch("fusion_memory.health.subprocess.run", side_effect=fake_run):
+        result = restart_unhealthy_units(report)
+    assert calls == [["systemctl", "--user", "restart", "fusion-memory-embedding@b.service"]]
+    assert result["ok"] is True
+
+
+def test_restart_unhealthy_skips_unreliable_multi_unit_mapping(monkeypatch):
+    from fusion_memory.health import restart_unhealthy_units
+
+    monkeypatch.setenv("FUSION_MEMORY_EMBEDDING_UNITS", "fusion-memory-embedding@a.service fusion-memory-embedding@b.service")
+    with patch("fusion_memory.health.subprocess.run") as run:
+        result = restart_unhealthy_units(
+            {
+                "embedding": {"ok": False, "endpoints": [{"healthy": False}]},
+                "reranker": {"ok": True},
+                "postgres": {"ok": True},
+                "background": {"ok": True},
+            }
+        )
+    run.assert_not_called()
+    assert result["restarted"] == []
+    assert result["skipped"]
+
+
+def test_restart_unhealthy_rejects_malformed_allowlist_quoting(monkeypatch):
+    from fusion_memory.health import restart_unhealthy_units
+
+    monkeypatch.setenv("FUSION_MEMORY_EMBEDDING_UNITS", "'unterminated")
+    with patch("fusion_memory.health.subprocess.run") as run:
+        result = restart_unhealthy_units(
+            {
+                "embedding": {"ok": False},
+                "reranker": {"ok": True},
+                "postgres": {"ok": True},
+                "background": {"ok": True},
+            }
+        )
+    run.assert_not_called()
+    assert result["ok"] is False
+    assert result["configuration_errors"]
+
+
+def test_mcp_health_check_requires_background_liveness(monkeypatch):
+    from fusion_memory import health
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def ping(self):
+            return None
+
+        async def call_tool(self, name, arguments):
+            assert name == "memory_health"
+            return {"ok": True, "result": {"background": {"ok": False}}}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(health, "MemoryMcpClient", Client)
+    result = __import__("anyio").run(health.mcp_health_check, "http://test/mcp", "token")
+    assert result["ok"] is False
+    assert result["background"]["ok"] is False
 
 
 @pytest.mark.parametrize("name", ["fusion-memory-mcp.service", "fusion-memory-health.service"])
