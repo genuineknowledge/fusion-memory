@@ -102,6 +102,27 @@ def test_lease_deadline_includes_time_spent_in_a_due_health_probe() -> None:
             pass
 
 
+def test_lease_rescans_for_a_peer_recovered_while_healthy_endpoint_is_saturated() -> None:
+    pool = EndpointPool(["a", "b"], failure_threshold=1, recovery_seconds=0, health_probe=lambda _endpoint: True)
+    acquired = threading.Event()
+    result: list[str] = []
+
+    with pool.lease(timeout_seconds=1.0) as endpoint:
+        assert endpoint == "a"
+        pool.mark_failure("b", "offline")
+
+        def acquire_recovered_peer() -> None:
+            with pool.lease(timeout_seconds=0.2) as leased_endpoint:
+                result.append(leased_endpoint)
+                acquired.set()
+
+        worker = threading.Thread(target=acquire_recovered_peer)
+        worker.start()
+        assert acquired.wait(timeout=0.05)
+        assert result == ["b"]
+        worker.join(timeout=1.0)
+
+
 def test_slow_health_probe_does_not_block_healthy_endpoint_selection() -> None:
     probe_started = threading.Event()
     release_probe = threading.Event()

@@ -85,15 +85,14 @@ class EndpointPool:
             raise ValueError("timeout_seconds must not be negative")
         deadline = time.monotonic() + timeout_seconds
         while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("model endpoint pool is exhausted")
             candidates = self._healthy_candidates()
             if not candidates:
                 # There may be an ejected endpoint whose recovery window is due.
-                self._recover_due_endpoints()
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("model endpoint pool is exhausted")
-                candidates = self._healthy_candidates()
-                if not candidates:
-                    raise EndpointUnavailable("no healthy model endpoints are available")
+                if self._recover_due_endpoints():
+                    continue
+                raise EndpointUnavailable("no healthy model endpoints are available")
             # Try every healthy endpoint without waiting before blocking for a release.
             # A busy round-robin choice must not hide an idle peer.
             for endpoint in candidates:
@@ -108,10 +107,8 @@ class EndpointPool:
                 raise TimeoutError("model endpoint pool is exhausted")
             # Health probes execute outside the lock, but still consume this lease's
             # one shared deadline before we wait for a capacity notification.
-            self._recover_due_endpoints()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("model endpoint pool is exhausted")
+            if self._recover_due_endpoints():
+                continue
             with self._availability:
                 self._availability.wait(timeout=remaining)
 
@@ -193,7 +190,7 @@ class EndpointPool:
             state.semaphore.release()
             self._availability.notify_all()
 
-    def _recover_due_endpoints(self) -> None:
+    def _recover_due_endpoints(self) -> bool:
         due: list[str] = []
         with self._availability:
             now = time.monotonic()
@@ -232,6 +229,7 @@ class EndpointPool:
                         state.last_error = _sanitize_error(probe_error)
                     state.next_probe_at = time.monotonic() + max(1.0, self.recovery_seconds)
                 self._availability.notify_all()
+        return bool(due)
 
     def _state(self, endpoint: str) -> _EndpointState:
         try:
