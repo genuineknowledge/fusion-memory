@@ -231,6 +231,11 @@ def main() -> None:
     pg_verify.add_argument("dsn", help="Postgres DSN, for example postgresql://user:pass@localhost:5432/fusion_memory")
     pg_verify.add_argument("--skip-migrate", action="store_true", help="Skip migration and only run the service smoke")
 
+    embedding_server = sub.add_parser("embedding-server", help="Run one long-lived local embedding model server")
+    _add_model_server_args(embedding_server)
+    reranker_server = sub.add_parser("reranker-server", help="Run one long-lived local reranker model server")
+    _add_model_server_args(reranker_server)
+
     token = sub.add_parser("token", help="Manage MCP bearer tokens")
     token_sub = token.add_subparsers(dest="token_command", required=True)
     token_create_cmd = token_sub.add_parser("create", help="Create a bearer token")
@@ -369,6 +374,14 @@ def main() -> None:
             report = verify_postgres_backend(args.dsn, migrate=not args.skip_migrate)
             print(json.dumps(_jsonable(report), ensure_ascii=False, indent=2))
             return
+        if args.command == "embedding-server":
+            from fusion_memory.model_server import run_embedding_server
+
+            return run_embedding_server(args.host, args.port, args.model, args.device, args.max_concurrency)
+        if args.command == "reranker-server":
+            from fusion_memory.model_server import run_reranker_server
+
+            return run_reranker_server(args.host, args.port, args.model, args.device, args.max_concurrency)
         if args.command == "token":
             store = _token_store_from_args(args)
             if args.token_command == "create":
@@ -623,6 +636,14 @@ def _add_eval_model_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Minimum confidence accepted from the LLM aggregation pass",
     )
+
+
+def _add_model_server_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--model", required=True, help="Local model path or Hugging Face model identifier")
+    parser.add_argument("--device", default=None, help="Optional model device, for example cuda:0")
+    parser.add_argument("--max-concurrency", type=int, default=1)
 
 
 def _build_eval_models(args: argparse.Namespace):
