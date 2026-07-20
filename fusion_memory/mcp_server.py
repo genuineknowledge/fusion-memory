@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import json
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
+
+import anyio
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
@@ -68,9 +72,10 @@ def create_mcp_server(
     if not path.startswith("/"):
         raise ValueError("MCP path must start with '/'")
     lifespan = lifespan or _runtime_lifespan(runtime)
-    public_host = urlsplit(public_url).netloc
+    public_parts = urlsplit(public_url)
+    public_host = public_parts.netloc
     allowed_hosts = [f"{host}:*", host, public_host]
-    allowed_origins = [public_url.rstrip("/")]
+    allowed_origins = [f"{public_parts.scheme}://{public_host}"]
     server = FastMCP(
         "Fusion Memory",
         host=host,
@@ -194,7 +199,10 @@ async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) ->
             result = await runtime.search(scope, _required_text(payload["query"]), _limit(payload["limit"]))
         else:
             messages = _bounded_messages(payload["messages"])
-            result = await runtime.add_batch(scope, messages, _required_text(payload["batch_id"]), payload.get("metadata"))
+            batch_id = _required_text(payload["batch_id"])
+            metadata = _bounded_batch_metadata(payload.get("metadata"))
+            _check_batch_payload_size(messages, batch_id, metadata)
+            result = await runtime.add_batch(scope, messages, batch_id, metadata)
         return {"ok": True, "result": _json_safe(result)}
     except (ValueError, TypeError) as exc:
         return _error("invalid_request", retryable=False, message=str(exc))
@@ -218,14 +226,43 @@ def _runtime_lifespan(runtime: Any):
     async def lifespan(_server: FastMCP) -> AsyncIterator[Any]:
         manager = getattr(runtime, "lifespan", None)
         if manager is None:
-            yield runtime
+            async with _health_supervisor(runtime):
+                yield runtime
         else:
             async with manager():
-                yield runtime
-
-    from contextlib import asynccontextmanager
+                async with _health_supervisor(runtime):
+                    yield runtime
 
     return asynccontextmanager(lifespan)
+
+
+@asynccontextmanager
+async def _health_supervisor(runtime: Any) -> AsyncIterator[None]:
+    pools = tuple(pool for pool in getattr(runtime, "endpoint_pools", ()) if callable(getattr(pool, "healthy_endpoints", None)))
+    if not pools:
+        yield
+        return
+    interval = float(getattr(runtime, "health_check_interval_seconds", 5.0))
+    if interval <= 0:
+        interval = 5.0
+    async with anyio.create_task_group() as task_group:
+        for pool in pools:
+            task_group.start_soon(_supervise_endpoint_pool, pool, interval)
+        try:
+            yield
+        finally:
+            task_group.cancel_scope.cancel()
+
+
+async def _supervise_endpoint_pool(pool: Any, interval: float) -> None:
+    while True:
+        try:
+            await anyio.to_thread.run_sync(pool.healthy_endpoints, abandon_on_cancel=True)
+        except Exception:
+            # EndpointPool records probe failures itself; a supervisor must not
+            # bring down the MCP lifespan for a transient health-check failure.
+            pass
+        await anyio.sleep(interval)
 
 
 def _pooled_connection_factory(pool: Any):
@@ -277,17 +314,49 @@ def _bounded_messages(value: Any) -> list[dict[str, Any]]:
     max_bytes = _positive_env("FUSION_MEMORY_MCP_MAX_BATCH_BYTES", 524288)
     if len(value) > max_messages:
         raise ValueError("batch exceeds configured message limit")
+    allowed_fields = {"role", "content", "source", "source_uri", "timestamp", "turn_id"}
     messages: list[dict[str, Any]] = []
     total_bytes = 0
     for message in value:
         if not isinstance(message, dict):
             raise ValueError("each message must be an object")
+        unexpected = set(message) - allowed_fields
+        if unexpected:
+            raise ValueError("unsupported message fields")
         content = _required_text(message.get("content"))
-        total_bytes += len(content.encode("utf-8"))
+        normalized = {key: value for key, value in message.items() if key in allowed_fields and key != "source"}
+        normalized["content"] = content
+        if "source" in message and "source_uri" not in normalized:
+            normalized["source_uri"] = message["source"]
+        total_bytes += _json_byte_length(normalized)
         if total_bytes > max_bytes:
             raise ValueError("batch exceeds configured byte limit")
-        messages.append(dict(message, content=content))
+        messages.append(normalized)
     return messages
+
+
+def _bounded_batch_metadata(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("metadata must be an object")
+    protected = {"window_size", "min_window_spans", "chunk_size_tokens", "chunk_overlap_tokens"}
+    if protected.intersection(value):
+        raise ValueError("metadata cannot configure ingestion limits")
+    return dict(value)
+
+
+def _check_batch_payload_size(messages: list[dict[str, Any]], batch_id: str, metadata: dict[str, Any] | None) -> None:
+    max_bytes = _positive_env("FUSION_MEMORY_MCP_MAX_BATCH_BYTES", 524288)
+    if _json_byte_length({"messages": messages, "batch_id": batch_id, "metadata": metadata}) > max_bytes:
+        raise ValueError("batch exceeds configured byte limit")
+
+
+def _json_byte_length(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("batch data must be JSON serializable") from exc
 
 
 def _positive_env(name: str, default: int) -> int:

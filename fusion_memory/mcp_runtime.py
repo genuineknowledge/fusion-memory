@@ -33,6 +33,8 @@ class FusionMemoryRuntime:
         *,
         worker_limit: int = 8,
         closers: tuple[Callable[[], None], ...] = (),
+        endpoint_pools: tuple[Any, ...] = (),
+        health_check_interval_seconds: float = 5.0,
     ) -> None:
         if worker_limit < 1:
             raise ValueError("FUSION_MEMORY_MCP_WORKER_LIMIT must be positive")
@@ -40,6 +42,8 @@ class FusionMemoryRuntime:
         self._service_factory = service_factory
         self._worker_limiter = anyio.CapacityLimiter(worker_limit)
         self._closers = closers
+        self.endpoint_pools = endpoint_pools
+        self.health_check_interval_seconds = health_check_interval_seconds
         self._close_lock = threading.Lock()
         self._closed = False
 
@@ -139,11 +143,8 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
     )
     store = PostgresMemoryStore(dsn, pool=pool, acquire_timeout_seconds=settings.acquire_timeout_seconds)
     config = MemoryConfig(storage_backend="postgres")
-    embedder = _build_embedder()
-    reranker = _build_reranker()
-    extractor = _build_extractor()
-    async_extractor = _build_async_extractor()
-    query_intent_refiner = _build_query_intent_refiner()
+    shared_embedder = _build_embedder()
+    shared_reranker = _build_reranker()
     retrieval_flags = build_runtime_retrieval_flags()
 
     def make_service(bound_store: Any) -> MemoryService:
@@ -153,11 +154,11 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
             # MemoryService owns mutable planners and traces; its configuration must
             # not be shared with another request either.
             config=MemoryConfig(**config.snapshot()),
-            embedder=embedder,
-            reranker=reranker,
-            extractor=extractor,
-            async_extractor=async_extractor,
-            query_intent_refiner=query_intent_refiner,
+            embedder=_request_local_adapter(shared_embedder, _build_embedder),
+            reranker=_request_local_adapter(shared_reranker, _build_reranker),
+            extractor=_build_extractor(),
+            async_extractor=_build_async_extractor(),
+            query_intent_refiner=_build_query_intent_refiner(),
             query_intent_refiner_mode=os.getenv("FUSION_MEMORY_QUERY_INTENT_MODE", "off"),
             retrieval_flags=retrieval_flags,
         )
@@ -170,7 +171,19 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
     )
     # The root store owns the pool. The runtime owns the root store and must
     # therefore not retain a second pool closer.
-    return FusionMemoryRuntime(executor, make_service, worker_limit=worker_limit, closers=(executor.close, store.close)), pool
+    endpoint_pools = tuple(
+        endpoint_pool
+        for adapter in (shared_embedder, shared_reranker)
+        if (endpoint_pool := getattr(adapter, "pool", None)) is not None
+    )
+    return FusionMemoryRuntime(
+        executor,
+        make_service,
+        worker_limit=worker_limit,
+        closers=(executor.close, store.close),
+        endpoint_pools=endpoint_pools,
+        health_check_interval_seconds=_positive_float_env("FUSION_MEMORY_MCP_HEALTH_INTERVAL_SECONDS", 5.0),
+    ), pool
 
 
 def _postgres_dsn_from_env() -> str:
@@ -192,3 +205,17 @@ def _positive_int_env(name: str, default: int) -> int:
     if value < 1:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    value = float(os.getenv(name, str(default)))
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _request_local_adapter(shared: Any, factory: Callable[[], Any]) -> Any:
+    request_local = getattr(shared, "request_local", None)
+    if callable(request_local):
+        return request_local()
+    return factory()

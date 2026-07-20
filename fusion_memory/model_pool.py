@@ -4,6 +4,7 @@ import re
 import socket
 import threading
 import time
+from copy import copy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, Protocol, TypeVar
@@ -254,6 +255,16 @@ Client = TypeVar("Client")
 class _PooledClient:
     def __init__(self, pool: EndpointPool) -> None:
         self.pool = pool
+        self._client_lock = threading.Lock()
+        self._calls_lock = threading.Lock()
+
+    def request_local(self):
+        clone = copy(self)
+        clone._clients = {}
+        clone.calls = []
+        clone._client_lock = threading.Lock()
+        clone._calls_lock = threading.Lock()
+        return clone
 
     def _call(self, operation: Callable[[str], Client], invoke: Callable[[Client], object]) -> object:
         last_error: BaseException | None = None
@@ -335,13 +346,15 @@ class PooledEmbedder(_PooledClient):
         result = self._call(self._client, lambda client: client.embed_texts(texts))
         if not isinstance(result, list):
             raise ValueError("embedding endpoint returned invalid embeddings")
-        self.calls.append({"model": self.model, "text_count": len(texts)})
+        with self._calls_lock:
+            self.calls.append({"model": self.model, "text_count": len(texts)})
         return result
 
     def _client(self, endpoint: str) -> _EmbeddingClient:
-        if endpoint not in self._clients:
-            self._clients[endpoint] = self._client_factory(endpoint)
-        return self._clients[endpoint]
+        with self._client_lock:
+            if endpoint not in self._clients:
+                self._clients[endpoint] = self._client_factory(endpoint)
+            return self._clients[endpoint]
 
 
 class PooledReranker(_PooledClient):
@@ -389,13 +402,15 @@ class PooledReranker(_PooledClient):
         result = self._call(self._client, lambda client: client.score(query, docs))
         if not isinstance(result, list):
             raise ValueError("reranker endpoint returned invalid scores")
-        self.calls.append({"model": self.model, "doc_count": len(docs)})
+        with self._calls_lock:
+            self.calls.append({"model": self.model, "doc_count": len(docs)})
         return [float(score) for score in result]
 
     def _client(self, endpoint: str) -> _RerankerClient:
-        if endpoint not in self._clients:
-            self._clients[endpoint] = self._client_factory(endpoint)
-        return self._clients[endpoint]
+        with self._client_lock:
+            if endpoint not in self._clients:
+                self._clients[endpoint] = self._client_factory(endpoint)
+            return self._clients[endpoint]
 
 
 def _health_probe(endpoint: str) -> bool:

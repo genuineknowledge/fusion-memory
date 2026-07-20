@@ -4,7 +4,7 @@ import pytest
 
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_runtime import FusionMemoryRuntime
-from fusion_memory.mcp_server import _bounded_messages, _error, _limit
+from fusion_memory.mcp_server import _bounded_messages, _check_batch_payload_size, _error, _limit
 
 
 def test_search_limit_is_clamped_to_mcp_boundary():
@@ -15,6 +15,22 @@ def test_search_limit_is_clamped_to_mcp_boundary():
 def test_batch_rejects_empty_message_content():
     with pytest.raises(ValueError, match="text must be non-empty"):
         _bounded_messages([{"content": ""}])
+
+
+def test_batch_counts_serialized_source_bytes_and_rejects_message_metadata(monkeypatch):
+    monkeypatch.setenv("FUSION_MEMORY_MCP_MAX_BATCH_BYTES", "64")
+
+    with pytest.raises(ValueError, match="batch exceeds configured byte limit"):
+        _bounded_messages([{"role": "user", "content": "ok", "source_uri": "x" * 100}])
+    with pytest.raises(ValueError, match="unsupported message fields"):
+        _bounded_messages([{"content": "ok", "metadata": {"x": "y" * 100}}])
+
+
+def test_batch_rejects_oversized_top_level_metadata(monkeypatch):
+    monkeypatch.setenv("FUSION_MEMORY_MCP_MAX_BATCH_BYTES", "64")
+
+    with pytest.raises(ValueError, match="batch exceeds configured byte limit"):
+        _check_batch_payload_size([{"content": "ok"}], "batch-1", {"history": "x" * 100})
 
 
 @pytest.mark.anyio

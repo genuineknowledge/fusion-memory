@@ -12,7 +12,7 @@ from mcp.server.auth.provider import AccessToken
 
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
-from fusion_memory.mcp_server import _pooled_connection_factory, create_mcp_app, run_mcp_server
+from fusion_memory.mcp_server import _pooled_connection_factory, create_mcp_app, create_mcp_server, run_mcp_server
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
 from fusion_memory.storage.token_store import PostgresTokenStore
 
@@ -133,6 +133,65 @@ async def test_invalid_token_is_rejected_at_http_auth_layer(mcp_app):
 
 
 @pytest.mark.anyio
+async def test_public_origin_without_mcp_path_passes_transport_security():
+    server = create_mcp_server(
+        runtime=FakeMemoryRuntime(),
+        token_verifier=FakeTokenVerifier(),
+        path="/mcp",
+        public_url="https://memory.example/mcp",
+    )
+    assert server.settings.transport_security.allowed_origins == ["https://memory.example"]
+
+    app = server.streamable_http_app()
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="https://memory.example") as client:
+            response = await client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer invalid", "Origin": "https://memory.example"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            )
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdown():
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingPool:
+        def healthy_endpoints(self):
+            started.set()
+            release.wait(timeout=5)
+            return []
+
+    class Runtime:
+        endpoint_pools = (BlockingPool(),)
+        health_check_interval_seconds = 0.01
+
+    server = create_mcp_server(
+        runtime=Runtime(),
+        token_verifier=FakeTokenVerifier(),
+        public_url="http://test/mcp",
+    )
+    app = server.streamable_http_app()
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": "Bearer token-a"},
+        ) as http_client:
+            async with streamable_http_client("http://test/mcp", http_client=http_client) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as client:
+                    await client.initialize()
+                    assert await __import__("anyio").to_thread.run_sync(started.wait, 0.2)
+                    release.set()
+
+
+@pytest.mark.anyio
 async def test_write_scope_is_required(mcp_client_factory):
     async with mcp_client_factory(token="token-read", session_id="s1") as client:
         result = await client.call_tool("memory_add", {"content": "denied"})
@@ -229,6 +288,58 @@ def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
 
     assert isinstance(runtime, FusionMemoryRuntime)
     assert captured["dsn"] == "postgresql://memory"
+
+
+def test_runtime_factory_creates_request_local_extractor_and_refiner(monkeypatch):
+    import concurrent.futures
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    created_extractors: list[object] = []
+    created_refiners: list[object] = []
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
+    monkeypatch.setattr(
+        "fusion_memory.mcp_runtime._build_async_extractor",
+        lambda: created_extractors.append(object()) or created_extractors[-1],
+    )
+    monkeypatch.setattr(
+        "fusion_memory.mcp_runtime._build_query_intent_refiner",
+        lambda: created_refiners.append(object()) or created_refiners[-1],
+    )
+    monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+
+    runtime, _ = runtime_from_env()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(runtime._service_factory, object()) for _ in range(2)]
+        first, second = [future.result() for future in futures]
+
+    assert first.async_extractor is not second.async_extractor
+    assert first.planner.intent_refiner is not second.planner.intent_refiner
 
 
 def test_runtime_close_runs_resource_closers_once():
