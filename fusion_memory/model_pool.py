@@ -141,6 +141,60 @@ class EndpointPool:
         with self._lock:
             return [endpoint for endpoint in self.endpoints if self._states[endpoint].healthy]
 
+    def active_health_check(self) -> list[dict[str, object]]:
+        """Probe all healthy and recovery-due endpoints without holding the pool lock."""
+        eligible: list[tuple[str, bool, int]] = []
+        with self._availability:
+            now = time.monotonic()
+            for state in self._states.values():
+                recovery_due = (
+                    not state.healthy
+                    and state.next_probe_at is not None
+                    and now >= state.next_probe_at
+                )
+                if state.probing or not (state.healthy or recovery_due):
+                    continue
+                state.probing = True
+                if not state.healthy:
+                    state.next_probe_at = now + max(1.0, self.recovery_seconds)
+                eligible.append((state.endpoint, not state.healthy, state.failures))
+
+        for endpoint, recovering, failures_at_probe in eligible:
+            probe_error: str | None = None
+            try:
+                healthy = bool(self._health_probe(endpoint))
+            except Exception as exc:
+                healthy = False
+                probe_error = str(exc)
+            with self._availability:
+                state = self._states[endpoint]
+                if not state.probing:
+                    continue
+                state.probing = False
+                if not recovering and state.failures != failures_at_probe:
+                    self._availability.notify_all()
+                    continue
+                if healthy:
+                    if recovering:
+                        state.healthy = True
+                        state.failures = 0
+                        state.ejected_at = None
+                        state.next_probe_at = None
+                        state.last_error = None
+                elif state.healthy:
+                    state.failures += 1
+                    state.last_error = _sanitize_error(probe_error or "health probe failed")
+                    if state.failures >= self.failure_threshold:
+                        state.healthy = False
+                        state.ejected_at = time.monotonic()
+                        state.next_probe_at = state.ejected_at + self.recovery_seconds
+                else:
+                    if probe_error:
+                        state.last_error = _sanitize_error(probe_error)
+                    state.next_probe_at = time.monotonic() + max(1.0, self.recovery_seconds)
+                self._availability.notify_all()
+        return self.snapshot()
+
     def snapshot(self) -> list[dict[str, object]]:
         with self._lock:
             return [
@@ -424,7 +478,7 @@ def _health_probe(endpoint: str) -> bool:
 
 def _is_transport_failure(exc: BaseException) -> bool:
     if isinstance(exc, error.HTTPError):
-        return False
+        return exc.code in {408, 429} or 500 <= exc.code <= 599
     if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError, error.URLError)):
         return True
     return isinstance(exc, OSError)

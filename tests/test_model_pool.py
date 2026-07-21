@@ -160,7 +160,34 @@ def test_failed_health_probe_is_backed_off_before_the_next_selection() -> None:
     assert probes == ["a"]
 
 
-def test_http_error_is_not_retried_or_ejected_as_a_transport_failure() -> None:
+def test_active_health_check_ejects_initially_healthy_dead_endpoint() -> None:
+    probes: list[str] = []
+    pool = EndpointPool(
+        ["a", "b"],
+        failure_threshold=2,
+        health_probe=lambda endpoint: probes.append(endpoint) or endpoint == "b",
+    )
+
+    pool.active_health_check()
+    assert pool.healthy_endpoints() == ["a", "b"]
+    pool.active_health_check()
+
+    assert probes == ["a", "b", "a", "b"]
+    assert pool.healthy_endpoints() == ["b"]
+
+
+def test_successful_liveness_probe_does_not_clear_inference_failures() -> None:
+    pool = EndpointPool(["a"], failure_threshold=2, health_probe=lambda endpoint: True)
+
+    pool.mark_failure("a", "HTTP 500")
+    pool.active_health_check()
+
+    assert pool.snapshot()[0]["failure_count"] == 1
+    pool.mark_failure("a", "HTTP 500")
+    assert pool.healthy_endpoints() == []
+
+
+def test_retryable_http_error_fails_over_and_ejects_endpoint() -> None:
     calls: list[str] = []
 
     class Client:
@@ -172,6 +199,24 @@ def test_http_error_is_not_retried_or_ejected_as_a_transport_failure() -> None:
             if self.endpoint == "a":
                 raise error.HTTPError("https://a", 500, "server error", {}, None)
             return [[1.0] for _ in texts]
+
+    embedder = PooledEmbedder(["a", "b"], client_factory=Client, failure_threshold=1)
+
+    assert embedder.embed_texts(["alpha"]) == [[1.0]]
+    assert calls == ["a", "b"]
+    assert embedder.pool.healthy_endpoints() == ["b"]
+
+
+def test_nonretryable_http_error_is_not_replayed_or_ejected() -> None:
+    calls: list[str] = []
+
+    class Client:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            calls.append(self.endpoint)
+            raise error.HTTPError("https://a", 400, "bad request", {}, None)
 
     embedder = PooledEmbedder(["a", "b"], client_factory=Client, failure_threshold=1)
 

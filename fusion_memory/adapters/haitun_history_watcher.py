@@ -90,7 +90,11 @@ async def sync_history_once_async(
     client: Any | None = None,
 ) -> dict[str, Any]:
     messages = _read_history_messages(config.history_path)
-    batches = _build_batches(messages, session_id=config.session_id)
+    batches = _build_batches(
+        messages,
+        session_id=config.session_id,
+        source_identity=str(config.history_path.resolve()),
+    )
     checkpoint = load_checkpoint(config.checkpoint_path)
     submitted = set(checkpoint.get("submitted_batches") or [])
     submitted_count = 0
@@ -134,7 +138,11 @@ def _sync_history_with_callback(
     submit_add: Callable[[dict[str, Any]], Any],
 ) -> dict[str, Any]:
     messages = _read_history_messages(config.history_path)
-    batches = _build_batches(messages, session_id=config.session_id)
+    batches = _build_batches(
+        messages,
+        session_id=config.session_id,
+        source_identity=str(config.history_path.resolve()),
+    )
     checkpoint = load_checkpoint(config.checkpoint_path)
     submitted = set(checkpoint.get("submitted_batches") or [])
     submitted_count = 0
@@ -551,7 +559,9 @@ def _read_history_messages(path: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _build_batches(messages: list[dict[str, Any]], *, session_id: str) -> list[dict[str, Any]]:
+def _build_batches(
+    messages: list[dict[str, Any]], *, session_id: str, source_identity: str = ""
+) -> list[dict[str, Any]]:
     batches: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
     start_line = 0
@@ -559,7 +569,15 @@ def _build_batches(messages: list[dict[str, Any]], *, session_id: str) -> list[d
     for message in messages:
         role = message["role"]
         if role == "user" and current:
-            batches.append(_batch(current, session_id=session_id, start_line=start_line, end_line=end_line))
+            batches.append(
+                _batch(
+                    current,
+                    session_id=session_id,
+                    source_identity=source_identity,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+            )
             current = []
         if not current:
             start_line = int(message["line_number"])
@@ -572,12 +590,33 @@ def _build_batches(messages: list[dict[str, Any]], *, session_id: str) -> list[d
             }
         )
     if current:
-        batches.append(_batch(current, session_id=session_id, start_line=start_line, end_line=end_line))
+        batches.append(
+            _batch(
+                current,
+                session_id=session_id,
+                source_identity=source_identity,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
     return batches
 
 
-def _batch(messages: list[dict[str, Any]], *, session_id: str, start_line: int, end_line: int) -> dict[str, Any]:
-    identity = {"session_id": session_id, "line_start": start_line, "line_end": end_line, "messages": messages}
+def _batch(
+    messages: list[dict[str, Any]],
+    *,
+    session_id: str,
+    source_identity: str,
+    start_line: int,
+    end_line: int,
+) -> dict[str, Any]:
+    identity = {
+        "source_identity": source_identity,
+        "session_id": session_id,
+        "line_start": start_line,
+        "line_end": end_line,
+        "messages": messages,
+    }
     batch_hash = stable_hash(json.dumps(identity, ensure_ascii=False, sort_keys=True))[:16]
     return {
         "messages": messages,

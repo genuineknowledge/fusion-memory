@@ -5,9 +5,11 @@ import asyncio
 import hashlib
 import os
 import ssl
+import ipaddress
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import anyio
 import httpx
@@ -22,6 +24,10 @@ class E2EConfig:
     token_a: str = field(repr=False)
     token_b: str = field(repr=False)
     ca_file: str | None = None
+
+
+class MissingIntegrationConfig(RuntimeError):
+    """Required operator configuration was not supplied."""
 
 
 class DeployedMcpClient:
@@ -68,14 +74,15 @@ class DeployedMcpStack:
             token_a = os.environ.get("FUSION_MEMORY_E2E_TOKEN_A", "").strip()
             token_b = os.environ.get("FUSION_MEMORY_E2E_TOKEN_B", "").strip()
             if not url or not token_a or not token_b:
-                raise RuntimeError(
+                raise MissingIntegrationConfig(
                     "set FUSION_MEMORY_E2E_URL, FUSION_MEMORY_E2E_TOKEN_A, and "
                     "FUSION_MEMORY_E2E_TOKEN_B before integration tests"
                 )
             ca_file = os.environ.get("FUSION_MEMORY_E2E_CA_FILE", "").strip() or None
             if ca_file and not os.path.isfile(ca_file):
-                raise RuntimeError("FUSION_MEMORY_E2E_CA_FILE does not exist")
+                raise ValueError("FUSION_MEMORY_E2E_CA_FILE does not exist")
             config = E2EConfig(url=url, token_a=token_a, token_b=token_b, ca_file=ca_file)
+        _validate_e2e_url(config.url)
         self.config = config
 
     def client(self, *, user: str, workspace: str = "ws", session: str) -> DeployedMcpClient:
@@ -130,14 +137,34 @@ class DeployedMcpStack:
         value = os.environ.get("FUSION_MEMORY_E2E_WORKER_STATS_URLS", "")
         urls = [item.strip().rstrip("/") for item in value.split(",") if item.strip()]
         if len(urls) < 2:
-            raise RuntimeError("set FUSION_MEMORY_E2E_WORKER_STATS_URLS to at least two fake worker URLs")
+            raise MissingIntegrationConfig("set FUSION_MEMORY_E2E_WORKER_STATS_URLS to at least two fake worker URLs")
         return urls
+
+
+def _validate_e2e_url(url: str) -> None:
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError("FUSION_MEMORY_E2E_URL is invalid") from exc
+    if not parts.hostname or parts.path != "/mcp" or parts.username is not None or parts.password is not None:
+        raise ValueError("FUSION_MEMORY_E2E_URL must use exact /mcp without credentials")
+    if parts.query or parts.fragment:
+        raise ValueError("FUSION_MEMORY_E2E_URL must not contain query or fragment")
+    loopback = parts.hostname.lower() == "localhost"
+    try:
+        loopback = loopback or ipaddress.ip_address(parts.hostname).is_loopback
+    except ValueError:
+        pass
+    if parts.scheme != "https" and not (parts.scheme == "http" and loopback):
+        raise ValueError("FUSION_MEMORY_E2E_URL must use HTTPS except for loopback development")
 
 
 class _FakeWorkerState:
     def __init__(self, delay_seconds: float) -> None:
         self.delay_seconds = delay_seconds
         self.requests: list[dict[str, Any]] = []
+        self.fail_embeddings = False
 
     async def record(self, path: str, response_factory: Any, *, tags: list[str] | None = None) -> web.Response:
         started = time.monotonic()
@@ -164,6 +191,8 @@ def create_fake_worker_app(*, delay_seconds: float = 0.0) -> web.Application:
         dimensions = int(payload.get("dimensions") or 1024)
 
         async def response() -> web.Response:
+            if state.fail_embeddings:
+                return web.json_response({"error": "configured inference failure"}, status=500)
             vectors = []
             for index, _text in enumerate(texts):
                 vector = [0.0] * dimensions
@@ -190,11 +219,16 @@ def create_fake_worker_app(*, delay_seconds: float = 0.0) -> web.Application:
         state.requests.clear()
         return web.json_response({"ok": True})
 
+    async def configure_failure(request: web.Request) -> web.Response:
+        state.fail_embeddings = bool((await request.json()).get("enabled"))
+        return web.json_response({"ok": True, "enabled": state.fail_embeddings})
+
     app.router.add_get("/health", health)
     app.router.add_post("/v1/embeddings", embeddings)
     app.router.add_post("/v1/rerank", rerank)
     app.router.add_get("/stats", stats)
     app.router.add_post("/stats/reset", reset_stats)
+    app.router.add_post("/fail/embeddings", configure_failure)
     return app
 
 

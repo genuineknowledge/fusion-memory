@@ -69,16 +69,22 @@ class FusionMemoryRuntime:
 
     def background_health(self) -> dict[str, object]:
         model_pools: dict[str, list[dict[str, object]]] = {}
+        configured_pools_healthy = True
         for label, pool in zip(("embedding", "reranker"), self.endpoint_pools):
+            if pool is None:
+                continue
             snapshot = getattr(pool, "snapshot", None)
             try:
                 value = snapshot() if callable(snapshot) else []
             except Exception:
                 value = []
             model_pools[label] = value if isinstance(value, list) else []
+            configured_pools_healthy = configured_pools_healthy and any(
+                bool(endpoint.get("healthy")) for endpoint in model_pools[label] if isinstance(endpoint, dict)
+            )
         with self._supervisor_lock:
             result: dict[str, object] = {
-                "ok": self._supervisor_alive,
+                "ok": self._supervisor_alive and configured_pools_healthy,
                 "supervisor_alive": self._supervisor_alive,
                 "model_pools": model_pools,
             }

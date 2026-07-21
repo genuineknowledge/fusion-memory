@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
+import ipaddress
 import json
+import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
@@ -71,9 +72,9 @@ def create_mcp_server(
     lifespan: Any = None,
 ) -> FastMCP:
     """Create the authenticated MCP server and its structured tools."""
-    if not path.startswith("/"):
-        raise ValueError("MCP path must start with '/'")
-    public_parts = urlsplit(public_url)
+    if path != "/mcp":
+        raise ValueError("MCP path must be exactly '/mcp'")
+    public_parts = _validated_public_url(public_url)
     public_host = public_parts.netloc
     allowed_hosts = [f"{host}:*", host, public_host]
     allowed_origins = [f"{public_parts.scheme}://{public_host}"]
@@ -299,7 +300,11 @@ def _install_runtime_lifespan(server: FastMCP, runtime: Any, custom_lifespan: An
 
 @asynccontextmanager
 async def _health_supervisor(runtime: Any) -> AsyncIterator[None]:
-    pools = tuple(pool for pool in getattr(runtime, "endpoint_pools", ()) if callable(getattr(pool, "healthy_endpoints", None)))
+    pools = tuple(
+        pool
+        for pool in getattr(runtime, "endpoint_pools", ())
+        if callable(getattr(pool, "active_health_check", None))
+    )
     interval = float(getattr(runtime, "health_check_interval_seconds", 5.0))
     if interval <= 0:
         interval = 5.0
@@ -325,12 +330,38 @@ async def _health_supervisor(runtime: Any) -> AsyncIterator[None]:
 async def _supervise_endpoint_pool(pool: Any, interval: float) -> None:
     while True:
         try:
-            await anyio.to_thread.run_sync(pool.healthy_endpoints, abandon_on_cancel=True)
+            await anyio.to_thread.run_sync(pool.active_health_check, abandon_on_cancel=True)
         except Exception:
             # EndpointPool records probe failures itself; a supervisor must not
             # bring down the MCP lifespan for a transient health-check failure.
             pass
         await anyio.sleep(interval)
+
+
+def _validated_public_url(public_url: str):
+    try:
+        parts = urlsplit(public_url)
+        _ = parts.port
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError("MCP public URL is invalid") from exc
+    if not parts.scheme or not parts.hostname or parts.path != "/mcp":
+        raise ValueError("MCP public URL must use exact path '/mcp'")
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        raise ValueError("MCP public URL must not contain credentials, query, or fragment")
+    if parts.scheme == "https":
+        return parts
+    if parts.scheme == "http" and _is_loopback_host(parts.hostname):
+        return parts
+    raise ValueError("MCP public URL must use HTTPS except for loopback development")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _pooled_connection_factory(pool: Any):

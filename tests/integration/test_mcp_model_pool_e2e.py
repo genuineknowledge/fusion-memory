@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.integration.mcp_stack import DeployedMcpStack, E2EConfig
+from tests.integration.mcp_stack import DeployedMcpStack, E2EConfig, MissingIntegrationConfig
 
 
 @dataclass
@@ -47,7 +47,7 @@ def _wait_http(url: str, process: subprocess.Popen[bytes], timeout: float = 20.0
 def managed_pool_stack() -> ManagedPoolStack:
     try:
         base = DeployedMcpStack()
-    except RuntimeError as exc:
+    except MissingIntegrationConfig as exc:
         pytest.skip(str(exc))
     dsn = os.environ.get("FUSION_MEMORY_PG_DSN", "").strip()
     pepper = os.environ.get("FUSION_MEMORY_TOKEN_PEPPER", "").strip()
@@ -88,12 +88,12 @@ def managed_pool_stack() -> ManagedPoolStack:
                 "FUSION_MEMORY_EMBEDDING_PROVIDER": "http",
                 "FUSION_MEMORY_EMBEDDING_ENDPOINTS": ",".join(f"{url}/v1/embeddings" for url in worker_urls),
                 "FUSION_MEMORY_EMBEDDING_DIMENSION": "1024",
-                "FUSION_MEMORY_EMBEDDING_FAILURE_THRESHOLD": "2",
+                "FUSION_MEMORY_EMBEDDING_FAILURE_THRESHOLD": "1",
                 "FUSION_MEMORY_EMBEDDING_RECOVERY_SECONDS": "60",
                 "FUSION_MEMORY_EMBEDDING_MAX_IN_FLIGHT": "1",
                 "FUSION_MEMORY_RERANKER_PROVIDER": "http",
                 "FUSION_MEMORY_RERANKER_ENDPOINTS": ",".join(f"{url}/v1/rerank" for url in worker_urls),
-                "FUSION_MEMORY_RERANKER_FAILURE_THRESHOLD": "2",
+                "FUSION_MEMORY_RERANKER_FAILURE_THRESHOLD": "1",
                 "FUSION_MEMORY_RERANKER_RECOVERY_SECONDS": "60",
                 "FUSION_MEMORY_RERANKER_MAX_IN_FLIGHT": "1",
                 "FUSION_MEMORY_EXTRACTOR_MODE": "off",
@@ -163,5 +163,22 @@ def test_model_pool_survives_one_of_two_worker_processes(managed_pool_stack: Man
         failed = [snapshot for snapshot in snapshots if snapshot["healthy"] is False]
         healthy = [snapshot for snapshot in snapshots if snapshot["healthy"] is True]
         assert len(failed) == 1
-        assert int(failed[0]["failure_count"]) >= 2
+        assert int(failed[0]["failure_count"]) >= 1
         assert len(healthy) == 1
+
+
+@pytest.mark.integration
+def test_model_pool_fails_over_after_worker_returns_inference_500(managed_pool_stack: ManagedPoolStack):
+    stack = managed_pool_stack.stack
+    failing_worker = managed_pool_stack.worker_urls[0]
+    httpx.post(f"{failing_worker}/fail/embeddings", json={"enabled": True}, timeout=5.0).raise_for_status()
+    client = stack.client(user="a", workspace="ws-500", session="pool-500")
+
+    for index in range(4):
+        result = client.call("memory_add", {"content": f"http-500-failover-{index}-{uuid.uuid4().hex}"})
+        assert result["ok"] is True
+
+    health = client.call("memory_health", {})
+    snapshots = health["result"]["background"]["model_pools"]["embedding"]
+    assert any(snapshot["healthy"] is False for snapshot in snapshots)
+    assert any(snapshot["healthy"] is True for snapshot in snapshots)

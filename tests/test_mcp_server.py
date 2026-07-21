@@ -73,7 +73,7 @@ def mcp_app(fake_runtime: FakeMemoryRuntime):
         runtime=fake_runtime,
         token_verifier=FakeTokenVerifier(),
         path="/mcp",
-        public_url="http://test/mcp",
+        public_url="http://localhost/mcp",
         stateless_http=True,
         json_response=True,
     )
@@ -90,8 +90,8 @@ async def mcp_client_factory(mcp_app):
                 "X-Fusion-Memory-Session": session_id,
             }
             transport = httpx.ASGITransport(app=mcp_app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as http_client:
-                async with streamable_http_client("http://test/mcp", http_client=http_client) as (read_stream, write_stream, _):
+            async with httpx.AsyncClient(transport=transport, base_url="http://localhost", headers=headers) as http_client:
+                async with streamable_http_client("http://localhost/mcp", http_client=http_client) as (read_stream, write_stream, _):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         yield session
@@ -136,7 +136,7 @@ async def test_user_id_comes_from_token_and_is_not_a_tool_parameter(mcp_client_f
 async def test_invalid_token_is_rejected_at_http_auth_layer(mcp_app):
     transport = httpx.ASGITransport(app=mcp_app)
     async with mcp_app.router.lifespan_context(mcp_app):
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/mcp",
                 headers={"Authorization": "Bearer invalid"},
@@ -167,6 +167,49 @@ async def test_public_origin_without_mcp_path_passes_transport_security():
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize(
+    "public_url",
+    ["https://memory.example/mcp", "http://127.0.0.1:8700/mcp", "http://127.1.2.3/mcp", "http://[::1]:8700/mcp", "http://localhost/mcp"],
+)
+def test_create_mcp_server_accepts_secure_and_loopback_public_urls(public_url):
+    server = create_mcp_server(
+        runtime=FakeMemoryRuntime(),
+        token_verifier=FakeTokenVerifier(),
+        public_url=public_url,
+    )
+    assert server.settings.streamable_http_path == "/mcp"
+
+
+@pytest.mark.parametrize("path", ["/native", "/mcp/", "/mcp/v1"])
+def test_create_mcp_server_rejects_non_contract_path(path):
+    with pytest.raises(ValueError, match="exactly '/mcp'"):
+        create_mcp_server(
+            runtime=FakeMemoryRuntime(),
+            token_verifier=FakeTokenVerifier(),
+            path=path,
+            public_url="https://memory.example/mcp",
+        )
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    [
+        "http://memory.example/mcp",
+        "https://user:pass@memory.example/mcp",
+        "https://memory.example/native",
+        "https://memory.example/mcp?token=secret",
+        "https://memory.example/mcp#fragment",
+    ],
+)
+def test_create_mcp_server_rejects_unsafe_public_url(public_url):
+    with pytest.raises(ValueError):
+        create_mcp_server(
+            runtime=FakeMemoryRuntime(),
+            token_verifier=FakeTokenVerifier(),
+            public_url=public_url,
+        )
+
+
 @pytest.mark.anyio
 async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdown():
     import threading
@@ -175,7 +218,7 @@ async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdow
     release = threading.Event()
 
     class BlockingPool:
-        def healthy_endpoints(self):
+        def active_health_check(self):
             started.set()
             release.wait(timeout=5)
             return []
@@ -187,17 +230,17 @@ async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdow
     server = create_mcp_server(
         runtime=Runtime(),
         token_verifier=FakeTokenVerifier(),
-        public_url="http://test/mcp",
+        public_url="http://localhost/mcp",
     )
     app = server.streamable_http_app()
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://test",
+            base_url="http://localhost",
             headers={"Authorization": "Bearer token-a"},
         ) as http_client:
-            async with streamable_http_client("http://test/mcp", http_client=http_client) as (read_stream, write_stream, _):
+            async with streamable_http_client("http://localhost/mcp", http_client=http_client) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as client:
                     await client.initialize()
                     assert await __import__("anyio").to_thread.run_sync(started.wait, 0.2)
@@ -233,7 +276,7 @@ async def test_runtime_lifespan_spans_multiple_streamable_http_sessions():
         runtime=runtime,
         token_verifier=FakeTokenVerifier(),
         path="/mcp",
-        public_url="http://test/mcp",
+        public_url="http://localhost/mcp",
         lifespan=custom_lifespan,
     )
     server.settings.stateless_http = True
@@ -249,10 +292,10 @@ async def test_runtime_lifespan_spans_multiple_streamable_http_sessions():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://test",
+            base_url="http://localhost",
             headers={"Authorization": "Bearer token-a"},
         ) as http_client:
-            async with streamable_http_client("http://test/mcp", http_client=http_client) as (
+            async with streamable_http_client("http://localhost/mcp", http_client=http_client) as (
                 read_stream,
                 write_stream,
                 _,
@@ -298,7 +341,7 @@ async def test_runtime_lifespan_clears_custom_state_when_startup_fails():
         runtime=Runtime(),
         token_verifier=FakeTokenVerifier(),
         path="/mcp",
-        public_url="http://test/mcp",
+        public_url="http://localhost/mcp",
         lifespan=custom_lifespan,
     )
     app = server.streamable_http_app()
@@ -321,7 +364,7 @@ async def test_supervisor_state_is_false_after_shutdown_and_failure(monkeypatch)
     assert runtime.background_health()["ok"] is False
 
     class Pool:
-        def healthy_endpoints(self):
+        def active_health_check(self):
             return []
 
     async def fail_supervisor(*args, **kwargs):
@@ -353,14 +396,14 @@ def test_cli_starts_only_mcp_server(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["fusion-memory", "mcp-server", "--host", "0.0.0.0", "--port", "9123", "--path", "/native", "--public-url", "http://test/native"],
+        ["fusion-memory", "mcp-server", "--host", "0.0.0.0", "--port", "9123", "--path", "/mcp", "--public-url", "http://localhost/mcp"],
     )
 
     from fusion_memory.cli import main
 
     main()
 
-    assert captured == {"host": "0.0.0.0", "port": 9123, "path": "/native", "public_url": "http://test/native"}
+    assert captured == {"host": "0.0.0.0", "port": 9123, "path": "/mcp", "public_url": "http://localhost/mcp"}
 
 
 def test_package_does_not_eagerly_import_mcp_server():
@@ -502,6 +545,17 @@ def test_runtime_background_health_includes_sanitized_model_pool_snapshots():
         "embedding": [{"endpoint": "embedding-1", "healthy": True, "failure_count": 0}],
         "reranker": [{"endpoint": "reranker-1", "healthy": True, "failure_count": 0}],
     }
+
+
+def test_runtime_background_health_fails_when_configured_pool_has_no_healthy_endpoint():
+    class Pool:
+        def snapshot(self):
+            return [{"endpoint": "embedding-1", "healthy": False, "failure_count": 3}]
+
+    runtime = FusionMemoryRuntime(object(), lambda _store: object(), endpoint_pools=(Pool(), None))
+    runtime.mark_supervisor_alive()
+
+    assert runtime.background_health()["ok"] is False
 
 
 def test_runtime_from_env_closes_resources_when_model_builder_fails(monkeypatch):

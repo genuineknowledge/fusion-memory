@@ -63,6 +63,40 @@ def test_cli_health_json_pings_mcp_without_printing_token(capsys, monkeypatch):
     assert json.loads(output)["mcp"]["ok"] is True
 
 
+def test_cli_health_uses_live_mcp_model_snapshots(capsys, monkeypatch):
+    from fusion_memory import cli
+
+    monkeypatch.setenv(
+        "FUSION_MEMORY_EMBEDDING_UNITS",
+        "fusion-memory-embedding@a.service fusion-memory-embedding@b.service",
+    )
+    runtime = SimpleNamespace(close=lambda: None)
+    pool = SimpleNamespace()
+    live_background = {
+        "ok": False,
+        "supervisor_alive": True,
+        "model_pools": {
+            "embedding": [{"healthy": False}, {"healthy": True}],
+            "reranker": [{"healthy": True}],
+        },
+    }
+    with (
+        patch("fusion_memory.cli.runtime_from_env", return_value=(runtime, pool)),
+        patch("fusion_memory.cli.ProductionHealthRuntime", return_value=FakeHealthRuntime()),
+        patch(
+            "fusion_memory.cli.mcp_health_check",
+            new=AsyncMock(return_value={"ok": False, "background": live_background}),
+        ),
+        patch("fusion_memory.cli.sys.argv", ["fusion-memory", "health", "--json"]),
+    ):
+        assert cli.main() == 1
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["embedding"]["ok"] is False
+    assert report["embedding"]["healthy_endpoints"] == 1
+    assert report["embedding"]["failed_units"] == ["fusion-memory-embedding@a.service"]
+
+
 def test_restart_unhealthy_restarts_only_failed_configured_units(monkeypatch):
     from fusion_memory.health import restart_unhealthy_units
 

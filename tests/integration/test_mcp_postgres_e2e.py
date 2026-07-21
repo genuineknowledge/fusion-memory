@@ -10,14 +10,14 @@ from typing import Any
 
 import pytest
 
-from tests.integration.mcp_stack import DeployedMcpStack
+from tests.integration.mcp_stack import DeployedMcpStack, MissingIntegrationConfig
 
 
 @pytest.fixture
 def deployed_stack() -> DeployedMcpStack:
     try:
         return DeployedMcpStack()
-    except RuntimeError as exc:
+    except MissingIntegrationConfig as exc:
         pytest.skip(str(exc))
 
 
@@ -27,10 +27,7 @@ def postgres_connection():
     if not dsn:
         pytest.skip("set FUSION_MEMORY_PG_DSN before Postgres persistence integration tests")
     psycopg2 = pytest.importorskip("psycopg2", reason="install the Postgres test dependency")
-    try:
-        connection = psycopg2.connect(dsn)
-    except Exception:
-        pytest.skip("configured Fusion Memory Postgres database is unavailable")
+    connection = psycopg2.connect(dsn)
     connection.autocommit = True
     try:
         yield connection
@@ -60,7 +57,7 @@ def test_user_scope_and_cross_session_workspace_retrieval(deployed_stack: Deploy
 def test_different_users_are_served_concurrently(deployed_stack: DeployedMcpStack):
     try:
         deployed_stack.reset_worker_stats()
-    except RuntimeError as exc:
+    except MissingIntegrationConfig as exc:
         pytest.skip(str(exc))
 
     barrier = __import__("threading").Barrier(2)

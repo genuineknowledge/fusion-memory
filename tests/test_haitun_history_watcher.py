@@ -114,6 +114,30 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             checkpoint = load_checkpoint(cfg.checkpoint_path)
             self.assertEqual(len(checkpoint["submitted_batches"]), 2)
 
+    def test_identical_histories_in_different_workspaces_have_distinct_stable_batch_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submitted: list[list[str]] = []
+            configs = []
+            for name in ("workspace-a", "workspace-b"):
+                workspace = root / name
+                history = workspace / "histories" / "same-session.jsonl"
+                history.parent.mkdir(parents=True)
+                history.write_text(
+                    '{"role":"user","content":"same"}\n'
+                    '{"role":"assistant","content":"same reply"}\n',
+                    encoding="utf-8",
+                )
+                cfg = config_from_workspace(workspace=workspace, session_id="same-session", env={"FUSION_MEMORY_TOKEN": "token"})
+                configs.append(cfg)
+                calls: list[str] = []
+                sync_history_once(cfg, submit_add=lambda payload: calls.append(payload["metadata"]["batch_hash"]))
+                submitted.append(calls)
+
+            self.assertNotEqual(submitted[0], submitted[1])
+            self.assertEqual(sync_history_once(configs[0], submit_add=lambda payload: None)["submitted_count"], 0)
+            self.assertEqual(sync_history_once(configs[1], submit_add=lambda payload: None)["submitted_count"], 0)
+
     def test_cli_sync_haitun_history_once_outputs_json(self) -> None:
         from fusion_memory import cli
 

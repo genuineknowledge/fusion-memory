@@ -36,6 +36,36 @@ def health_report(runtime: HealthRuntime) -> dict[str, dict[str, object] | bool]
     return {"ok": all(bool(check.get("ok")) for check in checks.values()), **checks}
 
 
+def live_model_health(background: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Translate the authenticated MCP supervisor snapshot into timer report checks."""
+    pools = background.get("model_pools")
+    if not isinstance(pools, dict):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for name in ("embedding", "reranker"):
+        if name not in pools:
+            result[name] = {
+                "ok": True,
+                "configured": False,
+                "healthy_endpoints": 0,
+                "endpoints": [],
+                "failed_units": [],
+            }
+            continue
+        snapshots = pools[name]
+        if not isinstance(snapshots, list):
+            snapshots = []
+        healthy_count = sum(1 for endpoint in snapshots if isinstance(endpoint, dict) and endpoint.get("healthy"))
+        result[name] = {
+            "ok": bool(snapshots) and healthy_count == len(snapshots),
+            "configured": True,
+            "healthy_endpoints": healthy_count,
+            "endpoints": snapshots,
+            "failed_units": _failed_units(name, snapshots),
+        }
+    return result
+
+
 class ProductionHealthRuntime:
     """Health adapter around the production MCP runtime and bounded PG pool."""
 
@@ -221,6 +251,7 @@ def run_health(*, restart_unhealthy: bool = False) -> dict[str, object]:
         report["mcp"] = anyio.run(mcp_health_check)
         if isinstance(report["mcp"], dict) and isinstance(report["mcp"].get("background"), dict):
             report["background"] = dict(report["mcp"]["background"])
+            report.update(live_model_health(report["background"]))
         report["ok"] = all(bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")) and bool(report["mcp"]["ok"])
         if restart_unhealthy:
             report["restarts"] = restart_unhealthy_units(report)

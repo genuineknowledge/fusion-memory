@@ -40,7 +40,7 @@ from fusion_memory.product import (
 from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
-from fusion_memory.health import ProductionHealthRuntime, health_report, mcp_health_check, restart_unhealthy_units
+from fusion_memory.health import ProductionHealthRuntime, health_report, live_model_health, mcp_health_check, restart_unhealthy_units
 from fusion_memory.mcp_runtime import runtime_from_env
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
 from fusion_memory.storage.token_store import PostgresTokenStore, TokenRecord
@@ -422,6 +422,7 @@ def main() -> None:
                 report["mcp"] = anyio.run(mcp_health_check)
                 if isinstance(report["mcp"], dict) and isinstance(report["mcp"].get("background"), dict):
                     report["background"] = dict(report["mcp"]["background"])
+                    report.update(live_model_health(report["background"]))
                 report["ok"] = all(
                     bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")
                 ) and bool(report["mcp"]["ok"])
