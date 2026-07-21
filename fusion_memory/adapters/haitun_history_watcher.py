@@ -539,10 +539,10 @@ def _read_history_messages(path: Path) -> list[dict[str, Any]]:
             "line_number": line_number,
             "raw_hash": stable_hash(raw),
         }
-        for field in ("timestamp", "turn_id", "source_uri"):
-            value = item.get(field)
+        for key in ("timestamp", "turn_id", "source_uri"):
+            value = item.get(key)
             if isinstance(value, str) and value.strip():
-                message[field] = value.strip()
+                message[key] = value.strip()
         if "source_uri" not in message:
             source = item.get("source")
             if isinstance(source, str) and source.strip():

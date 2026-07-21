@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-
 import pytest
 
 from fusion_memory.core.runtime_config import postgres_pool_settings_from_env
