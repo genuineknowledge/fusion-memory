@@ -215,3 +215,60 @@ def test_snapshot_redacts_common_credential_forms_from_last_error() -> None:
             "api-secret",
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "safe_endpoint", "secrets"),
+    [
+        pytest.param(
+            "https://ipv6-user:ipv6-pass@[2001:db8::1]:8443/v1/embed"
+            "?X-Amz-Signature=ipv6-signature#ipv6-fragment",
+            "https://[2001:db8::1]:8443/v1/embed",
+            ("ipv6-user", "ipv6-pass", "ipv6-signature", "ipv6-fragment"),
+            id="bracketed-ipv6",
+        ),
+        pytest.param(
+            "https://delim-user:delim-pass@example.test/v1/embed"
+            "?opaque=comma-secret,semicolon-secret;tail#delim-fragment",
+            "https://example.test/v1/embed",
+            ("delim-user", "delim-pass", "comma-secret", "semicolon-secret", "delim-fragment"),
+            id="query-sub-delimiters",
+        ),
+        pytest.param(
+            "https://paren-user:pa(ss)word-secret@example.test/v1/embed"
+            "?token=paren-query#paren-fragment",
+            "https://example.test/v1/embed",
+            ("paren-user", "pa(ss)word-secret", "paren-query", "paren-fragment"),
+            id="parenthesized-userinfo",
+        ),
+        pytest.param(
+            "https://port-user:port-pass@example.test:notaport/v1/embed"
+            "?token=port-query#port-fragment",
+            "[redacted-url]",
+            ("port-user", "port-pass", "notaport", "port-query", "port-fragment"),
+            id="invalid-port",
+        ),
+        pytest.param(
+            "https://broken-user:broken-pass@[2001:db8::1/v1/embed"
+            "?token=broken-query#broken-fragment",
+            "[redacted-url]",
+            ("broken-user", "broken-pass", "broken-query", "broken-fragment"),
+            id="malformed-brackets",
+        ),
+    ],
+)
+def test_failure_snapshot_sanitizes_odd_urls_without_masking_transport_failure(
+    endpoint: str,
+    safe_endpoint: str,
+    secrets: tuple[str, ...],
+) -> None:
+    pool = EndpointPool([endpoint], failure_threshold=1)
+
+    pool.mark_failure(endpoint, f"transport failed ({endpoint}), retry.")
+
+    snapshot = pool.snapshot()[0]
+    assert snapshot["healthy"] is False
+    assert snapshot["failure_count"] == 1
+    assert snapshot["endpoint"] == safe_endpoint
+    assert safe_endpoint in str(snapshot["last_error"])
+    assert all(secret not in str(snapshot) for secret in secrets)

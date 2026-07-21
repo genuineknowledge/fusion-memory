@@ -431,23 +431,51 @@ def _is_transport_failure(exc: BaseException) -> bool:
 
 
 def _safe_endpoint(endpoint: str) -> str:
-    parsed = urlsplit(endpoint)
-    if not parsed.scheme or not parsed.netloc:
-        return endpoint
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    try:
+        parsed = urlsplit(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            return "[redacted-url]" if "://" in endpoint else endpoint
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, UnicodeError, ValueError):
+        return "[redacted-url]"
+    if not hostname:
+        return "[redacted-url]"
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port:
+        host = f"{host}:{port}"
+    try:
+        return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    except (TypeError, UnicodeError, ValueError):
+        return "[redacted-url]"
+
+
+def _sanitize_url(match: re.Match[str]) -> str:
+    value = match.group(0)
+    suffix = ""
+    while value and value[-1] in ".,;:!?":
+        suffix = value[-1] + suffix
+        value = value[:-1]
+    for closing, opening in ((")", "("), ("]", "["), ("}", "{")):
+        while value.endswith(closing) and value.count(closing) > value.count(opening):
+            suffix = closing + suffix
+            value = value[:-1]
+    if value.endswith("'") and value.count("'") % 2:
+        suffix = "'" + suffix
+        value = value[:-1]
+    if not value:
+        return "[redacted-url]" + suffix
+    return _safe_endpoint(value) + suffix
 
 
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|client[_-]?secret|password|passwd|credential|credentials)\s*([=:])\s*[^\s,;]+"
 )
 _AUTH_SCHEME_RE = re.compile(r"(?i)\b(authorization\s*:\s*)?(basic|bearer)\s+[^\s,;]+")
-_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"()\[\]{},;]+")
+_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"`]+")
 
 
 def _sanitize_error(value: str) -> str:
-    value = _URL_RE.sub(lambda match: _safe_endpoint(match.group(0)), value)
+    value = _URL_RE.sub(_sanitize_url, value)
     value = _CREDENTIAL_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", value)
     return _AUTH_SCHEME_RE.sub(lambda match: f"{match.group(1) or ''}{match.group(2)} [redacted]", value)
