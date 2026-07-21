@@ -463,7 +463,7 @@ def _sanitize_url(match: re.Match[str]) -> str:
     if value.endswith("'") and value.count("'") % 2:
         suffix = "'" + suffix
         value = value[:-1]
-    if not value:
+    if not value or value.count("://") > 1:
         return "[redacted-url]" + suffix
     return _safe_endpoint(value) + suffix
 

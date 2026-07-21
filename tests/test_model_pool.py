@@ -272,3 +272,28 @@ def test_failure_snapshot_sanitizes_odd_urls_without_masking_transport_failure(
     assert snapshot["endpoint"] == safe_endpoint
     assert safe_endpoint in str(snapshot["last_error"])
     assert all(secret not in str(snapshot) for secret in secrets)
+
+
+@pytest.mark.parametrize("delimiter", [",", ";"], ids=["comma", "semicolon"])
+def test_failure_snapshot_fails_closed_for_adjacent_urls_without_whitespace(delimiter: str) -> None:
+    first = "http://first-user:first-pass@first.test/v1/path"
+    second = "http://second-user:second-pass@second.test/v2/path?token=second-query#second-fragment"
+    pool = EndpointPool(["worker"], failure_threshold=1)
+
+    pool.mark_failure("worker", f"transport failed {first}{delimiter}{second}, retry.")
+
+    snapshot = pool.snapshot()[0]
+    assert snapshot["healthy"] is False
+    assert snapshot["failure_count"] == 1
+    assert snapshot["last_error"] == "transport failed [redacted-url], retry."
+    assert all(
+        secret not in str(snapshot)
+        for secret in (
+            "first-user",
+            "first-pass",
+            "second-user",
+            "second-pass",
+            "second-query",
+            "second-fragment",
+        )
+    )
