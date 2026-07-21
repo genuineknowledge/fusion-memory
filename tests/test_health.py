@@ -49,29 +49,25 @@ def test_cli_health_json_pings_mcp_without_printing_token(capsys, monkeypatch):
     token = "health-secret-token"
     monkeypatch.setenv("FUSION_MEMORY_HEALTH_MCP_URL", "http://127.0.0.1:8700/mcp")
     monkeypatch.setenv("FUSION_MEMORY_HEALTH_TOKEN", token)
-    runtime = SimpleNamespace(close=lambda: None)
-    pool = SimpleNamespace()
     with (
-        patch("fusion_memory.cli.runtime_from_env", return_value=(runtime, pool)),
-        patch("fusion_memory.cli.ProductionHealthRuntime", return_value=FakeHealthRuntime()),
-        patch("fusion_memory.cli.mcp_health_check", new=AsyncMock(return_value={"ok": True})),
+        patch(
+            "fusion_memory.cli.run_health",
+            return_value={"ok": True, "mcp": {"ok": True}},
+            create=True,
+        ) as run_health,
         patch("fusion_memory.cli.sys.argv", ["fusion-memory", "health", "--json"]),
     ):
         assert cli.main() == 0
+    run_health.assert_called_once_with(restart_unhealthy=False)
     output = capsys.readouterr().out
     assert token not in output
     assert json.loads(output)["mcp"]["ok"] is True
 
 
-def test_cli_health_uses_live_mcp_model_snapshots(capsys, monkeypatch):
-    from fusion_memory import cli
+def test_run_health_uses_live_mcp_model_snapshots(monkeypatch):
+    from fusion_memory import health
 
-    monkeypatch.setenv(
-        "FUSION_MEMORY_EMBEDDING_UNITS",
-        "fusion-memory-embedding@a.service fusion-memory-embedding@b.service",
-    )
-    runtime = SimpleNamespace(close=lambda: None)
-    pool = SimpleNamespace()
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
     live_background = {
         "ok": False,
         "supervisor_alive": True,
@@ -80,21 +76,150 @@ def test_cli_health_uses_live_mcp_model_snapshots(capsys, monkeypatch):
             "reranker": [{"healthy": True}],
         },
     }
-    with (
-        patch("fusion_memory.cli.runtime_from_env", return_value=(runtime, pool)),
-        patch("fusion_memory.cli.ProductionHealthRuntime", return_value=FakeHealthRuntime()),
-        patch(
-            "fusion_memory.cli.mcp_health_check",
-            new=AsyncMock(return_value={"ok": False, "background": live_background}),
-        ),
-        patch("fusion_memory.cli.sys.argv", ["fusion-memory", "health", "--json"]),
-    ):
-        assert cli.main() == 1
+    pool = _FakePostgresPool()
+    monkeypatch.setattr(health, "PostgresConnectionPool", lambda *args, **kwargs: pool, raising=False)
+    monkeypatch.setattr(
+        health,
+        "mcp_health_check",
+        AsyncMock(return_value={"ok": False, "background": live_background}),
+    )
 
-    report = json.loads(capsys.readouterr().out)
+    report = health.run_health()
+
     assert report["embedding"]["ok"] is False
     assert report["embedding"]["healthy_endpoints"] == 1
-    assert report["embedding"]["failed_units"] == ["fusion-memory-embedding@a.service"]
+    assert report["reranker"]["ok"] is True
+    assert pool.closed is True
+
+
+class _FakeCursor:
+    def execute(self, statement: str) -> None:
+        assert statement == "SELECT 1"
+
+    def fetchone(self):
+        return (1,)
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeConnection:
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor()
+
+    def rollback(self) -> None:
+        pass
+
+
+class _FakePostgresPool:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def connection(self, timeout_seconds: float):
+        from contextlib import nullcontext
+
+        return nullcontext(_FakeConnection())
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_run_health_never_builds_runtime_or_model_adapters(monkeypatch):
+    from fusion_memory import health
+    from fusion_memory import mcp_runtime
+    from fusion_memory.core import runtime_config
+
+    pool = _FakePostgresPool()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("model runtime builder called")
+
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr(health, "PostgresConnectionPool", lambda *args, **kwargs: pool, raising=False)
+    monkeypatch.setattr(health, "mcp_health_check", AsyncMock(return_value={"ok": False, "error": "offline"}))
+    monkeypatch.setattr(mcp_runtime, "runtime_from_env", forbidden)
+    monkeypatch.setattr(runtime_config, "_build_embedder", forbidden)
+    monkeypatch.setattr(runtime_config, "_build_reranker", forbidden)
+
+    report = health.run_health()
+
+    assert report["postgres"]["ok"] is True
+    assert pool.closed is True
+
+
+def test_run_health_queries_mcp_when_postgres_pool_construction_fails(monkeypatch):
+    from fusion_memory import health
+
+    mcp_check = AsyncMock(return_value={"ok": False, "error": "offline"})
+
+    def fail_pool(*args, **kwargs):
+        raise RuntimeError("contains-sensitive-dsn")
+
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://secret@memory")
+    monkeypatch.setattr(health, "PostgresConnectionPool", fail_pool, raising=False)
+    monkeypatch.setattr(health, "mcp_health_check", mcp_check)
+
+    report = health.run_health()
+
+    mcp_check.assert_awaited_once()
+    assert report["postgres"] == {"ok": False, "error": "RuntimeError"}
+    assert "secret" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "mcp_result",
+    [
+        {"ok": False, "error": "offline"},
+        {"ok": False, "background": {"ok": False, "model_pools": []}},
+    ],
+)
+def test_run_health_reports_unknown_models_without_valid_live_snapshot(monkeypatch, mcp_result):
+    from fusion_memory import health
+
+    pool = _FakePostgresPool()
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr(health, "PostgresConnectionPool", lambda *args, **kwargs: pool, raising=False)
+    monkeypatch.setattr(health, "mcp_health_check", AsyncMock(return_value=mcp_result))
+
+    report = health.run_health()
+
+    unknown = {
+        "ok": False,
+        "configured": None,
+        "healthy_endpoints": 0,
+        "endpoints": [],
+        "failed_units": [],
+        "error": "live_mcp_snapshot_unavailable",
+    }
+    assert report["embedding"] == unknown
+    assert report["reranker"] == unknown
+
+
+def test_restart_unhealthy_does_not_guess_model_unit_without_live_snapshot(monkeypatch):
+    from fusion_memory.health import restart_unhealthy_units
+
+    monkeypatch.setenv("FUSION_MEMORY_EMBEDDING_UNITS", "fusion-memory-embedding.service")
+    with patch("fusion_memory.health.subprocess.run") as run:
+        result = restart_unhealthy_units(
+            {
+                "embedding": {
+                    "ok": False,
+                    "configured": None,
+                    "healthy_endpoints": 0,
+                    "endpoints": [],
+                    "failed_units": [],
+                    "error": "live_mcp_snapshot_unavailable",
+                },
+                "reranker": {"ok": True},
+                "postgres": {"ok": True},
+                "background": {"ok": True},
+                "mcp": {"ok": True},
+            }
+        )
+
+    run.assert_not_called()
+    assert result["restarted"] == []
+    assert {"component": "embedding", "reason": "live_mcp_snapshot_unavailable"} in result["skipped"]
 
 
 def test_restart_unhealthy_restarts_only_failed_configured_units(monkeypatch):

@@ -40,8 +40,7 @@ from fusion_memory.product import (
 from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
-from fusion_memory.health import ProductionHealthRuntime, health_report, live_model_health, mcp_health_check, restart_unhealthy_units
-from fusion_memory.mcp_runtime import runtime_from_env
+from fusion_memory.health import run_health
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
 from fusion_memory.storage.token_store import PostgresTokenStore, TokenRecord
 from fusion_memory.storage.postgres_verifier import verify_postgres_backend
@@ -410,31 +409,7 @@ def main() -> None:
                 public_url=args.public_url,
             )
         if args.command == "health":
-            runtime, pool = runtime_from_env()
-            try:
-                report = health_report(
-                    ProductionHealthRuntime(
-                        runtime,
-                        pool,
-                        timeout_seconds=_float_env("FUSION_MEMORY_HEALTH_TIMEOUT_SECONDS", 5.0),
-                    )
-                )
-                report["mcp"] = anyio.run(mcp_health_check)
-                if isinstance(report["mcp"], dict) and isinstance(report["mcp"].get("background"), dict):
-                    report["background"] = dict(report["mcp"]["background"])
-                    report.update(live_model_health(report["background"]))
-                report["ok"] = all(
-                    bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")
-                ) and bool(report["mcp"]["ok"])
-                if args.restart_unhealthy:
-                    report["restarts"] = restart_unhealthy_units(report)
-                return _print_product_result(report, json_output=args.json)
-            finally:
-                close = getattr(runtime, "close", None)
-                if callable(close):
-                    close()
-                elif callable(getattr(pool, "close", None)):
-                    pool.close()
+            return _print_product_result(run_health(restart_unhealthy=args.restart_unhealthy), json_output=args.json)
         if args.command == "token":
             store = _token_store_from_args(args)
             if args.token_command == "create":

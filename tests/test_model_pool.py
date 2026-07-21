@@ -55,6 +55,84 @@ def test_pooled_embedder_retries_transport_failure_on_next_endpoint() -> None:
     assert embedder.pool.healthy_endpoints() == ["b"]
 
 
+def test_pooled_retry_excludes_failed_endpoint_after_concurrent_cursor_change() -> None:
+    first_call_started = threading.Event()
+    peer_leased = threading.Event()
+    failure_marked = threading.Event()
+    calls: list[str] = []
+
+    class Client:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            calls.append(self.endpoint)
+            if self.endpoint == "a":
+                first_call_started.set()
+                assert peer_leased.wait(timeout=1.0)
+                raise TimeoutError("a timed out")
+            return [[1.0] for _ in texts]
+
+    embedder = PooledEmbedder(
+        ["a", "b"],
+        client_factory=Client,
+        failure_threshold=2,
+        timeout_seconds=1.0,
+    )
+    original_mark_failure = embedder.pool.mark_failure
+
+    def mark_failure(*args, **kwargs) -> None:
+        original_mark_failure(*args, **kwargs)
+        failure_marked.set()
+
+    embedder.pool.mark_failure = mark_failure
+
+    def move_cursor_and_hold_peer() -> None:
+        assert first_call_started.wait(timeout=1.0)
+        with embedder.pool.lease(timeout_seconds=1.0) as endpoint:
+            assert endpoint == "b"
+            peer_leased.set()
+            assert failure_marked.wait(timeout=1.0)
+
+    worker = threading.Thread(target=move_cursor_and_hold_peer)
+    worker.start()
+    try:
+        assert embedder.embed_texts(["alpha"]) == [[1.0]]
+    finally:
+        failure_marked.set()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert calls == ["a", "b"]
+
+
+def test_lease_exclusion_waits_for_busy_unattempted_peer() -> None:
+    pool = EndpointPool(["a", "b"], max_in_flight=1)
+    pool._states["b"].semaphore.acquire()
+    acquired = threading.Event()
+    result: list[str] = []
+
+    def lease_unattempted_peer() -> None:
+        with pool.lease(timeout_seconds=1.0, exclude={"a"}) as endpoint:
+            result.append(endpoint)
+            acquired.set()
+
+    worker = threading.Thread(target=lease_unattempted_peer)
+    worker.start()
+    try:
+        assert not acquired.wait(timeout=0.05)
+        pool._states["b"].semaphore.release()
+        with pool._availability:
+            pool._availability.notify_all()
+        assert acquired.wait(timeout=1.0)
+    finally:
+        if pool._states["b"].semaphore.acquire(blocking=False):
+            pool._states["b"].semaphore.release()
+        worker.join(timeout=1.0)
+
+    assert result == ["b"]
+
+
 def test_pooled_reranker_preserves_score_contract() -> None:
     class Client:
         def __init__(self, endpoint: str) -> None:

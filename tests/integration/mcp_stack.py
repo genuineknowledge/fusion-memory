@@ -73,14 +73,16 @@ class DeployedMcpStack:
             url = os.environ.get("FUSION_MEMORY_E2E_URL", "").strip()
             token_a = os.environ.get("FUSION_MEMORY_E2E_TOKEN_A", "").strip()
             token_b = os.environ.get("FUSION_MEMORY_E2E_TOKEN_B", "").strip()
+            ca_file = os.environ.get("FUSION_MEMORY_E2E_CA_FILE", "").strip() or None
+            if url:
+                _validate_e2e_url(url)
+            if ca_file and not os.path.isfile(ca_file):
+                raise ValueError("FUSION_MEMORY_E2E_CA_FILE does not exist")
             if not url or not token_a or not token_b:
                 raise MissingIntegrationConfig(
                     "set FUSION_MEMORY_E2E_URL, FUSION_MEMORY_E2E_TOKEN_A, and "
                     "FUSION_MEMORY_E2E_TOKEN_B before integration tests"
                 )
-            ca_file = os.environ.get("FUSION_MEMORY_E2E_CA_FILE", "").strip() or None
-            if ca_file and not os.path.isfile(ca_file):
-                raise ValueError("FUSION_MEMORY_E2E_CA_FILE does not exist")
             config = E2EConfig(url=url, token_a=token_a, token_b=token_b, ca_file=ca_file)
         _validate_e2e_url(config.url)
         self.config = config

@@ -232,3 +232,23 @@ def test_postgres_batch_snapshot_preserves_durable_row_identities():
         "evidence": tuple(evidence),
     }
     assert [params for _sql, params in connection.cursor_instance.calls] == [(marker,), (marker,)]
+
+
+def test_invalid_present_e2e_url_fails_before_missing_token_skip(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FUSION_MEMORY_E2E_URL", "http://memory.example.test/mcp")
+    monkeypatch.delenv("FUSION_MEMORY_E2E_TOKEN_A", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_E2E_TOKEN_B", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_E2E_CA_FILE", raising=False)
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        DeployedMcpStack()
+
+
+def test_invalid_present_e2e_ca_fails_before_missing_config_skip(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.delenv("FUSION_MEMORY_E2E_URL", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_E2E_TOKEN_A", raising=False)
+    monkeypatch.delenv("FUSION_MEMORY_E2E_TOKEN_B", raising=False)
+    monkeypatch.setenv("FUSION_MEMORY_E2E_CA_FILE", str(tmp_path / "missing-ca.pem"))
+
+    with pytest.raises(ValueError, match="CA_FILE does not exist"):
+        DeployedMcpStack()

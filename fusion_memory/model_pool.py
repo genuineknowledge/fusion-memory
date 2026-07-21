@@ -80,7 +80,7 @@ class EndpointPool:
             return self._choose_locked()
 
     @contextmanager
-    def lease(self, timeout_seconds: float) -> Iterator[str]:
+    def lease(self, timeout_seconds: float, *, exclude: set[str] | None = None) -> Iterator[str]:
         """Reserve one endpoint slot, always returning it when the operation ends."""
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must not be negative")
@@ -88,7 +88,7 @@ class EndpointPool:
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError("model endpoint pool is exhausted")
-            candidates = self._healthy_candidates()
+            candidates = self._healthy_candidates(exclude or set())
             if not candidates:
                 # There may be an ejected endpoint whose recovery window is due.
                 if self._recover_due_endpoints():
@@ -218,11 +218,13 @@ class EndpointPool:
                 return endpoint
         raise EndpointUnavailable("no healthy model endpoints are available")
 
-    def _healthy_candidates(self) -> list[str]:
+    def _healthy_candidates(self, exclude: set[str] | None = None) -> list[str]:
+        excluded = exclude or set()
         with self._lock:
             return [
                 self.endpoints[(self._cursor + offset) % len(self.endpoints)]
                 for offset in range(len(self.endpoints))
+                if self.endpoints[(self._cursor + offset) % len(self.endpoints)] not in excluded
                 if self._states[self.endpoints[(self._cursor + offset) % len(self.endpoints)]].healthy
             ]
 
@@ -325,9 +327,7 @@ class _PooledClient:
         attempted: set[str] = set()
         while len(attempted) < len(self.pool.endpoints):
             try:
-                with self.pool.lease(timeout_seconds=self.timeout_seconds) as endpoint:
-                    if endpoint in attempted:
-                        break
+                with self.pool.lease(timeout_seconds=self.timeout_seconds, exclude=attempted) as endpoint:
                     attempted.add(endpoint)
                     started = time.perf_counter()
                     try:

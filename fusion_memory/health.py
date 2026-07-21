@@ -9,7 +9,10 @@ from typing import Any, Protocol
 
 import anyio
 
+from fusion_memory.core.runtime_config import postgres_pool_settings_from_env
 from fusion_memory.mcp_client import MemoryMcpClient
+from fusion_memory.mcp_runtime import _postgres_dsn_from_env
+from fusion_memory.storage.postgres_pool import PostgresConnectionPool
 
 
 class HealthRuntime(Protocol):
@@ -40,7 +43,7 @@ def live_model_health(background: dict[str, object]) -> dict[str, dict[str, obje
     """Translate the authenticated MCP supervisor snapshot into timer report checks."""
     pools = background.get("model_pools")
     if not isinstance(pools, dict):
-        return {}
+        return {name: _unknown_model_health() for name in ("embedding", "reranker")}
     result: dict[str, dict[str, object]] = {}
     for name in ("embedding", "reranker"):
         if name not in pools:
@@ -64,6 +67,17 @@ def live_model_health(background: dict[str, object]) -> dict[str, dict[str, obje
             "failed_units": _failed_units(name, snapshots),
         }
     return result
+
+
+def _unknown_model_health() -> dict[str, object]:
+    return {
+        "ok": False,
+        "configured": None,
+        "healthy_endpoints": 0,
+        "endpoints": [],
+        "failed_units": [],
+        "error": "live_mcp_snapshot_unavailable",
+    }
 
 
 class ProductionHealthRuntime:
@@ -171,11 +185,16 @@ def restart_unhealthy_units(report: dict[str, Any]) -> dict[str, object]:
     for component, variable in (("embedding", "FUSION_MEMORY_EMBEDDING_UNITS"), ("reranker", "FUSION_MEMORY_RERANKER_UNITS")):
         if bool(report.get(component, {}).get("ok")):
             continue
+        details = report.get(component, {})
+        if ("configured" in details and details.get("configured") is None) or details.get(
+            "error"
+        ) == "live_mcp_snapshot_unavailable":
+            skipped.append({"component": component, "reason": "live_mcp_snapshot_unavailable"})
+            continue
         units, error = _configured_units_safe(variable)
         if error:
             configuration_errors.append(error)
             continue
-        details = report.get(component, {})
         raw_failed = details.get("failed_units")
         if not raw_failed:
             raw_failed = _failed_units(component, list(details.get("endpoints", []))) if isinstance(details.get("endpoints", []), list) else []
@@ -237,28 +256,43 @@ def _failed_units(name: str, snapshot: list[dict[str, object]]) -> list[str]:
 
 
 def run_health(*, restart_unhealthy: bool = False) -> dict[str, object]:
-    from fusion_memory.mcp_runtime import runtime_from_env
-
-    runtime, pool = runtime_from_env()
+    pool = None
+    report: dict[str, object] = {}
     try:
-        report: dict[str, object] = health_report(
-            ProductionHealthRuntime(
-                runtime,
+        try:
+            settings = postgres_pool_settings_from_env()
+            pool = PostgresConnectionPool(
+                _postgres_dsn_from_env(),
+                min_connections=1,
+                max_connections=max(1, settings.max_connections),
+            )
+            report["postgres"] = ProductionHealthRuntime(
+                None,
                 pool,
                 timeout_seconds=float(os.getenv("FUSION_MEMORY_HEALTH_TIMEOUT_SECONDS", "5")),
-            )
-        )
-        report["mcp"] = anyio.run(mcp_health_check)
-        if isinstance(report["mcp"], dict) and isinstance(report["mcp"].get("background"), dict):
-            report["background"] = dict(report["mcp"]["background"])
-            report.update(live_model_health(report["background"]))
-        report["ok"] = all(bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")) and bool(report["mcp"]["ok"])
+            ).postgres_health()
+        except Exception as exc:
+            report["postgres"] = {"ok": False, "error": type(exc).__name__}
+
+        try:
+            report["mcp"] = anyio.run(mcp_health_check)
+        except Exception as exc:
+            report["mcp"] = {"ok": False, "error": type(exc).__name__}
+        mcp_report = report["mcp"]
+        background = mcp_report.get("background") if isinstance(mcp_report, dict) else None
+        if isinstance(background, dict):
+            report["background"] = dict(background)
+            report.update(live_model_health(background))
+        else:
+            report["background"] = {"ok": False, "error": "live_mcp_snapshot_unavailable"}
+            report.update({name: _unknown_model_health() for name in ("embedding", "reranker")})
+        mcp_ok = bool(mcp_report.get("ok")) if isinstance(mcp_report, dict) else False
+        report["ok"] = all(
+            bool(report[name].get("ok")) for name in ("postgres", "embedding", "reranker", "background")
+        ) and mcp_ok
         if restart_unhealthy:
             report["restarts"] = restart_unhealthy_units(report)
         return report
     finally:
-        close = getattr(runtime, "close", None)
-        if callable(close):
-            close()
-        elif callable(getattr(pool, "close", None)):
+        if callable(getattr(pool, "close", None)):
             pool.close()
