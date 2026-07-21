@@ -1434,6 +1434,12 @@ class PostgresMemoryStore(_PostgresRepository):
             repository._manage_transaction = manage_transaction
         return facade
 
+    def set_embedder(self, embedder: Embedder) -> None:
+        self.embedder = embedder
+        self.evidence.embedder = embedder
+        self.facts.embedder = embedder
+        self.views_profiles.embedder = embedder
+
     def _acquire_user_write_lock(self, connection: Any, user_id: str) -> None:
         cursor = connection.cursor()
         try:

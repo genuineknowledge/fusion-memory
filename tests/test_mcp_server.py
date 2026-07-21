@@ -204,6 +204,70 @@ async def test_runtime_lifespan_supervises_health_pools_without_blocking_shutdow
 
 
 @pytest.mark.anyio
+async def test_runtime_lifespan_spans_multiple_streamable_http_sessions():
+    class Runtime(FakeMemoryRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_count = 0
+
+        @contextlib.asynccontextmanager
+        async def lifespan(self):
+            try:
+                yield self
+            finally:
+                self.close_count += 1
+
+    runtime = Runtime()
+    custom_lifespan_events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def custom_lifespan(_server):
+        custom_lifespan_events.append("enter")
+        try:
+            yield {"custom": True}
+        finally:
+            custom_lifespan_events.append("exit")
+
+    server = create_mcp_server(
+        runtime=runtime,
+        token_verifier=FakeTokenVerifier(),
+        path="/mcp",
+        public_url="http://test/mcp",
+        lifespan=custom_lifespan,
+    )
+    server.settings.stateless_http = True
+    server.settings.json_response = True
+    app = server.streamable_http_app()
+
+    async def call_health() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"Authorization": "Bearer token-a"},
+        ) as http_client:
+            async with streamable_http_client("http://test/mcp", http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _,
+            ):
+                async with ClientSession(read_stream, write_stream) as client:
+                    await client.initialize()
+                    result = await client.call_tool("memory_health", {})
+                    assert result.structuredContent["ok"] is True
+
+    async with app.router.lifespan_context(app) as state:
+        assert state is None
+        assert custom_lifespan_events == ["enter"]
+        await call_health()
+        assert runtime.close_count == 0
+        await call_health()
+        assert runtime.close_count == 0
+    assert runtime.close_count == 1
+    assert custom_lifespan_events == ["enter", "exit"]
+
+
+@pytest.mark.anyio
 async def test_supervisor_state_is_false_after_shutdown_and_failure(monkeypatch):
     runtime = FusionMemoryRuntime(object(), lambda _store: object(), endpoint_pools=())
     async with _health_supervisor(runtime):
@@ -374,6 +438,26 @@ def test_runtime_from_env_preserves_embedding_and_reranker_slots(monkeypatch):
     assert health.reranker_health()["healthy_endpoints"] == 1
 
 
+def test_runtime_background_health_includes_sanitized_model_pool_snapshots():
+    class Pool:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def snapshot(self):
+            return [{"endpoint": self.label, "healthy": True, "failure_count": 0}]
+
+    runtime = FusionMemoryRuntime(
+        object(),
+        lambda _store: object(),
+        endpoint_pools=(Pool("embedding-1"), Pool("reranker-1")),
+    )
+
+    assert runtime.background_health()["model_pools"] == {
+        "embedding": [{"endpoint": "embedding-1", "healthy": True, "failure_count": 0}],
+        "reranker": [{"endpoint": "reranker-1", "healthy": True, "failure_count": 0}],
+    }
+
+
 def test_runtime_from_env_closes_resources_when_model_builder_fails(monkeypatch):
     calls: list[str] = []
 
@@ -463,6 +547,93 @@ def test_runtime_factory_creates_request_local_extractor_and_refiner(monkeypatch
     assert first.planner.intent_refiner is not second.planner.intent_refiner
 
 
+def test_runtime_factory_applies_request_local_embedder_to_bound_postgres_store(monkeypatch):
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class SharedEmbedder:
+        def __init__(self) -> None:
+            self.locals: list[object] = []
+
+        def request_local(self):
+            self.locals.append(object())
+            return self.locals[-1]
+
+    class BoundStore:
+        def set_embedder(self, embedder):
+            self.embedder = embedder
+
+    shared_embedder = SharedEmbedder()
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: shared_embedder)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+    runtime, _ = runtime_from_env()
+    bound_store = BoundStore()
+
+    runtime._service_factory(bound_store)
+
+    assert bound_store.embedder is shared_embedder.locals[0]
+
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: None)
+    default_runtime, _ = runtime_from_env()
+    default_bound_store = BoundStore()
+    default_runtime._service_factory(default_bound_store)
+    assert not hasattr(default_bound_store, "embedder")
+
+
+@pytest.mark.anyio
+async def test_runtime_search_uses_configured_mcp_search_mode():
+    captured: dict[str, object] = {}
+
+    class Executor:
+        def run(self, callback, *, user_id, write):
+            captured["user_id"] = user_id
+            captured["write"] = write
+            return callback(object())
+
+    class Service:
+        def search(self, query, scope, *, options):
+            captured["query"] = query
+            captured["scope"] = scope
+            captured["options"] = options
+            return {"ok": True}
+
+        def close(self):
+            pass
+
+    runtime = FusionMemoryRuntime(Executor(), lambda _store: Service(), search_mode="balanced")
+    scope = Scope(user_id="user-a")
+
+    await runtime.search(scope, "postgres", 8)
+
+    assert captured["options"] == {"limit": 8, "allow_cross_session": True, "mode": "balanced"}
+
+
 def test_runtime_close_runs_resource_closers_once():
     calls: list[str] = []
     runtime = FusionMemoryRuntime(
@@ -511,6 +682,18 @@ def test_root_postgres_store_closes_its_pool_once():
     store.close()
 
     assert pool.closes == 1
+
+
+def test_postgres_store_set_embedder_updates_vector_repositories():
+    store = PostgresMemoryStore("postgresql://memory")
+    embedder = object()
+
+    store.set_embedder(embedder)
+
+    assert store.embedder is embedder
+    assert store.evidence.embedder is embedder
+    assert store.facts.embedder is embedder
+    assert store.views_profiles.embedder is embedder
 
 
 def test_pooled_token_connection_releases_once_when_cursor_creation_fails():

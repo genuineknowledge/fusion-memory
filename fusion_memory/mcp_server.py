@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import json
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
@@ -21,7 +21,7 @@ from fusion_memory.core.auth import AuthorizationError
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_auth import FusionMemoryTokenVerifier
 from fusion_memory.model_pool import EndpointUnavailable
-from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
+from fusion_memory.mcp_runtime import runtime_from_env
 from fusion_memory.storage.postgres_pool import PoolAcquireTimeout, RetryableOperationError
 from fusion_memory.storage.postgres_store import PostgresBackendUnavailable
 from fusion_memory.storage.token_store import PostgresTokenStore
@@ -73,7 +73,6 @@ def create_mcp_server(
     """Create the authenticated MCP server and its structured tools."""
     if not path.startswith("/"):
         raise ValueError("MCP path must start with '/'")
-    lifespan = lifespan or _runtime_lifespan(runtime)
     public_parts = urlsplit(public_url)
     public_host = public_parts.netloc
     allowed_hosts = [f"{host}:*", host, public_host]
@@ -85,13 +84,13 @@ def create_mcp_server(
         streamable_http_path=path,
         token_verifier=token_verifier,
         auth=AuthSettings(issuer_url=public_url, resource_server_url=public_url),
-        lifespan=lifespan,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
         ),
     )
+    _install_runtime_lifespan(server, runtime, lifespan)
 
     @server.tool(structured_output=True)
     async def memory_add(content: str, source: str | None = None) -> dict[str, Any]:
@@ -237,18 +236,39 @@ async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) ->
         return _error("operation_failed", retryable=True)
 
 
-def _runtime_lifespan(runtime: Any):
-    async def lifespan(_server: FastMCP) -> AsyncIterator[Any]:
-        manager = getattr(runtime, "lifespan", None)
-        if manager is None:
-            async with _health_supervisor(runtime):
-                yield runtime
-        else:
-            async with manager():
-                async with _health_supervisor(runtime):
-                    yield runtime
+def _runtime_lifespan(runtime: Any, session_manager_lifespan: Any, custom_lifespan: Any, server: FastMCP):
+    async def lifespan() -> AsyncIterator[Any]:
+        async with AsyncExitStack() as stack:
+            if custom_lifespan is not None:
+                await stack.enter_async_context(custom_lifespan(server))
+            manager = getattr(runtime, "lifespan", None)
+            if manager is not None:
+                await stack.enter_async_context(manager())
+            await stack.enter_async_context(_health_supervisor(runtime))
+            await stack.enter_async_context(session_manager_lifespan())
+            yield
 
     return asynccontextmanager(lifespan)
+
+
+def _install_runtime_lifespan(server: FastMCP, runtime: Any, custom_lifespan: Any) -> None:
+    streamable_http_app = server.streamable_http_app
+    installed = False
+
+    def build_app():
+        nonlocal installed
+        app = streamable_http_app()
+        if not installed:
+            server.session_manager.run = _runtime_lifespan(
+                runtime,
+                server.session_manager.run,
+                custom_lifespan,
+                server,
+            )
+            installed = True
+        return app
+
+    server.streamable_http_app = build_app
 
 
 @asynccontextmanager

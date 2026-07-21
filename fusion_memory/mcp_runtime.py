@@ -37,15 +37,19 @@ class FusionMemoryRuntime:
         closers: tuple[Callable[[], None], ...] = (),
         endpoint_pools: tuple[Any, ...] = (),
         health_check_interval_seconds: float = 5.0,
+        search_mode: str = "fast",
     ) -> None:
         if worker_limit < 1:
             raise ValueError("FUSION_MEMORY_MCP_WORKER_LIMIT must be positive")
+        if search_mode not in {"fast", "balanced", "benchmark"}:
+            raise ValueError("FUSION_MEMORY_MCP_SEARCH_MODE must be fast, balanced, or benchmark")
         self._operation_executor = operation_executor
         self._service_factory = service_factory
         self._worker_limiter = anyio.CapacityLimiter(worker_limit)
         self._closers = closers
         self.endpoint_pools = endpoint_pools
         self.health_check_interval_seconds = health_check_interval_seconds
+        self.search_mode = search_mode
         self._close_lock = threading.Lock()
         self._supervisor_lock = threading.Lock()
         self._supervisor_alive = False
@@ -64,8 +68,20 @@ class FusionMemoryRuntime:
             self._supervisor_error = type(error).__name__ if isinstance(error, BaseException) else (str(error) if error else None)
 
     def background_health(self) -> dict[str, object]:
+        model_pools: dict[str, list[dict[str, object]]] = {}
+        for label, pool in zip(("embedding", "reranker"), self.endpoint_pools):
+            snapshot = getattr(pool, "snapshot", None)
+            try:
+                value = snapshot() if callable(snapshot) else []
+            except Exception:
+                value = []
+            model_pools[label] = value if isinstance(value, list) else []
         with self._supervisor_lock:
-            result: dict[str, object] = {"ok": self._supervisor_alive, "supervisor_alive": self._supervisor_alive}
+            result: dict[str, object] = {
+                "ok": self._supervisor_alive,
+                "supervisor_alive": self._supervisor_alive,
+                "model_pools": model_pools,
+            }
             if self._supervisor_error:
                 result["error"] = self._supervisor_error
             return result
@@ -85,7 +101,11 @@ class FusionMemoryRuntime:
         return await self._run(
             scope,
             write=False,
-            operation=lambda service: service.search(query, scope, options={"limit": limit, "allow_cross_session": True}),
+            operation=lambda service: service.search(
+                query,
+                scope,
+                options={"limit": limit, "allow_cross_session": True, "mode": self.search_mode},
+            ),
         )
 
     async def answer_context(self, scope: Scope, query: str, limit: int) -> Any:
@@ -193,13 +213,17 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
         retrieval_flags = build_runtime_retrieval_flags()
 
         def make_service(bound_store: Any) -> MemoryService:
+            request_embedder = _request_local_adapter(shared_embedder, _build_embedder)
+            set_embedder = getattr(bound_store, "set_embedder", None)
+            if request_embedder is not None and callable(set_embedder):
+                set_embedder(request_embedder)
             return MemoryService(
                 store=bound_store,
                 storage_backend="postgres",
                 # MemoryService owns mutable planners and traces; its configuration must
                 # not be shared with another request either.
                 config=MemoryConfig(**config.snapshot()),
-                embedder=_request_local_adapter(shared_embedder, _build_embedder),
+                embedder=request_embedder,
                 reranker=_request_local_adapter(shared_reranker, _build_reranker),
                 extractor=_build_extractor(),
                 async_extractor=_build_async_extractor(),
@@ -227,6 +251,7 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
             closers=(executor.close, store.close),
             endpoint_pools=endpoint_pools,
             health_check_interval_seconds=_positive_float_env("FUSION_MEMORY_MCP_HEALTH_INTERVAL_SECONDS", 5.0),
+            search_mode=os.getenv("FUSION_MEMORY_MCP_SEARCH_MODE", "fast").strip().lower(),
         ), pool
     except BaseException:
         if executor is not None:
