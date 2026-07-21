@@ -236,24 +236,48 @@ async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) ->
         return _error("operation_failed", retryable=True)
 
 
-def _runtime_lifespan(runtime: Any, session_manager_lifespan: Any, custom_lifespan: Any, server: FastMCP):
+def _runtime_lifespan(
+    runtime: Any,
+    session_manager_lifespan: Any,
+    custom_lifespan: Any,
+    server: FastMCP,
+    custom_state: dict[str, Any],
+):
     async def lifespan() -> AsyncIterator[Any]:
         async with AsyncExitStack() as stack:
-            if custom_lifespan is not None:
-                await stack.enter_async_context(custom_lifespan(server))
-            manager = getattr(runtime, "lifespan", None)
-            if manager is not None:
-                await stack.enter_async_context(manager())
-            await stack.enter_async_context(_health_supervisor(runtime))
-            await stack.enter_async_context(session_manager_lifespan())
-            yield
+            try:
+                if custom_lifespan is not None:
+                    custom_state["value"] = await stack.enter_async_context(custom_lifespan(server))
+                else:
+                    custom_state["value"] = {}
+                manager = getattr(runtime, "lifespan", None)
+                if manager is not None:
+                    await stack.enter_async_context(manager())
+                await stack.enter_async_context(_health_supervisor(runtime))
+                await stack.enter_async_context(session_manager_lifespan())
+                custom_state["active"] = True
+                yield
+            finally:
+                custom_state["active"] = False
+                custom_state.pop("value", None)
 
     return asynccontextmanager(lifespan)
+
+
+def _session_lifespan_proxy(custom_state: dict[str, Any]):
+    @asynccontextmanager
+    async def lifespan(_server: Any) -> AsyncIterator[Any]:
+        if not custom_state.get("active"):
+            raise RuntimeError("MCP session started outside the application lifespan")
+        yield custom_state["value"]
+
+    return lifespan
 
 
 def _install_runtime_lifespan(server: FastMCP, runtime: Any, custom_lifespan: Any) -> None:
     streamable_http_app = server.streamable_http_app
     installed = False
+    custom_state: dict[str, Any] = {}
 
     def build_app():
         nonlocal installed
@@ -264,7 +288,9 @@ def _install_runtime_lifespan(server: FastMCP, runtime: Any, custom_lifespan: An
                 server.session_manager.run,
                 custom_lifespan,
                 server,
+                custom_state,
             )
+            server._mcp_server.lifespan = _session_lifespan_proxy(custom_state)
             installed = True
         return app
 

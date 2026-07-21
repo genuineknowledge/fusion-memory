@@ -444,8 +444,10 @@ _CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|client[_-]?secret|password|passwd|credential|credentials)\s*([=:])\s*[^\s,;]+"
 )
 _AUTH_SCHEME_RE = re.compile(r"(?i)\b(authorization\s*:\s*)?(basic|bearer)\s+[^\s,;]+")
+_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"()\[\]{},;]+")
 
 
 def _sanitize_error(value: str) -> str:
+    value = _URL_RE.sub(lambda match: _safe_endpoint(match.group(0)), value)
     value = _CREDENTIAL_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", value)
     return _AUTH_SCHEME_RE.sub(lambda match: f"{match.group(1) or ''}{match.group(2)} [redacted]", value)

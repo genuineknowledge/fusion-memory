@@ -10,6 +10,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.auth.provider import AccessToken
+from mcp.server.fastmcp import Context
 
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
@@ -237,9 +238,14 @@ async def test_runtime_lifespan_spans_multiple_streamable_http_sessions():
     )
     server.settings.stateless_http = True
     server.settings.json_response = True
+
+    @server.tool(structured_output=True)
+    async def app_lifespan_state(ctx: Context) -> dict[str, Any]:
+        return {"state": ctx.request_context.lifespan_context}
+
     app = server.streamable_http_app()
 
-    async def call_health() -> None:
+    async def call_health() -> dict[str, Any]:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
@@ -255,16 +261,56 @@ async def test_runtime_lifespan_spans_multiple_streamable_http_sessions():
                     await client.initialize()
                     result = await client.call_tool("memory_health", {})
                     assert result.structuredContent["ok"] is True
+                    state = await client.call_tool("app_lifespan_state", {})
+                    return state.structuredContent
 
     async with app.router.lifespan_context(app) as state:
         assert state is None
         assert custom_lifespan_events == ["enter"]
-        await call_health()
+        assert await call_health() == {"state": {"custom": True}}
         assert runtime.close_count == 0
-        await call_health()
+        assert await call_health() == {"state": {"custom": True}}
         assert runtime.close_count == 0
     assert runtime.close_count == 1
     assert custom_lifespan_events == ["enter", "exit"]
+
+
+@pytest.mark.anyio
+async def test_runtime_lifespan_clears_custom_state_when_startup_fails():
+    events: list[str] = []
+
+    class Runtime(FakeMemoryRuntime):
+        @contextlib.asynccontextmanager
+        async def lifespan(self):
+            events.append("runtime-enter")
+            raise RuntimeError("runtime startup failed")
+            yield
+
+    @contextlib.asynccontextmanager
+    async def custom_lifespan(_server):
+        events.append("custom-enter")
+        try:
+            yield {"custom": True}
+        finally:
+            events.append("custom-exit")
+
+    server = create_mcp_server(
+        runtime=Runtime(),
+        token_verifier=FakeTokenVerifier(),
+        path="/mcp",
+        public_url="http://test/mcp",
+        lifespan=custom_lifespan,
+    )
+    app = server.streamable_http_app()
+
+    with pytest.raises(RuntimeError, match="runtime startup failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert events == ["custom-enter", "runtime-enter", "custom-exit"]
+    with pytest.raises(RuntimeError, match="outside the application lifespan"):
+        async with server._mcp_server.lifespan(server._mcp_server):
+            pass
 
 
 @pytest.mark.anyio

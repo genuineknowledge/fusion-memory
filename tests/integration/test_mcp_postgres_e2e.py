@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 import uuid
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,23 @@ def deployed_stack() -> DeployedMcpStack:
         return DeployedMcpStack()
     except RuntimeError as exc:
         pytest.skip(str(exc))
+
+
+@pytest.fixture
+def postgres_connection():
+    dsn = os.environ.get("FUSION_MEMORY_PG_DSN", "").strip()
+    if not dsn:
+        pytest.skip("set FUSION_MEMORY_PG_DSN before Postgres persistence integration tests")
+    psycopg2 = pytest.importorskip("psycopg2", reason="install the Postgres test dependency")
+    try:
+        connection = psycopg2.connect(dsn)
+    except Exception:
+        pytest.skip("configured Fusion Memory Postgres database is unavailable")
+    connection.autocommit = True
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 @pytest.mark.integration
@@ -62,7 +80,7 @@ def test_different_users_are_served_concurrently(deployed_stack: DeployedMcpStac
 
 
 @pytest.mark.integration
-def test_history_batch_replay_is_idempotent(deployed_stack: DeployedMcpStack):
+def test_history_batch_replay_is_idempotent(deployed_stack: DeployedMcpStack, postgres_connection: Any):
     marker = f"batch-e2e-{uuid.uuid4().hex}"
     arguments = {
         "batch_id": marker,
@@ -74,10 +92,12 @@ def test_history_batch_replay_is_idempotent(deployed_stack: DeployedMcpStack):
     }
     client = deployed_stack.client(user="a", workspace="ws-history", session="history-s1")
     first = client.call("memory_add_batch", arguments)
+    durable_before_replay = _postgres_batch_snapshot(postgres_connection, marker)
     before_replay = deployed_stack.client(user="a", workspace="ws-other", session="history-s2").call(
         "memory_search", {"query": marker, "limit": 12}
     )
     second = client.call("memory_add_batch", arguments)
+    durable_after_replay = _postgres_batch_snapshot(postgres_connection, marker)
     after_replay = deployed_stack.client(user="a", workspace="ws-other", session="history-s2").call(
         "memory_search", {"query": marker, "limit": 12}
     )
@@ -87,6 +107,15 @@ def test_history_batch_replay_is_idempotent(deployed_stack: DeployedMcpStack):
     assert _candidate_identities(before_replay) == _candidate_identities(after_replay)
     assert _candidate_identities(after_replay)
     assert marker in json.dumps(after_replay, ensure_ascii=False)
+    assert durable_after_replay == durable_before_replay
+    ledger = durable_after_replay["ledger"]
+    evidence = durable_after_replay["evidence"]
+    assert len(ledger) == 1
+    assert ledger[0][1] == marker
+    assert ledger[0][3] == "completed"
+    assert len(evidence) == 2
+    assert {row[1] for row in evidence} == {ledger[0][0]}
+    assert {row[6] for row in evidence} == {f"{marker} request", f"{marker} response"}
 
 
 @pytest.mark.integration
@@ -128,3 +157,81 @@ def _candidate_identities(result: dict[str, object]) -> set[tuple[str, str, str]
 
 def _candidate_texts(result: dict[str, object]) -> list[str]:
     return [identity[2] for identity in _candidate_identities(result)]
+
+
+def _postgres_batch_snapshot(connection: Any, marker: str) -> dict[str, tuple[tuple[object, ...], ...]]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """
+            select user_id, batch_id, request_hash, status,
+                   coalesce(result::text, ''), coalesce(trace_id, '')
+            from fusion_memory_mcp_batches
+            where batch_id = %s
+            order by user_id, batch_id
+            """,
+            (marker,),
+        )
+        ledger = tuple(tuple(row) for row in cursor.fetchall())
+        cursor.execute(
+            """
+            select span_id, user_id, workspace_id, session_id, turn_id,
+                   speaker, content, content_hash
+            from evidence_spans
+            where position(%s in content) > 0
+            order by span_id
+            """,
+            (marker,),
+        )
+        evidence = tuple(tuple(row) for row in cursor.fetchall())
+        return {"ledger": ledger, "evidence": evidence}
+    finally:
+        cursor.close()
+
+
+def test_postgres_batch_snapshot_preserves_durable_row_identities():
+    marker = "batch-e2e-marker"
+    ledger = [("user-a", marker, "request-hash", "completed", '{"message_count":2}', "trace-1")]
+    evidence = [
+        ("span-1", "user-a", "ws-history", "history-s1", "turn-1", "user", f"{marker} request", "hash-1"),
+        (
+            "span-2",
+            "user-a",
+            "ws-history",
+            "history-s1",
+            "turn-1",
+            "assistant",
+            f"{marker} response",
+            "hash-2",
+        ),
+    ]
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.rows: list[tuple[object, ...]] = []
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def execute(self, sql: str, params: tuple[str, ...]) -> None:
+            self.calls.append((sql, params))
+            self.rows = ledger if "fusion_memory_mcp_batches" in sql else evidence
+
+        def fetchall(self):
+            return self.rows
+
+        def close(self) -> None:
+            pass
+
+    class Connection:
+        def __init__(self) -> None:
+            self.cursor_instance = Cursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    connection = Connection()
+
+    assert _postgres_batch_snapshot(connection, marker) == {
+        "ledger": tuple(ledger),
+        "evidence": tuple(evidence),
+    }
+    assert [params for _sql, params in connection.cursor_instance.calls] == [(marker,), (marker,)]

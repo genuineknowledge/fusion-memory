@@ -185,9 +185,33 @@ def test_snapshot_redacts_common_credential_forms_from_last_error() -> None:
     pool = EndpointPool(["https://user:pass@example.test/v1/embeddings?token=url-token"])
     pool.mark_failure(
         "https://user:pass@example.test/v1/embeddings?token=url-token",
-        "secret=super-secret password: letmein Authorization: Basic dXNlcjpwYXNz Bearer bearer-token api_key=api-secret",
+        "request to https://url-user:url-pass@models.example.test/v1/embeddings"
+        "?X-Amz-Signature=signed-query#private-fragment failed; "
+        "fallback http://backup-user:backup-pass@backup.example.test/health"
+        "?arbitrary=opaque#hidden; secret=super-secret password: letmein "
+        "Authorization: Basic dXNlcjpwYXNz Bearer bearer-token api_key=api-secret",
     )
 
     snapshot = pool.snapshot()[0]
     assert snapshot["endpoint"] == "https://example.test/v1/embeddings"
-    assert all(value not in str(snapshot["last_error"]) for value in ("super-secret", "letmein", "dXNlcjpwYXNz", "bearer-token", "api-secret"))
+    last_error = str(snapshot["last_error"])
+    assert "https://models.example.test/v1/embeddings" in last_error
+    assert "http://backup.example.test/health" in last_error
+    assert all(
+        value not in last_error
+        for value in (
+            "url-user",
+            "url-pass",
+            "signed-query",
+            "private-fragment",
+            "backup-user",
+            "backup-pass",
+            "opaque",
+            "hidden",
+            "super-secret",
+            "letmein",
+            "dXNlcjpwYXNz",
+            "bearer-token",
+            "api-secret",
+        )
+    )
