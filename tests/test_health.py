@@ -171,6 +171,20 @@ def test_run_health_queries_mcp_when_postgres_pool_construction_fails(monkeypatc
     [
         {"ok": False, "error": "offline"},
         {"ok": False, "background": {"ok": False, "model_pools": []}},
+        {
+            "ok": False,
+            "background": {
+                "ok": False,
+                "model_pools": {"embedding": "invalid", "reranker": []},
+            },
+        },
+        {
+            "ok": False,
+            "background": {
+                "ok": False,
+                "model_pools": {"embedding": [{"healthy": True}], "reranker": ["invalid"]},
+            },
+        },
     ],
 )
 def test_run_health_reports_unknown_models_without_valid_live_snapshot(monkeypatch, mcp_result):

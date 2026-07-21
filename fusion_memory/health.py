@@ -44,6 +44,12 @@ def live_model_health(background: dict[str, object]) -> dict[str, dict[str, obje
     pools = background.get("model_pools")
     if not isinstance(pools, dict):
         return {name: _unknown_model_health() for name in ("embedding", "reranker")}
+    for name in ("embedding", "reranker"):
+        if name not in pools:
+            continue
+        snapshots = pools[name]
+        if not isinstance(snapshots, list) or any(not isinstance(endpoint, dict) for endpoint in snapshots):
+            return {name: _unknown_model_health() for name in ("embedding", "reranker")}
     result: dict[str, dict[str, object]] = {}
     for name in ("embedding", "reranker"):
         if name not in pools:
@@ -56,8 +62,6 @@ def live_model_health(background: dict[str, object]) -> dict[str, dict[str, obje
             }
             continue
         snapshots = pools[name]
-        if not isinstance(snapshots, list):
-            snapshots = []
         healthy_count = sum(1 for endpoint in snapshots if isinstance(endpoint, dict) and endpoint.get("healthy"))
         result[name] = {
             "ok": bool(snapshots) and healthy_count == len(snapshots),
