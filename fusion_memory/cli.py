@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import anyio
+
 from fusion_memory import Scope
 from fusion_memory.alpha_beta import run_alpha, run_beta
 from fusion_memory.agent_installer import install_agent
@@ -39,7 +41,9 @@ from fusion_memory.product import (
 from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.eval.beam_adapter import BEAM_SPLITS, BeamAdapter
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
+from fusion_memory.health import run_health
 from fusion_memory.storage.postgres_store import PostgresMigrationRunner
+from fusion_memory.storage.token_store import PostgresTokenStore, TokenRecord
 from fusion_memory.storage.postgres_verifier import verify_postgres_backend
 
 sync_haitun_history_once = sync_history_once
@@ -233,6 +237,35 @@ def main() -> None:
     pg_verify.add_argument("dsn", help="Postgres DSN, for example postgresql://user:pass@localhost:5432/fusion_memory")
     pg_verify.add_argument("--skip-migrate", action="store_true", help="Skip migration and only run the service smoke")
 
+    embedding_server = sub.add_parser("embedding-server", help="Run one long-lived local embedding model server")
+    _add_model_server_args(embedding_server)
+    reranker_server = sub.add_parser("reranker-server", help="Run one long-lived local reranker model server")
+    _add_model_server_args(reranker_server)
+
+    mcp_server = sub.add_parser("mcp-server", help="Run the authenticated Fusion Memory MCP server")
+    mcp_server.add_argument("--host", default="127.0.0.1")
+    mcp_server.add_argument("--port", type=int, default=8700)
+    mcp_server.add_argument("--path", default="/mcp")
+    mcp_server.add_argument("--public-url", default=os.getenv("FUSION_MEMORY_MCP_PUBLIC_URL"))
+
+    health = sub.add_parser("health", help="Check Postgres, model pools, and authenticated MCP liveness")
+    health.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    health.add_argument("--restart-unhealthy", action="store_true", help="Restart configured unhealthy user units")
+
+    token = sub.add_parser("token", help="Manage MCP bearer tokens")
+    token_sub = token.add_subparsers(dest="token_command", required=True)
+    token_create_cmd = token_sub.add_parser("create", help="Create a bearer token")
+    _add_token_database_args(token_create_cmd)
+    token_create_cmd.add_argument("--user-id", required=True)
+    token_create_cmd.add_argument("--scopes", required=True)
+    token_create_cmd.add_argument("--expires-at", default=None)
+    token_list_cmd = token_sub.add_parser("list", help="List bearer tokens")
+    _add_token_database_args(token_list_cmd)
+    token_list_cmd.add_argument("--user-id", required=True)
+    token_revoke_cmd = token_sub.add_parser("revoke", help="Revoke a bearer token")
+    _add_token_database_args(token_revoke_cmd)
+    token_revoke_cmd.add_argument("--token-id", required=True)
+
     _rewrite_compat_command_aliases(sys.argv)
     args = parser.parse_args()
     try:
@@ -296,6 +329,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             if args.background:
@@ -316,6 +350,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(
@@ -330,6 +365,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(status_history_watcher_daemon(config), json_output=args.json)
@@ -338,6 +374,7 @@ def main() -> None:
                 workspace=Path(args.workspace),
                 session_id=args.session_id,
                 db_path=args.db,
+                mcp_url=args.mcp_url,
                 base_url=args.memory_url,
             )
             return _print_product_result(stop_history_watcher_daemon(config), json_output=args.json)
@@ -356,6 +393,36 @@ def main() -> None:
         if args.command == "verify-postgres":
             report = verify_postgres_backend(args.dsn, migrate=not args.skip_migrate)
             print(json.dumps(_jsonable(report), ensure_ascii=False, indent=2))
+            return
+        if args.command == "embedding-server":
+            from fusion_memory.model_server import run_embedding_server
+
+            return run_embedding_server(args.host, args.port, args.model, args.device, args.max_concurrency)
+        if args.command == "reranker-server":
+            from fusion_memory.model_server import run_reranker_server
+
+            return run_reranker_server(args.host, args.port, args.model, args.device, args.max_concurrency)
+        if args.command == "mcp-server":
+            from fusion_memory.mcp_server import run_mcp_server
+
+            return run_mcp_server(
+                host=args.host,
+                port=args.port,
+                path=args.path,
+                public_url=args.public_url,
+            )
+        if args.command == "health":
+            return _print_product_result(run_health(restart_unhealthy=args.restart_unhealthy), json_output=args.json)
+        if args.command == "token":
+            store = _token_store_from_args(args)
+            if args.token_command == "create":
+                expires_at = datetime.fromisoformat(args.expires_at) if args.expires_at else None
+                plaintext = token_create(store, args.user_id, _parse_token_scopes(args.scopes), expires_at)
+                print(json.dumps({"token": plaintext}, ensure_ascii=False))
+            elif args.token_command == "list":
+                print(json.dumps(token_list(store, args.user_id), default=_jsonable, ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps({"revoked": token_revoke(store, args.token_id)}, ensure_ascii=False))
             return
 
         scope = Scope(
@@ -453,10 +520,77 @@ def _query_arg(args: argparse.Namespace) -> str:
     return str(query)
 
 
+_VALID_TOKEN_SCOPES = {"memory:read", "memory:write", "memory:sync"}
+
+
+def token_create(store: PostgresTokenStore, user_id: str, scopes: tuple[str, ...], expires_at: datetime | None) -> str:
+    validate_token_scopes(scopes)
+    plaintext, _record = store.create_token(user_id, scopes, expires_at)
+    return plaintext
+
+
+def token_list(store: PostgresTokenStore, user_id: str) -> list[dict[str, object]]:
+    return [_token_record_output(record) for record in store.list_tokens(user_id)]
+
+
+def token_revoke(store: PostgresTokenStore, token_id: str) -> bool:
+    return store.revoke_token(token_id)
+
+
+def validate_token_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
+    unknown = set(scopes) - _VALID_TOKEN_SCOPES
+    if unknown:
+        raise ValueError(f"unsupported token scopes: {', '.join(sorted(unknown))}")
+    if "memory:sync" in scopes and "memory:write" not in scopes:
+        raise ValueError("memory:sync requires memory:write")
+    return scopes
+
+
+def _token_record_output(record: TokenRecord) -> dict[str, object]:
+    return {
+        "token_id": record.token_id,
+        "user_id": record.user_id,
+        "scopes": list(record.scopes),
+        "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+        "revoked_at": record.revoked_at.isoformat() if record.revoked_at else None,
+        "created_at": record.created_at.isoformat(),
+        "last_used_at": record.last_used_at.isoformat() if record.last_used_at else None,
+    }
+
+
+def _parse_token_scopes(value: str) -> tuple[str, ...]:
+    scopes = tuple(scope.strip() for scope in value.split(",") if scope.strip())
+    if not scopes:
+        raise ValueError("at least one scope is required")
+    return validate_token_scopes(scopes)
+
+
+def _add_token_database_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--dsn", default=None, help="Postgres DSN; defaults to FUSION_MEMORY_PG_DSN")
+
+
+def _token_store_from_args(args: argparse.Namespace) -> PostgresTokenStore:
+    dsn = args.dsn or os.getenv("FUSION_MEMORY_PG_DSN")
+    pepper = os.getenv("FUSION_MEMORY_TOKEN_PEPPER")
+    if not dsn:
+        raise ValueError("Postgres DSN is required via --dsn or FUSION_MEMORY_PG_DSN")
+    if not pepper:
+        raise ValueError("FUSION_MEMORY_TOKEN_PEPPER is required")
+
+    def connect():
+        try:
+            import psycopg2
+        except ImportError as exc:
+            raise RuntimeError("Postgres token commands require fusion-memory[postgres]") from exc
+        return psycopg2.connect(dsn)
+
+    return PostgresTokenStore(connect, pepper=pepper)
+
+
 def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true")
@@ -467,7 +601,7 @@ def _add_haitun_history_sync_args(parser: argparse.ArgumentParser) -> None:
 def _add_haitun_history_watcher_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--json", action="store_true")
 
@@ -475,8 +609,23 @@ def _add_haitun_history_watcher_args(parser: argparse.ArgumentParser) -> None:
 def _add_haitun_history_watcher_status_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", required=True, help="Haitun workspace path")
     parser.add_argument("--session-id", required=True, help="Haitun session id")
-    parser.add_argument("--memory-url", default=None, help="Fusion Memory service URL; defaults to PSI_MEMORY_BASE_URL or http://127.0.0.1:8700")
+    _add_haitun_mcp_url_args(parser)
     parser.add_argument("--json", action="store_true")
+
+
+def _add_haitun_mcp_url_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mcp-url",
+        dest="mcp_url",
+        default=None,
+        help="Fusion Memory MCP URL; defaults to FUSION_MEMORY_MCP_URL",
+    )
+    parser.add_argument(
+        "--memory-url",
+        dest="memory_url",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
 
 def _rewrite_compat_command_aliases(argv: list[str]) -> None:
@@ -541,6 +690,14 @@ def _add_eval_model_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Minimum confidence accepted from the LLM aggregation pass",
     )
+
+
+def _add_model_server_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--model", required=True, help="Local model path or Hugging Face model identifier")
+    parser.add_argument("--device", default=None, help="Optional model device, for example cuda:0")
+    parser.add_argument("--max-concurrency", type=int, default=1)
 
 
 def _build_eval_models(args: argparse.Namespace):

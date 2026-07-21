@@ -7,15 +7,24 @@ from typing import Any
 
 from fusion_memory.api.service import MemoryService
 from fusion_memory.core.config import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL, MemoryConfig
-from fusion_memory.core.embedding import HTTPEmbeddingClient, Qwen3EmbeddingClient
+from fusion_memory.core.embedding import Qwen3EmbeddingClient
 from fusion_memory.core.llm import OpenAICompatibleLLMClient
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
-from fusion_memory.retrieval.reranker import HTTPReranker, Qwen3Reranker
+from fusion_memory.model_pool import PooledEmbedder, PooledReranker
+from fusion_memory.retrieval.reranker import Qwen3Reranker
+from fusion_memory.storage.postgres_pool import PostgresConnectionPool
 
 
 @dataclass(frozen=True)
 class RuntimeRetrievalFlags:
     production_selector: str = "legacy"
+
+
+@dataclass(frozen=True)
+class PostgresPoolSettings:
+    min_connections: int = 1
+    max_connections: int = 8
+    acquire_timeout_seconds: float = 5.0
 
 
 def memory_service_from_env(
@@ -30,10 +39,23 @@ def memory_service_from_env(
     opt into Qwen/HTTP adapters without hard-coding endpoints or secrets.
     """
 
+    backend = storage_backend or os.getenv("FUSION_MEMORY_STORAGE_BACKEND", "sqlite")
+    postgres_pool = None
+    postgres_acquire_timeout_seconds = 5.0
+    if backend == "postgres":
+        settings = postgres_pool_settings_from_env()
+        postgres_acquire_timeout_seconds = settings.acquire_timeout_seconds
+        postgres_pool = PostgresConnectionPool(
+            str(db_path),
+            min_connections=settings.min_connections,
+            max_connections=settings.max_connections,
+        )
     return MemoryService(
         db_path,
         config=config,
-        storage_backend=storage_backend or os.getenv("FUSION_MEMORY_STORAGE_BACKEND", "sqlite"),
+        storage_backend=backend,
+        postgres_pool=postgres_pool,
+        postgres_acquire_timeout_seconds=postgres_acquire_timeout_seconds,
         embedder=_build_embedder(),
         reranker=_build_reranker(),
         extractor=_build_extractor(),
@@ -54,6 +76,19 @@ def build_runtime_retrieval_flags() -> RuntimeRetrievalFlags:
     )
 
 
+def postgres_pool_settings_from_env() -> PostgresPoolSettings:
+    settings = PostgresPoolSettings(
+        min_connections=_int_env("FUSION_MEMORY_PG_MIN_CONNECTIONS", 1),
+        max_connections=_int_env("FUSION_MEMORY_PG_MAX_CONNECTIONS", 8),
+        acquire_timeout_seconds=_float_env("FUSION_MEMORY_PG_ACQUIRE_TIMEOUT_SECONDS", 5.0),
+    )
+    if settings.min_connections < 0 or settings.max_connections < 1 or settings.min_connections > settings.max_connections:
+        raise ValueError("invalid Postgres connection pool bounds")
+    if settings.acquire_timeout_seconds <= 0:
+        raise ValueError("FUSION_MEMORY_PG_ACQUIRE_TIMEOUT_SECONDS must be positive")
+    return settings
+
+
 def _build_embedder() -> Any | None:
     provider = os.getenv("FUSION_MEMORY_EMBEDDING_PROVIDER", "").strip().lower()
     if not provider or provider == "deterministic":
@@ -67,14 +102,16 @@ def _build_embedder() -> Any | None:
             model_kwargs=_model_kwargs(),
         )
     if provider == "http":
-        endpoint = _required_env("FUSION_MEMORY_EMBEDDING_ENDPOINT")
-        return HTTPEmbeddingClient(
-            endpoint,
+        return PooledEmbedder(
+            _endpoint_pool_from_env("FUSION_MEMORY_EMBEDDING_ENDPOINTS", "FUSION_MEMORY_EMBEDDING_ENDPOINT"),
             api_key=_optional_env("FUSION_MEMORY_EMBEDDING_API_KEY"),
             model=os.getenv("FUSION_MEMORY_EMBEDDING_MODEL", "local-embedding"),
             timeout_seconds=_float_env("FUSION_MEMORY_EMBEDDING_TIMEOUT_SECONDS", 30.0),
             dimensions=_optional_int_env("FUSION_MEMORY_EMBEDDING_DIMENSION"),
             encoding_format=_optional_env("FUSION_MEMORY_EMBEDDING_ENCODING_FORMAT"),
+            max_in_flight=_int_env("FUSION_MEMORY_EMBEDDING_MAX_IN_FLIGHT", 1),
+            failure_threshold=_int_env("FUSION_MEMORY_EMBEDDING_FAILURE_THRESHOLD", 3),
+            recovery_seconds=_float_env("FUSION_MEMORY_EMBEDDING_RECOVERY_SECONDS", 30.0),
         )
     raise ValueError(f"unsupported FUSION_MEMORY_EMBEDDING_PROVIDER: {provider}")
 
@@ -91,14 +128,16 @@ def _build_reranker() -> Any | None:
             model_kwargs=_model_kwargs(),
         )
     if provider == "http":
-        endpoint = _required_env("FUSION_MEMORY_RERANKER_ENDPOINT")
-        return HTTPReranker(
-            endpoint,
+        return PooledReranker(
+            _endpoint_pool_from_env("FUSION_MEMORY_RERANKER_ENDPOINTS", "FUSION_MEMORY_RERANKER_ENDPOINT"),
             api_key=_optional_env("FUSION_MEMORY_RERANKER_API_KEY"),
             model=os.getenv("FUSION_MEMORY_RERANKER_MODEL", "local-reranker"),
             timeout_seconds=_float_env("FUSION_MEMORY_RERANKER_TIMEOUT_SECONDS", 30.0),
             top_n=_optional_int_env("FUSION_MEMORY_RERANKER_TOP_N"),
             instruct=_optional_env("FUSION_MEMORY_RERANKER_INSTRUCT"),
+            max_in_flight=_int_env("FUSION_MEMORY_RERANKER_MAX_IN_FLIGHT", 1),
+            failure_threshold=_int_env("FUSION_MEMORY_RERANKER_FAILURE_THRESHOLD", 3),
+            recovery_seconds=_float_env("FUSION_MEMORY_RERANKER_RECOVERY_SECONDS", 30.0),
         )
     raise ValueError(f"unsupported FUSION_MEMORY_RERANKER_PROVIDER: {provider}")
 
@@ -182,6 +221,16 @@ def _required_env(name: str) -> str:
     if not value:
         raise ValueError(f"{name} is required")
     return value
+
+
+def _endpoint_pool_from_env(plural_name: str, singular_name: str) -> list[str]:
+    """Read a comma-separated endpoint pool without breaking singular configs."""
+    if plural_name not in os.environ:
+        return [_required_env(singular_name)]
+    endpoints = [endpoint.strip() for endpoint in os.environ[plural_name].split(",") if endpoint.strip()]
+    if not endpoints:
+        raise ValueError(f"{plural_name} must contain at least one endpoint")
+    return endpoints
 
 
 def _int_env(name: str, default: int) -> int:

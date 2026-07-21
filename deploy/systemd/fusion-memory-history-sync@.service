@@ -1,0 +1,16 @@
+[Unit]
+Description=Fusion Memory Haitun history sync (%i)
+Wants=fusion-memory-mcp.service
+After=fusion-memory-mcp.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/fusion-memory/history-sync-%i.env
+ExecStart=%h/.local/bin/fusion-memory sync-haitun-history --workspace ${FUSION_MEMORY_HAITUN_WORKSPACE} --session-id ${FUSION_MEMORY_SESSION_ID}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

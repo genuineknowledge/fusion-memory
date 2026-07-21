@@ -7,13 +7,14 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib import request
+
+import anyio
 
 from fusion_memory.core.text import stable_hash
+from fusion_memory.mcp_client import MemoryMcpClient
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MIN_TIMEOUT_SECONDS = 0.1
@@ -25,9 +26,9 @@ class WatcherConfig:
     workspace: Path | None
     history_path: Path
     checkpoint_path: Path
-    base_url: str
+    mcp_url: str
+    token: str = field(repr=False)
     workspace_id: str
-    user_id: str
     agent_id: str
     session_id: str
     db_path: Path | str
@@ -40,18 +41,33 @@ def config_from_workspace(
     workspace: Path,
     session_id: str,
     db_path: str | Path = "fusion-memory.sqlite3",
+    mcp_url: str | None = None,
+    # One-release compatibility path used only by the hidden --memory-url alias.
     base_url: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> WatcherConfig:
     env_map = os.environ if env is None else env
-    timeout = _float(env_map.get("PSI_MEMORY_TIMEOUT_SECONDS"), DEFAULT_TIMEOUT_SECONDS)
+    timeout = _float(
+        env_map.get("FUSION_MEMORY_MCP_TIMEOUT_SECONDS") or env_map.get("PSI_MEMORY_TIMEOUT_SECONDS"),
+        DEFAULT_TIMEOUT_SECONDS,
+    )
+    configured_mcp_url = mcp_url or env_map.get("FUSION_MEMORY_MCP_URL")
+    legacy_base_url = base_url
+    configured_url = (
+        configured_mcp_url.rstrip("/")
+        if configured_mcp_url
+        else _mcp_url_from_legacy_base(legacy_base_url)
+    )
     return WatcherConfig(
         workspace=workspace,
         history_path=workspace / "histories" / f"{session_id}.jsonl",
         checkpoint_path=workspace / ".fusion-memory" / "haitun-history-watcher" / f"{session_id}.json",
-        base_url=(base_url or env_map.get("PSI_MEMORY_BASE_URL") or "http://127.0.0.1:8700").rstrip("/"),
-        workspace_id=env_map.get("PSI_MEMORY_WORKSPACE_ID") or "haitun",
-        user_id=env_map.get("PSI_MEMORY_USER_ID") or env_map.get("USER") or env_map.get("USERNAME") or "user",
+        mcp_url=configured_url or "http://127.0.0.1:8700/mcp",
+        token=env_map.get("FUSION_MEMORY_TOKEN", ""),
+        workspace_id=(
+            env_map.get("FUSION_MEMORY_WORKSPACE_ID")
+            or "haitun"
+        ),
         agent_id=env_map.get("PSI_MEMORY_AGENT_ID") or "haitun",
         session_id=session_id,
         db_path=db_path,
@@ -64,40 +80,102 @@ def sync_history_once(
     *,
     submit_add: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
+    if submit_add is not None:
+        return _sync_history_with_callback(config, submit_add)
+    return anyio.run(sync_history_once_async, config)
+
+
+async def sync_history_once_async(
+    config: WatcherConfig,
+    client: Any | None = None,
+) -> dict[str, Any]:
     messages = _read_history_messages(config.history_path)
-    batches = _build_batches(messages, session_id=config.session_id)
+    batches = _build_batches(
+        messages,
+        session_id=config.session_id,
+        source_identity=str(config.history_path.resolve()),
+    )
     checkpoint = load_checkpoint(config.checkpoint_path)
     submitted = set(checkpoint.get("submitted_batches") or [])
     submitted_count = 0
-    submit = submit_add or (lambda payload: _post_add(config, payload))
+    owns_client = client is None
+    client = client or MemoryMcpClient(
+        config.mcp_url,
+        config.token,
+        config.workspace_id,
+        config.session_id,
+        timeout_seconds=config.timeout_seconds,
+    )
+    try:
+        for batch in batches:
+            if batch["batch_hash"] in submitted:
+                continue
+            metadata = _batch_metadata(config, batch)
+            response = await client.call_tool(
+                "memory_add_batch",
+                {
+                    "messages": batch["messages"],
+                    "batch_id": batch["batch_hash"],
+                    "metadata": metadata,
+                },
+            )
+            if not isinstance(response, dict) or response.get("isError") or response.get("ok") is not True:
+                raise RuntimeError("MCP memory_add_batch did not confirm success")
+            submitted.add(batch["batch_hash"])
+            checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
+            save_checkpoint(config.checkpoint_path, checkpoint)
+            submitted_count += 1
+        _update_checkpoint_metadata(config, messages, checkpoint)
+        save_checkpoint(config.checkpoint_path, checkpoint)
+        return {"ok": True, "submitted_count": submitted_count, "batch_count": len(batches)}
+    finally:
+        if owns_client:
+            await client.close()
+
+
+def _sync_history_with_callback(
+    config: WatcherConfig,
+    submit_add: Callable[[dict[str, Any]], Any],
+) -> dict[str, Any]:
+    messages = _read_history_messages(config.history_path)
+    batches = _build_batches(
+        messages,
+        session_id=config.session_id,
+        source_identity=str(config.history_path.resolve()),
+    )
+    checkpoint = load_checkpoint(config.checkpoint_path)
+    submitted = set(checkpoint.get("submitted_batches") or [])
+    submitted_count = 0
     for batch in batches:
         if batch["batch_hash"] in submitted:
             continue
-        payload = {
-            "input": {"messages": batch["messages"]},
-            "scope": {
-                "workspace_id": config.workspace_id,
-                "user_id": config.user_id,
-                "agent_id": config.agent_id,
-                "session_id": config.session_id,
-                "app_id": config.app_id,
-            },
-            "session_time": datetime.now(timezone.utc).isoformat(),
-            "metadata": {
-                "source": "haitun-history-watcher",
-                "history_path": str(config.history_path),
-                "line_start": batch["line_start"],
-                "line_end": batch["line_end"],
-                "batch_hash": batch["batch_hash"],
-                "turn_id": batch["turn_id"],
-                "ended_with_error": "unknown",
-            },
-        }
-        submit(payload)
+        submit_add({"input": {"messages": batch["messages"]}, "metadata": _batch_metadata(config, batch)})
         submitted.add(batch["batch_hash"])
         checkpoint.setdefault("submitted_batches", []).append(batch["batch_hash"])
+        save_checkpoint(config.checkpoint_path, checkpoint)
         submitted_count += 1
+    _update_checkpoint_metadata(config, messages, checkpoint)
+    save_checkpoint(config.checkpoint_path, checkpoint)
+    return {"ok": True, "submitted_count": submitted_count, "batch_count": len(batches)}
 
+
+def _batch_metadata(config: WatcherConfig, batch: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": "haitun-history-watcher",
+        "history_path": str(config.history_path),
+        "line_start": batch["line_start"],
+        "line_end": batch["line_end"],
+        "batch_hash": batch["batch_hash"],
+        "turn_id": batch["turn_id"],
+        "ended_with_error": "unknown",
+    }
+
+
+def _update_checkpoint_metadata(
+    config: WatcherConfig,
+    messages: list[dict[str, Any]],
+    checkpoint: dict[str, Any],
+) -> None:
     stat = config.history_path.stat() if config.history_path.exists() else None
     checkpoint.update(
         {
@@ -109,38 +187,37 @@ def sync_history_once(
             "last_message_hash": messages[-1]["raw_hash"] if messages else None,
         }
     )
-    save_checkpoint(config.checkpoint_path, checkpoint)
-    return {"ok": True, "submitted_count": submitted_count, "batch_count": len(batches)}
-
-
-def _post_add(config: WatcherConfig, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(
-        f"{config.base_url.rstrip('/')}/add",
-        data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
-    with request.urlopen(req, timeout=config.timeout_seconds) as response:
-        raw = response.read().decode("utf-8")
-        if not raw.strip():
-            return {"ok": True}
-        data = json.loads(raw)
-        if isinstance(data, dict) and data.get("ok") is False:
-            raise RuntimeError(
-                "Fusion Memory HTTP /add rejected passive sync payload: "
-                + str(data.get("message") or data.get("error") or "unknown error")
-            )
-        return data if isinstance(data, dict) else {"ok": True}
 
 
 def watch_history(config: WatcherConfig, *, poll_interval_seconds: float = 1.0) -> None:
-    while True:
-        try:
-            sync_history_once(config)
-        except Exception as exc:
-            print(f"Fusion Memory Haitun history watcher skipped sync: {exc}", flush=True)
-        time.sleep(max(0.1, poll_interval_seconds))
+    anyio.run(_watch_history, config, poll_interval_seconds)
+
+
+async def _watch_history(config: WatcherConfig, poll_interval_seconds: float) -> None:
+    client = MemoryMcpClient(
+        config.mcp_url,
+        config.token,
+        config.workspace_id,
+        config.session_id,
+        timeout_seconds=config.timeout_seconds,
+    )
+    backoff = 0.5
+    try:
+        while True:
+            try:
+                await sync_history_once_async(config, client=client)
+                backoff = 0.5
+                await anyio.sleep(max(0.1, poll_interval_seconds))
+            except Exception as exc:
+                print(
+                    f"Fusion Memory Haitun history watcher skipped sync after {type(exc).__name__}",
+                    flush=True,
+                )
+                await client.close()
+                await anyio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+    finally:
+        await client.close()
 
 
 def history_watcher_pid_file(config: WatcherConfig) -> Path:
@@ -170,7 +247,12 @@ def start_history_watcher_daemon(
 
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     command = _watcher_daemon_command(config, poll_interval_seconds=poll_interval_seconds)
-    daemon_env = _daemon_env(env, memory_url=config.base_url)
+    daemon_env = _daemon_env(
+        env,
+        mcp_url=config.mcp_url,
+        token=config.token,
+        workspace_id=config.workspace_id,
+    )
     try:
         with log_file.open("ab") as log_handle:
             process = subprocess.Popen(
@@ -309,7 +391,7 @@ def _watcher_result(
         "pid_file": str(history_watcher_pid_file(config)),
         "log_file": str(history_watcher_log_file(config)),
         "checkpoint_file": str(config.checkpoint_path),
-        "memory_url": config.base_url,
+        "mcp_url": config.mcp_url,
         **extra,
     }
 
@@ -346,7 +428,9 @@ def _daemon_popen_kwargs(
 def _daemon_env(
     env: Mapping[str, str] | None = None,
     *,
-    memory_url: str | None = None,
+    mcp_url: str | None = None,
+    token: str | None = None,
+    workspace_id: str | None = None,
     os_name: str | None = None,
 ) -> dict[str, str]:
     name = os.name if os_name is None else os_name
@@ -362,8 +446,12 @@ def _daemon_env(
             continue
         seen.add(dedupe_key)
         normalized[out_key] = str(value)
-    if memory_url:
-        normalized["PSI_MEMORY_BASE_URL"] = memory_url.rstrip("/")
+    if mcp_url:
+        normalized["FUSION_MEMORY_MCP_URL"] = mcp_url.rstrip("/")
+    if token:
+        normalized["FUSION_MEMORY_TOKEN"] = token
+    if workspace_id:
+        normalized["FUSION_MEMORY_WORKSPACE_ID"] = workspace_id
     return normalized
 
 
@@ -439,7 +527,12 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
 
 def save_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(checkpoint, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
 
 
 def _read_history_messages(path: Path) -> list[dict[str, Any]]:
@@ -460,11 +553,27 @@ def _read_history_messages(path: Path) -> list[dict[str, Any]]:
         role = str(item.get("role") or item.get("speaker") or "user").strip() or "user"
         if not content:
             continue
-        out.append({"role": role, "content": content, "line_number": line_number, "raw_hash": stable_hash(raw)})
+        message: dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "line_number": line_number,
+            "raw_hash": stable_hash(raw),
+        }
+        for key in ("timestamp", "turn_id", "source_uri"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                message[key] = value.strip()
+        if "source_uri" not in message:
+            source = item.get("source")
+            if isinstance(source, str) and source.strip():
+                message["source_uri"] = source.strip()
+        out.append(message)
     return out
 
 
-def _build_batches(messages: list[dict[str, Any]], *, session_id: str) -> list[dict[str, Any]]:
+def _build_batches(
+    messages: list[dict[str, Any]], *, session_id: str, source_identity: str = ""
+) -> list[dict[str, Any]]:
     batches: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
     start_line = 0
@@ -472,19 +581,54 @@ def _build_batches(messages: list[dict[str, Any]], *, session_id: str) -> list[d
     for message in messages:
         role = message["role"]
         if role == "user" and current:
-            batches.append(_batch(current, session_id=session_id, start_line=start_line, end_line=end_line))
+            batches.append(
+                _batch(
+                    current,
+                    session_id=session_id,
+                    source_identity=source_identity,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+            )
             current = []
         if not current:
             start_line = int(message["line_number"])
         end_line = int(message["line_number"])
-        current.append({"role": role, "content": message["content"]})
+        current.append(
+            {
+                field: value
+                for field, value in message.items()
+                if field in {"role", "content", "source_uri", "timestamp", "turn_id"}
+            }
+        )
     if current:
-        batches.append(_batch(current, session_id=session_id, start_line=start_line, end_line=end_line))
+        batches.append(
+            _batch(
+                current,
+                session_id=session_id,
+                source_identity=source_identity,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
     return batches
 
 
-def _batch(messages: list[dict[str, Any]], *, session_id: str, start_line: int, end_line: int) -> dict[str, Any]:
-    identity = {"session_id": session_id, "line_start": start_line, "line_end": end_line, "messages": messages}
+def _batch(
+    messages: list[dict[str, Any]],
+    *,
+    session_id: str,
+    source_identity: str,
+    start_line: int,
+    end_line: int,
+) -> dict[str, Any]:
+    identity = {
+        "source_identity": source_identity,
+        "session_id": session_id,
+        "line_start": start_line,
+        "line_end": end_line,
+        "messages": messages,
+    }
     batch_hash = stable_hash(json.dumps(identity, ensure_ascii=False, sort_keys=True))[:16]
     return {
         "messages": messages,
@@ -506,3 +650,10 @@ def _clamp_timeout(value: float) -> float:
     if value <= 0:
         return DEFAULT_TIMEOUT_SECONDS
     return max(MIN_TIMEOUT_SECONDS, min(MAX_TIMEOUT_SECONDS, value))
+
+
+def _mcp_url_from_legacy_base(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.rstrip("/")
+    return normalized if normalized.endswith("/mcp") else f"{normalized}/mcp"

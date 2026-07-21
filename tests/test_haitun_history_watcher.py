@@ -5,9 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -25,9 +23,9 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
                 session_id="session-1",
                 db_path=workspace / "memory.sqlite3",
                 env={
-                    "PSI_MEMORY_BASE_URL": "http://127.0.0.1:8700",
-                    "PSI_MEMORY_WORKSPACE_ID": "ws",
-                    "PSI_MEMORY_USER_ID": "u",
+                    "FUSION_MEMORY_MCP_URL": "http://127.0.0.1:8700/mcp",
+                    "FUSION_MEMORY_TOKEN": "test-token",
+                    "FUSION_MEMORY_WORKSPACE_ID": "ws",
                     "PSI_MEMORY_AGENT_ID": "haitun",
                     "PSI_MEMORY_TIMEOUT_SECONDS": "3",
                 },
@@ -35,9 +33,11 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
 
             self.assertEqual(cfg.history_path, workspace / "histories" / "session-1.jsonl")
             self.assertEqual(cfg.checkpoint_path, workspace / ".fusion-memory" / "haitun-history-watcher" / "session-1.json")
-            self.assertEqual(cfg.base_url, "http://127.0.0.1:8700")
+            self.assertEqual(cfg.mcp_url, "http://127.0.0.1:8700/mcp")
+            self.assertEqual(cfg.token, "test-token")
             self.assertEqual(cfg.workspace_id, "ws")
             self.assertEqual(cfg.timeout_seconds, 3.0)
+            self.assertFalse(hasattr(cfg, "user_id"))
 
     def test_config_from_workspace_defaults_and_caps_timeout_for_local_qwen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,7 +56,7 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             self.assertEqual(default_cfg.timeout_seconds, 30.0)
             self.assertEqual(capped_cfg.timeout_seconds, 120.0)
 
-    def test_sync_history_once_posts_new_jsonl_turns_to_http_and_checkpoint(self) -> None:
+    def test_sync_history_once_compat_callback_keeps_batch_and_checkpoint_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             history = workspace / "histories" / "session-1.jsonl"
@@ -72,7 +72,7 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             cfg = config_from_workspace(
                 workspace=workspace,
                 session_id="session-1",
-                env={"PSI_MEMORY_WORKSPACE_ID": "ws", "PSI_MEMORY_USER_ID": "u", "PSI_MEMORY_AGENT_ID": "haitun"},
+                env={"FUSION_MEMORY_WORKSPACE_ID": "ws", "FUSION_MEMORY_TOKEN": "test-token"},
             )
 
             result = sync_history_once(cfg, submit_add=submitted.append)
@@ -81,14 +81,11 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             self.assertEqual(result["submitted_count"], 1)
             self.assertEqual(duplicate["submitted_count"], 0)
             self.assertEqual(len(submitted), 1)
-            self.assertEqual(submitted[0]["scope"]["workspace_id"], "ws")
-            self.assertEqual(submitted[0]["scope"]["user_id"], "u")
-            self.assertEqual(submitted[0]["scope"]["agent_id"], "haitun")
-            self.assertEqual(submitted[0]["scope"]["session_id"], "session-1")
+            self.assertNotIn("scope", submitted[0])
+            self.assertNotIn("user_id", json.dumps(submitted[0]))
             self.assertEqual(submitted[0]["input"]["messages"][0]["role"], "user")
             self.assertIn("PostgreSQL", submitted[0]["input"]["messages"][0]["content"])
             self.assertEqual(submitted[0]["metadata"]["source"], "haitun-history-watcher")
-            self.assertIn("session_time", submitted[0])
             checkpoint = load_checkpoint(cfg.checkpoint_path)
             self.assertEqual(len(checkpoint["submitted_batches"]), 1)
 
@@ -103,7 +100,7 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             cfg = config_from_workspace(
                 workspace=workspace,
                 session_id="session-1",
-                env={"PSI_MEMORY_WORKSPACE_ID": "ws", "PSI_MEMORY_USER_ID": "u", "PSI_MEMORY_AGENT_ID": "haitun"},
+                env={"FUSION_MEMORY_WORKSPACE_ID": "ws", "FUSION_MEMORY_TOKEN": "test-token"},
             )
 
             result = sync_history_once(cfg, submit_add=submitted.append)
@@ -117,92 +114,73 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             checkpoint = load_checkpoint(cfg.checkpoint_path)
             self.assertEqual(len(checkpoint["submitted_batches"]), 2)
 
+    def test_identical_histories_in_different_workspaces_have_distinct_stable_batch_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submitted: list[list[str]] = []
+            configs = []
+            for name in ("workspace-a", "workspace-b"):
+                workspace = root / name
+                history = workspace / "histories" / "same-session.jsonl"
+                history.parent.mkdir(parents=True)
+                history.write_text(
+                    '{"role":"user","content":"same"}\n'
+                    '{"role":"assistant","content":"same reply"}\n',
+                    encoding="utf-8",
+                )
+                cfg = config_from_workspace(workspace=workspace, session_id="same-session", env={"FUSION_MEMORY_TOKEN": "token"})
+                configs.append(cfg)
+                calls: list[str] = []
+                sync_history_once(cfg, submit_add=lambda payload: calls.append(payload["metadata"]["batch_hash"]))
+                submitted.append(calls)
+
+            self.assertNotEqual(submitted[0], submitted[1])
+            self.assertEqual(sync_history_once(configs[0], submit_add=lambda payload: None)["submitted_count"], 0)
+            self.assertEqual(sync_history_once(configs[1], submit_add=lambda payload: None)["submitted_count"], 0)
+
     def test_cli_sync_haitun_history_once_outputs_json(self) -> None:
+        from fusion_memory import cli
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            history = workspace / "histories" / "session-1.jsonl"
-            db = workspace / "memory.sqlite3"
-            server, thread, received = _start_fake_memory_server()
-            history.parent.mkdir()
-            history.write_text(json.dumps({"role": "user", "content": "以后默认用中文回复我。"}, ensure_ascii=False) + "\n", encoding="utf-8")
             try:
-                proc = subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "fusion_memory.cli",
-                        "--db",
-                        str(db),
-                        "sync-haitun-history",
-                        "--workspace",
-                        str(workspace),
-                        "--session-id",
-                        "session-1",
-                        "--once",
-                        "--json",
-                    ],
-                    cwd=Path(__file__).resolve().parents[1],
-                    env={
-                        **os.environ,
-                        "PSI_MEMORY_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-                    },
-                    check=True,
-                    text=True,
-                    capture_output=True,
-                )
+                sys.argv = ["fusion-memory", "sync-haitun-history", "--workspace", str(workspace), "--session-id", "session-1", "--once", "--json"]
+                sys.stdout = StringIO()
+                with patch("fusion_memory.cli.sync_haitun_history_once", return_value={"ok": True, "submitted_count": 1}) as sync:
+                    code = cli.main()
+                payload = json.loads(sys.stdout.getvalue())
             finally:
-                server.shutdown()
-                thread.join(timeout=2)
+                sys.argv = old_argv
+                sys.stdout = old_stdout
 
-            payload = json.loads(proc.stdout)
+            self.assertEqual(code, 0)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["submitted_count"], 1)
-            self.assertEqual(len(received), 1)
-            self.assertEqual(received[0]["scope"]["session_id"], "session-1")
-            self.assertEqual(received[0]["metadata"]["source"], "haitun-history-watcher")
+            sync.assert_called_once()
 
     def test_cli_sync_dolphin_history_alias_still_outputs_json(self) -> None:
+        from fusion_memory import cli
+
+        old_argv = sys.argv
+        old_stdout = sys.stdout
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            history = workspace / "histories" / "session-1.jsonl"
-            db = workspace / "memory.sqlite3"
-            server, thread, received = _start_fake_memory_server()
-            history.parent.mkdir()
-            history.write_text(json.dumps({"role": "user", "content": "以后默认用中文回复我。"}, ensure_ascii=False) + "\n", encoding="utf-8")
             try:
-                proc = subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "fusion_memory.cli",
-                        "--db",
-                        str(db),
-                        "sync-dolphin-history",
-                        "--workspace",
-                        str(workspace),
-                        "--session-id",
-                        "session-1",
-                        "--once",
-                        "--json",
-                    ],
-                    cwd=Path(__file__).resolve().parents[1],
-                    env={
-                        **os.environ,
-                        "PSI_MEMORY_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-                    },
-                    check=True,
-                    text=True,
-                    capture_output=True,
-                )
+                sys.argv = ["fusion-memory", "sync-dolphin-history", "--workspace", str(workspace), "--session-id", "session-1", "--once", "--json"]
+                sys.stdout = StringIO()
+                with patch("fusion_memory.cli.sync_haitun_history_once", return_value={"ok": True, "submitted_count": 1}) as sync:
+                    code = cli.main()
+                payload = json.loads(sys.stdout.getvalue())
             finally:
-                server.shutdown()
-                thread.join(timeout=2)
+                sys.argv = old_argv
+                sys.stdout = old_stdout
 
-            payload = json.loads(proc.stdout)
+            self.assertEqual(code, 0)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["submitted_count"], 1)
-            self.assertEqual(len(received), 1)
-            self.assertEqual(received[0]["metadata"]["source"], "haitun-history-watcher")
+            sync.assert_called_once()
 
     def test_start_history_watcher_daemon_spawns_python_without_shell_and_writes_pid(
         self,
@@ -214,7 +192,7 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
                 session_id="session-1",
                 db_path=workspace / "memory.sqlite3",
                 base_url="http://127.0.0.1:9876",
-                env={"PATH": os.environ.get("PATH", "")},
+                env={"PATH": os.environ.get("PATH", ""), "FUSION_MEMORY_TOKEN": "daemon-secret"},
             )
             fake_process = _FakeProcess(pid=24680)
 
@@ -245,12 +223,15 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
         self.assertIn("--poll-interval-seconds", command)
         self.assertIn("0.5", command)
         self.assertNotIn("--once", command)
+        self.assertNotIn("daemon-secret", command)
 
         kwargs = popen.call_args.kwargs
         self.assertNotEqual(kwargs.get("shell"), True)
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
-        self.assertEqual(kwargs["env"]["PSI_MEMORY_BASE_URL"], "http://127.0.0.1:9876")
+        self.assertEqual(kwargs["env"]["FUSION_MEMORY_MCP_URL"], "http://127.0.0.1:9876/mcp")
+        self.assertEqual(kwargs["env"]["FUSION_MEMORY_TOKEN"], "daemon-secret")
+        self.assertNotIn("daemon-secret", json.dumps(result))
 
     def test_start_history_watcher_daemon_reports_already_running_pid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,14 +294,14 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
                 "PATH": r"C:\msys64\ucrt64\bin",
                 "OTHER": "value",
             },
-            memory_url="http://127.0.0.1:8700",
+            mcp_url="http://127.0.0.1:8700/mcp",
             os_name="nt",
         )
 
         path_keys = [key for key in env if key.lower() == "path"]
         self.assertEqual(path_keys, ["Path"])
         self.assertEqual(env["Path"], r"C:\Windows\System32")
-        self.assertEqual(env["PSI_MEMORY_BASE_URL"], "http://127.0.0.1:8700")
+        self.assertEqual(env["FUSION_MEMORY_MCP_URL"], "http://127.0.0.1:8700/mcp")
 
     def test_windows_history_watcher_daemon_starts_without_console_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -401,6 +382,8 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertIn("--background", sync_help.stdout)
+        self.assertIn("--mcp-url", sync_help.stdout)
+        self.assertNotIn("--memory-url", sync_help.stdout)
 
     def test_cli_sync_haitun_history_background_outputs_daemon_json(self) -> None:
         from fusion_memory import cli
@@ -445,29 +428,7 @@ class HaitunHistoryWatcherTests(unittest.TestCase):
         self.assertIn("pid_file", payload)
         self.assertIn("log_file", payload)
         start.assert_called_once()
-
-
-def _start_fake_memory_server() -> tuple[HTTPServer, threading.Thread, list[dict]]:
-    received: list[dict] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8")
-            received.append(json.loads(body))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok": true}')
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread, received
-
+        self.assertEqual(start.call_args.args[0].mcp_url, "http://127.0.0.1:9876/mcp")
 
 class _FakeProcess:
     def __init__(self, *, pid: int) -> None:

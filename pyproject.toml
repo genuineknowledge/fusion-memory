@@ -3,7 +3,7 @@ name = "fusion-memory"
 version = "0.1.0"
 description = "Local MVP implementation of Fusion Memory."
 requires-python = ">=3.11"
-dependencies = ["aiohttp>=3.9"]
+dependencies = ["aiohttp>=3.9", "anyio>=4.0", "mcp>=1.28.1"]
 
 [project.scripts]
 fusion-memory = "fusion_memory.cli:main"
@@ -28,3 +28,4 @@ include = ["fusion_memory*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["integration: requires an available Postgres stack"]

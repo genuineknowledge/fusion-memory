@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from fusion_memory.core.runtime_config import build_runtime_retrieval_flags, memory_service_from_env
+from fusion_memory.model_pool import PooledEmbedder, PooledReranker
 
 
 class RuntimeRetrievalFlagTests(unittest.TestCase):
@@ -56,4 +57,50 @@ class RuntimeRetrievalFlagTests(unittest.TestCase):
     def test_memory_service_from_env_raises_for_invalid_selector(self) -> None:
         with patch.dict(os.environ, {"FUSION_MEMORY_EVENT_ORDERING_SELECTOR": "graph"}, clear=True):
             with self.assertRaisesRegex(ValueError, "unsupported event ordering selector"):
+                memory_service_from_env()
+
+    def test_embedding_endpoint_list_builds_a_pooled_adapter_and_takes_precedence(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "FUSION_MEMORY_EMBEDDING_PROVIDER": "http",
+                "FUSION_MEMORY_EMBEDDING_ENDPOINT": "http://legacy/v1/embeddings",
+                "FUSION_MEMORY_EMBEDDING_ENDPOINTS": "http://one/v1/embeddings, http://two/v1/embeddings",
+            },
+            clear=True,
+        ):
+            with patch("fusion_memory.core.runtime_config.MemoryService") as service:
+                memory_service_from_env()
+
+        assert isinstance(service.call_args.kwargs["embedder"], PooledEmbedder)
+        assert service.call_args.kwargs["embedder"].pool.endpoints == [
+            "http://one/v1/embeddings",
+            "http://two/v1/embeddings",
+        ]
+
+    def test_reranker_singular_endpoint_remains_a_one_element_pool(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "FUSION_MEMORY_RERANKER_PROVIDER": "http",
+                "FUSION_MEMORY_RERANKER_ENDPOINT": "http://one/v1/rerank",
+            },
+            clear=True,
+        ):
+            with patch("fusion_memory.core.runtime_config.MemoryService") as service:
+                memory_service_from_env()
+
+        assert isinstance(service.call_args.kwargs["reranker"], PooledReranker)
+        assert service.call_args.kwargs["reranker"].pool.endpoints == ["http://one/v1/rerank"]
+
+    def test_empty_explicit_endpoint_list_is_rejected(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "FUSION_MEMORY_EMBEDDING_PROVIDER": "http",
+                "FUSION_MEMORY_EMBEDDING_ENDPOINTS": " , ",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "FUSION_MEMORY_EMBEDDING_ENDPOINTS must contain at least one endpoint"):
                 memory_service_from_env()

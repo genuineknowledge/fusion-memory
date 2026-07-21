@@ -1,0 +1,16 @@
+[Unit]
+Description=Fusion Memory authenticated MCP service
+Wants=network-online.target fusion-memory-embedding@default.service fusion-memory-reranker@default.service
+After=network-online.target fusion-memory-embedding@default.service fusion-memory-reranker@default.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/fusion-memory/mcp.env
+ExecStart=%h/.local/bin/fusion-memory mcp-server --host ${FUSION_MEMORY_MCP_HOST} --port ${FUSION_MEMORY_MCP_PORT} --path /mcp
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
