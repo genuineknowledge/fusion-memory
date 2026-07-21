@@ -180,6 +180,19 @@ def test_create_mcp_server_accepts_secure_and_loopback_public_urls(public_url):
     assert server.settings.streamable_http_path == "/mcp"
 
 
+def test_stateful_session_manager_has_bounded_idle_timeout(monkeypatch):
+    monkeypatch.setenv("FUSION_MEMORY_MCP_SESSION_IDLE_SECONDS", "120")
+    server = create_mcp_server(
+        runtime=FakeMemoryRuntime(),
+        token_verifier=FakeTokenVerifier(),
+        public_url="https://memory.example/mcp",
+    )
+
+    server.streamable_http_app()
+
+    assert server.session_manager.session_idle_timeout == 120
+
+
 @pytest.mark.parametrize("path", ["/native", "/mcp/", "/mcp/v1"])
 def test_create_mcp_server_rejects_non_contract_path(path):
     with pytest.raises(ValueError, match="exactly '/mcp'"):

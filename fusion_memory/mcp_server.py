@@ -283,6 +283,10 @@ def _install_runtime_lifespan(server: FastMCP, runtime: Any, custom_lifespan: An
     def build_app():
         nonlocal installed
         app = streamable_http_app()
+        if not server.settings.stateless_http:
+            server.session_manager.session_idle_timeout = float(
+                _positive_env("FUSION_MEMORY_MCP_SESSION_IDLE_SECONDS", 1800)
+            )
         if not installed:
             server.session_manager.run = _runtime_lifespan(
                 runtime,
