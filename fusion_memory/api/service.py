@@ -32,6 +32,13 @@ from fusion_memory.ingestion.window_builder import build_session_summary_span
 from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
 from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
 from fusion_memory.retrieval.candidate_lifecycle import CandidateLifecycleRecorder
+from fusion_memory.retrieval.context import (
+    ProviderKind,
+    RetrievalContext,
+    RetrievalResult,
+    SearchRequest,
+)
+from fusion_memory.retrieval.engine import RetrievalEngine, sanitize_retrieval_trace
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
@@ -186,6 +193,7 @@ class MemoryService:
         query_intent_refiner_mode: str = "auto",
         async_extractor: Any | None = None,
         retrieval_flags: Any | None = None,
+        retrieval_engine: RetrievalEngine | None = None,
     ) -> None:
         self.config = config or DEFAULT_CONFIG
         if store is not None:
@@ -207,6 +215,7 @@ class MemoryService:
         self.extractor = extractor or RuleBasedExtractor()
         self.async_extractor = async_extractor
         self.retrieval_flags = retrieval_flags
+        self.retrieval_engine = retrieval_engine
         self.gate = EncodingGate(self.config)
         self.views = ViewBuilder()
         self.planner = QueryPlanner(
@@ -358,8 +367,167 @@ class MemoryService:
         )
 
     def search(self, query: str, scope: Scope, options: dict[str, Any] | None = None) -> SearchResult:
+        if self.retrieval_engine is not None:
+            _, _, result, trace_id = self._run_retrieval_engine(query, scope, options)
+            return SearchResult(
+                candidates=list(result.candidates),
+                trace_id=trace_id,
+                coverage=dict(result.coverage),
+            )
         with collect_rule_hits() as rule_hits:
             return self._search_with_rule_hits(query, scope, options, rule_hits)
+
+    def _run_retrieval_engine(
+        self,
+        query: str,
+        scope: Scope,
+        options: dict[str, Any] | None,
+    ) -> tuple[RetrievalContext, SearchRequest, RetrievalResult, str]:
+        if self.retrieval_engine is None:
+            raise RuntimeError("retrieval engine is not configured")
+        options = dict(options or {})
+        scope.validate_for_read()
+        allow_cross_session = bool(options.get("allow_cross_session", False))
+        include_session = bool(scope.session_id and not allow_cross_session)
+        mode = options.get("mode", "fast")
+        limit = options.get("limit", self.config.retrieval_output_n)
+        self._authorize(
+            "memory.search",
+            scope,
+            {
+                "query": query,
+                "allow_cross_session": allow_cross_session,
+                "include_session": include_session,
+                "mode": mode,
+                "limit": limit,
+                "enabled_sources": options.get("enabled_sources"),
+            },
+        )
+
+        supported_options = {
+            "allow_cross_session",
+            "deadline",
+            "enabled_providers",
+            "enabled_sources",
+            "include_trace",
+            "limit",
+            "mode",
+            "time_range",
+            "token_budget",
+        }
+        unsupported_options = sorted(set(options) - supported_options)
+        if unsupported_options:
+            raise ValueError(
+                "unsupported retrieval options: " + ", ".join(unsupported_options)
+            )
+        if mode not in {"fast", "balanced"}:
+            raise ValueError("mode must be fast or balanced")
+
+        source_provider_kinds = {
+            "raw": {
+                ProviderKind.VECTOR,
+                ProviderKind.LEXICAL,
+                ProviderKind.TEMPORAL,
+                ProviderKind.CHRONOLOGY,
+            },
+            "exact": {ProviderKind.LEXICAL},
+            "entities": {ProviderKind.ENTITY},
+            "facts": {ProviderKind.VECTOR, ProviderKind.LEXICAL},
+            "events": {
+                ProviderKind.VECTOR,
+                ProviderKind.TEMPORAL,
+                ProviderKind.CHRONOLOGY,
+            },
+            "views": {ProviderKind.LEXICAL},
+            "profiles": {ProviderKind.LEXICAL, ProviderKind.ENTITY},
+        }
+        enabled_providers_option = options.get("enabled_providers")
+        if enabled_providers_option is not None:
+            provider_values = (
+                [enabled_providers_option]
+                if isinstance(enabled_providers_option, (str, ProviderKind))
+                else enabled_providers_option
+            )
+            try:
+                enabled_providers = frozenset(
+                    value if isinstance(value, ProviderKind) else ProviderKind(str(value))
+                    for value in provider_values
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("enabled_providers contains an unsupported provider") from exc
+        else:
+            enabled_sources_option = options.get("enabled_sources")
+            if enabled_sources_option is None:
+                enabled_providers = None
+            else:
+                source_values = (
+                    [enabled_sources_option]
+                    if isinstance(enabled_sources_option, str)
+                    else enabled_sources_option
+                )
+                try:
+                    source_names = {str(value) for value in source_values}
+                except TypeError as exc:
+                    raise ValueError("enabled_sources must be a collection") from exc
+                unknown_sources = sorted(source_names - set(source_provider_kinds))
+                if unknown_sources:
+                    raise ValueError(
+                        "enabled_sources contains unsupported source families: "
+                        + ", ".join(unknown_sources)
+                    )
+                enabled_providers = frozenset(
+                    provider
+                    for source_name in source_names
+                    for provider in source_provider_kinds[source_name]
+                )
+
+        now = datetime.now(timezone.utc)
+        trace_id = new_id("trace")
+        context = RetrievalContext(
+            scope=scope,
+            user_id=scope.user_id,
+            now=now,
+            trace_id=trace_id,
+            deadline=options.get("deadline"),
+            include_session=include_session,
+        )
+        request = SearchRequest(
+            query=query,
+            limit=limit,
+            mode=mode,
+            time_range=options.get("time_range"),
+            include_trace=bool(options.get("include_trace", True)),
+            enabled_providers=enabled_providers,
+        )
+        model_call_marks = self._model_call_marks()
+        result = self.retrieval_engine.search(context, request)
+        model_calls = self._model_calls_since(model_call_marks)
+        for model_call in model_calls:
+            model_call.pop("prompt_version", None)
+        trace = sanitize_retrieval_trace(result.trace)
+        trace["operation"] = "search"
+        trace["allow_cross_session"] = allow_cross_session
+        trace["include_session"] = include_session
+        trace["model_calls"] = model_calls
+        self.store.save_trace(trace_id, trace, scope)
+        self.store.insert_audit_event(
+            scope,
+            "memory.search",
+            object_type="trace",
+            object_id=trace_id,
+            trace_id=trace_id,
+            payload={
+                "query_hash": stable_hash(query),
+                "query_length": len(query),
+                "intent": trace.get("intent", "unknown"),
+                "mode": mode,
+                "candidate_count": len(result.candidates),
+                "allow_cross_session": allow_cross_session,
+                "include_session": include_session,
+                "model_calls": _model_call_summary(model_calls),
+            },
+        )
+        return context, request, result, trace_id
 
     def _search_with_rule_hits(self, query: str, scope: Scope, options: dict[str, Any] | None, rule_hits) -> SearchResult:
         options = options or {}
@@ -645,6 +813,37 @@ class MemoryService:
         return SearchResult(candidates=selected, trace_id=trace_id, coverage=coverage)
 
     def answer_context(self, query: str, scope: Scope, budget: dict[str, Any] | None = None) -> EvidencePack:
+        if self.retrieval_engine is not None:
+            product_budget = dict(budget or {})
+            token_budget = (
+                product_budget.get("token_budget")
+                or self.config.answer_context_budget_tokens
+            )
+            scope.validate_for_read()
+            self._authorize(
+                "memory.answer_context",
+                scope,
+                {
+                    "query": query,
+                    "allow_cross_session": bool(
+                        product_budget.get("allow_cross_session", False)
+                    ),
+                    "limit": product_budget.get("limit", self.config.retrieval_output_n),
+                    "mode": product_budget.get("mode", "fast"),
+                    "token_budget": token_budget,
+                },
+            )
+            context, request, result, _ = self._run_retrieval_engine(
+                query,
+                scope,
+                product_budget,
+            )
+            return self.retrieval_engine.build_evidence_pack(
+                context,
+                request,
+                result,
+                token_budget,
+            )
         with collect_rule_hits() as rule_hits:
             return self._answer_context_with_rule_hits(query, scope, budget, rule_hits)
 
@@ -1433,6 +1632,10 @@ class MemoryService:
             ("async_extractor", self.async_extractor),
             ("async_extractor_client", getattr(self.async_extractor, "client", None)),
             ("reranker", self.reranker),
+            ("retrieval_engine", self.retrieval_engine),
+            ("retrieval_planner", getattr(self.retrieval_engine, "planner", None)),
+            ("retrieval_registry", getattr(self.retrieval_engine, "registry", None)),
+            ("retrieval_reranker", getattr(self.retrieval_engine, "reranker", None)),
         ]
         out: list[tuple[str, Any]] = []
         seen: set[int] = set()
