@@ -18,6 +18,7 @@ from fusion_memory.eval.adapter import (
     _model_call_count,
     _pack_summary,
 )
+from fusion_memory.eval.beam.engine import BeamRetrievalEngine
 
 
 BEAM_SPLITS = {"small", "dev", "100k", "500k", "1m", "10m"}
@@ -42,10 +43,23 @@ class BeamAdapter(BenchmarkAdapter):
 
     benchmark = "BEAM"
 
-    def __init__(self, service: MemoryService, scope: Scope, split: str = "small", answer_model: Any | None = None, judge_model: Any | None = None) -> None:
+    def __init__(
+        self,
+        service: MemoryService,
+        scope: Scope,
+        split: str = "small",
+        answer_model: Any | None = None,
+        judge_model: Any | None = None,
+        retrieval_engine: Any | None = None,
+    ) -> None:
         validate_beam_split(split)
         super().__init__(service, scope, answer_model=answer_model, judge_model=judge_model)
         self.split = split
+        self.retrieval_engine = (
+            retrieval_engine
+            if retrieval_engine is not None
+            else BeamRetrievalEngine.from_service(service)
+        )
 
     def ingest_dataset(self, dataset_path: str | Path, split: str | None = None) -> dict[str, Any]:
         effective_split = self._effective_split(split)
@@ -67,10 +81,15 @@ class BeamAdapter(BenchmarkAdapter):
         return super().build_queries(dataset_path, split=effective_split)
 
     def answer_query(self, query: EvalQuery, budget: dict[str, Any] | None = None) -> EvalResult:
-        budget = {"mode": "benchmark", "query_type_hint": query.category, **(budget or {})}
+        budget = {"mode": "balanced", **(budget or {})}
         started = perf_counter()
         query_scope = self._beam_scope(query.id)
-        pack = self.service.answer_context(query.query, query_scope, budget=budget)
+        pack = self.retrieval_engine.answer_context(
+            query.query,
+            query_scope,
+            query.category,
+            budget=budget,
+        )
         latency_ms = (perf_counter() - started) * 1000
         model_call_mark = _model_call_count(self.answer_model, self.judge_model)
         answer_failed = False
@@ -98,7 +117,7 @@ class BeamAdapter(BenchmarkAdapter):
             evidence_matched_gold=False,
             answer_model=getattr(self.answer_model, "version", self.answer_model.__class__.__name__),
             judge_model=getattr(self.judge_model, "version", self.judge_model.__class__.__name__),
-            mode=str(budget.get("mode", "benchmark")),
+            mode=str(budget.get("mode", "balanced")),
             tokens_query=_approx_tokens(query.query, pack, answer),
             retrieval_latency_ms=latency_ms,
             llm_calls=llm_calls,

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from fusion_memory import MemoryService, Scope
 from fusion_memory.core.llm import StaticLLMClient
@@ -65,6 +66,47 @@ class LongMemEvalAdapterTests(unittest.TestCase):
             self.assertGreater(output["report"]["llm_calls_query"], 0.0)
             self.assertIn("llm_answer", output["report"]["answer_model"])
             self.assertIn("llm_judge", output["report"]["judge_model"])
+
+    def test_longmemeval_defaults_to_balanced_cross_session_retrieval(self) -> None:
+        class CaptureService(MemoryService):
+            def __init__(self) -> None:
+                super().__init__()
+                self.answer_context_budgets: list[dict[str, Any]] = []
+
+            def answer_context(self, query, scope, budget=None):
+                self.answer_context_budgets.append(dict(budget or {}))
+                return super().answer_context(query, scope, budget=budget)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = _write_longmemeval_fixture(Path(tmp), split="dev")
+            service = CaptureService()
+            adapter = LongMemEvalAdapter(service, Scope(user_id="u"), split="dev")
+            item = adapter.load_items(dataset, split="dev")[0]
+
+            adapter.answer_item(item)
+
+        self.assertEqual(
+            service.answer_context_budgets[0],
+            {"mode": "balanced", "allow_cross_session": True},
+        )
+        self.assertNotIn("query_type_hint", service.answer_context_budgets[0])
+
+    def test_longmemeval_ablation_uses_only_product_modes(self) -> None:
+        class CaptureAdapter(LongMemEvalAdapter):
+            def __init__(self) -> None:
+                super().__init__(MemoryService(), Scope(user_id="u"), split="dev")
+                self.budgets: list[dict[str, Any]] = []
+
+            def run_items(self, items, budget=None):
+                self.budgets.append(dict(budget or {}))
+                return []
+
+        adapter = CaptureAdapter()
+
+        report = adapter.run_ablation([])
+
+        self.assertEqual(set(report), {"fast", "balanced"})
+        self.assertEqual(adapter.budgets, [{"mode": "fast"}, {"mode": "balanced"}])
 
 
 def _write_longmemeval_fixture(base: Path, split: str) -> Path:

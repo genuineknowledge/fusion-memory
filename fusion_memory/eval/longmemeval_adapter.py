@@ -93,7 +93,7 @@ class LongMemEvalAdapter(BenchmarkAdapter):
         return [self.answer_item(item, budget=budget) for item in items]
 
     def answer_item(self, item: LongMemEvalItem, budget: dict[str, Any] | None = None) -> LongMemEvalResult:
-        budget = {"mode": "benchmark", "allow_cross_session": True, **(budget or {})}
+        budget = {"mode": "balanced", "allow_cross_session": True, **(budget or {})}
         query_scope = self._question_scope(item.question_id)
         self._ingest_item(item)
         started = perf_counter()
@@ -126,7 +126,7 @@ class LongMemEvalAdapter(BenchmarkAdapter):
             evidence_matched_gold=evidence_matched,
             answer_model=getattr(self.answer_model, "version", self.answer_model.__class__.__name__),
             judge_model=getattr(self.judge_model, "version", self.judge_model.__class__.__name__),
-            mode=str(budget.get("mode", "benchmark")),
+            mode=str(budget.get("mode", "balanced")),
             tokens_query=_approx_tokens(item.question, pack, answer),
             retrieval_latency_ms=latency_ms,
             llm_calls=llm_calls,
@@ -140,7 +140,9 @@ class LongMemEvalAdapter(BenchmarkAdapter):
         )
 
     def run_ablation(self, items: list[LongMemEvalItem], modes: list[str] | None = None) -> dict[str, Any]:
-        modes = modes or ["fast", "balanced", "benchmark"]
+        modes = modes or ["fast", "balanced"]
+        if any(mode not in {"fast", "balanced"} for mode in modes):
+            raise ValueError("eval retrieval mode must be fast or balanced")
         return {mode: self.report(self.run_items(items, budget={"mode": mode})) for mode in modes}
 
     def run_component_ablation(self, items: list[LongMemEvalItem]) -> dict[str, Any]:

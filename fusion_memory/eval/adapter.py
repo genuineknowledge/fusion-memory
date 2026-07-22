@@ -162,7 +162,9 @@ class BenchmarkAdapter:
         return [self.answer_query(query, budget=budget) for query in queries]
 
     def run_ablation(self, queries: list[EvalQuery], modes: list[str] | None = None) -> dict[str, Any]:
-        modes = modes or ["fast", "balanced", "benchmark"]
+        modes = modes or ["fast", "balanced"]
+        if any(mode not in {"fast", "balanced"} for mode in modes):
+            raise ValueError("eval retrieval mode must be fast or balanced")
         return {mode: self.report(self.run_queries(queries, budget={"mode": mode})) for mode in modes}
 
     def run_component_ablation(self, queries: list[EvalQuery]) -> dict[str, Any]:

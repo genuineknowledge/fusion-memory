@@ -44,7 +44,7 @@ class EvalAdapterTests(unittest.TestCase):
         ablation = adapter.run_ablation(
             [EvalQuery(id="q1", query="What does Atlas retrieval use?", gold_answers=["Qdrant"], category="factual_exact")]
         )
-        self.assertEqual(set(ablation), {"fast", "balanced", "benchmark"})
+        self.assertEqual(set(ablation), {"fast", "balanced"})
         self.assertTrue(all(item["retrieval_match_rate"] == 1.0 for item in ablation.values()))
         component_ablation = adapter.run_component_ablation(
             [EvalQuery(id="q1", query="What does Atlas retrieval use?", gold_answers=["Qdrant"], category="factual_exact")]

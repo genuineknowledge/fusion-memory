@@ -5,14 +5,162 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fusion_memory import MemoryService, Scope
-from fusion_memory.eval.adapter import EvalQuery
+from fusion_memory.core.models import EvidencePack
+from fusion_memory.eval.adapter import BenchmarkAdapter, EvalQuery
+from fusion_memory.eval.beam.engine import BeamRetrievalEngine
+from fusion_memory.eval.beam.query_planner import BeamQueryPlanner
 from fusion_memory.eval.beam_adapter import BeamAdapter, _event_ordering_score
+from fusion_memory.retrieval.context import (
+    ProductQueryPlan,
+    ProviderKind,
+    RetrievalResult,
+)
+
+
+@dataclass(frozen=True)
+class BeamEngineCall:
+    query: str
+    scope: Scope
+    category: str | None
+    budget: dict[str, Any]
+
+
+class CaptureBeamEngine:
+    def __init__(self) -> None:
+        self.calls: list[BeamEngineCall] = []
+
+    def answer_context(
+        self,
+        query: str,
+        scope: Scope,
+        category: str | None,
+        budget: dict[str, Any] | None = None,
+    ) -> EvidencePack:
+        self.calls.append(BeamEngineCall(query, scope, category, dict(budget or {})))
+        return EvidencePack(
+            query=query,
+            answer_policy="answer_with_evidence_or_abstain",
+            current_views=[],
+            entity_profiles=[],
+            facts=[],
+            events=[],
+            source_spans=[{"id": "span-1", "content": "There is contradictory information."}],
+            conflicts=[],
+            coverage={"query_type": category},
+            debug_trace=[],
+        )
+
+
+class CaptureProductEngine:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def search_with_plan(self, context, request, plan):
+        self.calls.append((context, request, plan))
+        return RetrievalResult(
+            candidates=(),
+            coverage={"degraded": False},
+            trace={"stages": ["selection"]},
+            plan=plan,
+        )
+
+
+class CapturePackBuilder:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def build(self, context, request, result, token_budget):
+        self.calls.append((context, request, result, token_budget))
+        return EvidencePack(
+            query=request.query,
+            answer_policy="abstain_if_not_supported",
+            current_views=[],
+            entity_profiles=[],
+            facts=[],
+            events=[],
+            source_spans=[],
+            conflicts=[],
+            coverage=dict(result.coverage),
+            debug_trace=[dict(result.trace)],
+        )
 
 
 class BeamAdapterTests(unittest.TestCase):
+    def test_beam_query_planner_decorates_product_plan_by_category(self) -> None:
+        expected = {
+            "event_ordering": {ProviderKind.CHRONOLOGY, ProviderKind.TEMPORAL},
+            "temporal_reasoning": {ProviderKind.TEMPORAL},
+            "contradiction_resolution": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+            "knowledge_update": {ProviderKind.TEMPORAL, ProviderKind.LEXICAL},
+            "multi_session_reasoning": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+            "preference_following": {ProviderKind.LEXICAL, ProviderKind.ENTITY},
+            "instruction_following": {ProviderKind.LEXICAL},
+            "information_extraction": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+            "summarization": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+            "abstention": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+        }
+        planner = BeamQueryPlanner()
+
+        for category, required_providers in expected.items():
+            with self.subTest(category=category):
+                plan = planner.plan("What memory applies?", category, 7)
+                planned_providers = {request.kind for request in plan.provider_requests}
+
+                self.assertIsInstance(plan, ProductQueryPlan)
+                self.assertTrue(required_providers.issubset(planned_providers))
+                self.assertTrue(plan.use_reranker)
+                self.assertFalse(hasattr(plan, "category"))
+                self.assertNotIn(category, repr(plan))
+
+    def test_beam_retrieval_engine_applies_eval_limits_after_product_pack(self) -> None:
+        product_engine = CaptureProductEngine()
+        pack_builder = CapturePackBuilder()
+        engine = BeamRetrievalEngine(
+            product_engine=product_engine,
+            pack_builder=pack_builder,
+        )
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="beam:100k:1")
+
+        pack = engine.answer_context(
+            "What happened first?",
+            scope,
+            "event_ordering",
+            {"limit": 3, "token_budget": 1200},
+        )
+
+        context, request, plan = product_engine.calls[0]
+        self.assertTrue(context.include_session)
+        self.assertEqual(request.limit, 24)
+        self.assertEqual(request.mode, "balanced")
+        self.assertEqual(pack_builder.calls[0][3], 24000)
+        self.assertIs(pack_builder.calls[0][2].plan, plan)
+        self.assertNotIn("event_ordering", repr(plan))
+        self.assertNotIn("event_ordering", repr(pack.debug_trace))
+        self.assertEqual(pack.coverage["benchmark"], "BEAM")
+        self.assertEqual(pack.coverage["benchmark_category"], "event_ordering")
+        self.assertEqual(pack.coverage["query_type"], "event_ordering")
+
+    def test_beam_retrieval_engine_uses_fifty_result_floor_outside_ordering(self) -> None:
+        product_engine = CaptureProductEngine()
+        engine = BeamRetrievalEngine(
+            product_engine=product_engine,
+            pack_builder=CapturePackBuilder(),
+        )
+
+        engine.answer_context(
+            "What does Atlas use?",
+            Scope(user_id="u", session_id="beam:100k:1"),
+            "information_extraction",
+            {"limit": 12, "token_budget": 30000},
+        )
+
+        self.assertEqual(product_engine.calls[0][1].limit, 50)
+
     def test_beam_adapter_loads_official_chat_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             dataset = _write_official_beam_fixture(Path(tmp))
@@ -86,15 +234,10 @@ class BeamAdapterTests(unittest.TestCase):
         self.assertEqual(answer_model.calls[0]["category"], "instruction_following")
         self.assertEqual(answer_model.calls[0]["metadata"], {})
 
-    def test_beam_adapter_passes_category_hint_to_retrieval(self) -> None:
+    def test_beam_adapter_routes_category_only_to_eval_engine(self) -> None:
         class CaptureService(MemoryService):
-            def __init__(self) -> None:
-                super().__init__()
-                self.answer_context_calls = []
-
             def answer_context(self, query, scope, budget=None):
-                self.answer_context_calls.append({"query": query, "scope": scope, "budget": dict(budget or {})})
-                return super().answer_context(query, scope, budget=budget)
+                raise AssertionError("BeamAdapter must use the eval-owned retrieval engine")
 
         class StaticAnswer:
             version = "static-answer"
@@ -109,9 +252,16 @@ class BeamAdapterTests(unittest.TestCase):
                 return 1.0, "ok"
 
         service = CaptureService()
+        engine = CaptureBeamEngine()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
-        adapter = BeamAdapter(service, scope, split="100k", answer_model=StaticAnswer(), judge_model=AlwaysMatchJudge())
-        service.add("I have never used Excel for tracking expenses.", adapter._beam_scope("beam:100k:1:contradiction_resolution:0"))
+        adapter = BeamAdapter(
+            service,
+            scope,
+            split="100k",
+            answer_model=StaticAnswer(),
+            judge_model=AlwaysMatchJudge(),
+            retrieval_engine=engine,
+        )
         result = adapter.answer_query(
             EvalQuery(
                 id="beam:100k:1:contradiction_resolution:0",
@@ -123,7 +273,26 @@ class BeamAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result.query_type, "contradiction_resolution")
-        self.assertEqual(service.answer_context_calls[0]["budget"]["query_type_hint"], "contradiction_resolution")
+        self.assertEqual(engine.calls[0].category, "contradiction_resolution")
+        self.assertEqual(engine.calls[0].scope.session_id, "beam:100k:1")
+        self.assertNotIn("query_type_hint", repr(engine.calls[0]))
+
+    def test_generic_ablation_uses_only_product_modes(self) -> None:
+        class CaptureAdapter(BenchmarkAdapter):
+            def __init__(self) -> None:
+                super().__init__(MemoryService(), Scope(user_id="u"))
+                self.budgets: list[dict[str, Any]] = []
+
+            def run_queries(self, queries, budget=None):
+                self.budgets.append(dict(budget or {}))
+                return []
+
+        adapter = CaptureAdapter()
+
+        report = adapter.run_ablation([])
+
+        self.assertEqual(set(report), {"fast", "balanced"})
+        self.assertEqual(adapter.budgets, [{"mode": "fast"}, {"mode": "balanced"}])
 
     def test_beam_adapter_scopes_official_queries_to_their_chat_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
