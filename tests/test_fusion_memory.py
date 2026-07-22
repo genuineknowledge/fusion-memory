@@ -48,6 +48,56 @@ class FusionMemoryTests(unittest.TestCase):
         facts = memory.store.list_facts(scope)
         self.assertTrue(any(fact.category == "preference" and fact.predicate == "prefers" and "PostgreSQL" in fact.object for fact in facts))
 
+    def test_chinese_preference_query_populates_public_answer_context(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        try:
+            memory.add(
+                "Father 喜欢喝冰美式咖啡。",
+                scope,
+                ts("2026-07-06T10:00:00+00:00"),
+            )
+
+            pack = memory.answer_context(
+                "Father 喝什么饮料？",
+                scope,
+                budget={"limit": 6, "allow_cross_session": True},
+            )
+
+            self.assertTrue(pack.current_views)
+            self.assertTrue(pack.facts)
+            self.assertTrue(any("Father" in view["text"] for view in pack.current_views))
+            self.assertTrue(any("冰美式咖啡" in view["text"] for view in pack.current_views))
+            self.assertTrue(any("Father" in fact["text"] for fact in pack.facts))
+            self.assertTrue(any("冰美式咖啡" in fact["text"] for fact in pack.facts))
+            self.assertTrue(pack.source_spans)
+        finally:
+            memory.close()
+
+    def test_answer_context_honors_an_explicit_zero_token_budget(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
+        try:
+            memory.add(
+                "Father 喜欢喝冰美式咖啡。",
+                scope,
+                ts("2026-07-06T10:00:00+00:00"),
+            )
+
+            pack = memory.answer_context(
+                "Father 喝什么饮料？",
+                scope,
+                budget={"limit": 6, "token_budget": 0},
+            )
+
+            self.assertEqual(pack.coverage["token_budget"], 0)
+            self.assertEqual(pack.source_spans, [])
+            self.assertEqual(pack.current_views, [])
+            self.assertEqual(pack.facts, [])
+            self.assertEqual(pack.answer_policy, "abstain_if_not_supported")
+        finally:
+            memory.close()
+
     def test_chinese_rule_extractor_preserves_named_preference_subject(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
@@ -689,6 +739,13 @@ class FusionMemoryTests(unittest.TestCase):
         views = memory.get_current_views(scope)
         self.assertTrue(views)
         self.assertTrue(any("Qdrant" in view.text for view in views))
+
+        pack = memory.answer_context("What do I currently prefer for Atlas?", scope)
+        self.assertTrue(pack.current_views)
+        self.assertTrue(pack.facts)
+        self.assertTrue(any("Qdrant" in view["text"] for view in pack.current_views))
+        self.assertTrue(any("Qdrant" in fact["text"] for fact in pack.facts))
+        self.assertTrue(pack.source_spans)
 
     def test_speaker_attribution_rejects_assistant_suggestion_as_user_preference(self) -> None:
         memory = MemoryService()

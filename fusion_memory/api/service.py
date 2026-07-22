@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fusion_memory.api.service_telemetry import _labeled_precision, _model_call_marks, _model_call_summary, _model_calls_since, _product_model_calls_since, _source_coverage
+from fusion_memory.api.service_telemetry import (
+    _labeled_precision,
+    _model_call_marks,
+    _model_call_summary,
+    _model_calls_since,
+    _product_model_calls_since,
+    _source_coverage,
+)
 from fusion_memory.core.auth import AllowAllAuthorizer, Authorizer
 from fusion_memory.core.config import DEFAULT_CONFIG, MemoryConfig
 from fusion_memory.core.embedding import Embedder
@@ -15,15 +22,19 @@ from fusion_memory.core.models import (
     EventEdge,
     EvidenceSpan,
     EvidencePack,
-    FactRelation,
     MemoryEvent,
-    MemoryFact,
     Scope,
     SearchResult,
     new_id,
 )
-from fusion_memory.core.text import extract_entities, keyword_score, stable_hash
+from fusion_memory.core.text import keyword_score, stable_hash
+from fusion_memory.ingestion.candidate_records import (
+    candidate_to_event,
+    candidate_to_fact,
+    candidate_to_relation,
+)
 from fusion_memory.ingestion.encoding_gate import EncodingGate
+from fusion_memory.ingestion.entity_indexing import EntityIndexer
 from fusion_memory.ingestion.extractors import RuleBasedExtractor
 from fusion_memory.ingestion.normalizer import normalize_input
 from fusion_memory.ingestion.order_markers import _explicit_order_mentions
@@ -31,7 +42,13 @@ from fusion_memory.ingestion.views import ViewBuilder
 from fusion_memory.ingestion.window_builder import build_session_summary_span
 from fusion_memory.retrieval.chronology_normalizer import build_chronology_write_batch
 from fusion_memory.retrieval.context import RetrievalContext, RetrievalResult, SearchRequest
-from fusion_memory.retrieval.engine import RetrievalEngine, build_product_retrieval_engine, prepare_retrieval_engine_options, sanitize_retrieval_trace, summarize_product_model_calls
+from fusion_memory.retrieval.engine import (
+    RetrievalEngine,
+    build_product_retrieval_engine,
+    prepare_retrieval_engine_options,
+    sanitize_retrieval_trace,
+    summarize_product_model_calls,
+)
 from fusion_memory.retrieval.query_planner import QueryPlanner
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.rule_registry import collect_rule_hits
@@ -68,7 +85,10 @@ class MemoryService:
             self.store = SQLiteMemoryStore(db_path, embedder=embedder)
         elif storage_backend == "postgres":
             self.store = PostgresMemoryStore(
-                str(db_path), embedder=embedder, connect=store_connect, pool=postgres_pool,
+                str(db_path),
+                embedder=embedder,
+                connect=store_connect,
+                pool=postgres_pool,
                 acquire_timeout_seconds=postgres_acquire_timeout_seconds,
             )
         else:
@@ -79,12 +99,23 @@ class MemoryService:
         self.async_extractor = async_extractor
         self.retrieval_flags = retrieval_flags
         self.reranker = reranker or LexicalCrossEncoderReranker()
-        self.retrieval_engine = retrieval_engine if retrieval_engine is not None else build_product_retrieval_engine(
-            self.store, self.config, self.reranker
+        self.retrieval_engine = (
+            retrieval_engine
+            if retrieval_engine is not None
+            else build_product_retrieval_engine(
+                self.store,
+                self.config,
+                self.reranker,
+            )
         )
         self.gate = EncodingGate(self.config)
         self.views = ViewBuilder()
-        self.planner = QueryPlanner(intent_refiner=query_intent_refiner, intent_refiner_min_confidence=query_intent_refiner_min_confidence, intent_refiner_mode=query_intent_refiner_mode)
+        self.entity_indexer = EntityIndexer()
+        self.planner = QueryPlanner(
+            intent_refiner=query_intent_refiner,
+            intent_refiner_min_confidence=query_intent_refiner_min_confidence,
+            intent_refiner_mode=query_intent_refiner_mode,
+        )
         self.utility_scorer = LogisticUtilityScorer()
 
     def close(self) -> None:
@@ -122,7 +153,7 @@ class MemoryService:
                 trace["steps"].append({"step": "span_duplicate", "span_id": duplicate.span_id})
                 continue
             self.store.insert_span(span)
-            self._upsert_span_entities(span)
+            self.entity_indexer.upsert_span(self.store, span)
             inserted_span_ids.append(span.span_id)
         trace["steps"].append({"step": "l0_written", "span_ids": inserted_span_ids})
 
@@ -146,19 +177,19 @@ class MemoryService:
                 quarantined_candidate_ids.append(candidate.local_id)
                 continue
             if decision.decision == "accept" and candidate.candidate_type == "fact":
-                fact = self._candidate_to_fact(scope, candidate, session_time)
+                fact = candidate_to_fact(scope, candidate, session_time)
                 self.store.insert_fact(fact)
-                self._upsert_fact_entities(fact)
+                self.entity_indexer.upsert_fact(self.store, fact)
                 accepted_fact_ids.append(fact.fact_id)
                 local_to_fact[candidate.local_id] = fact.fact_id
             elif decision.decision == "accept" and candidate.candidate_type == "event":
-                event = self._candidate_to_event(scope, candidate)
+                event = candidate_to_event(scope, candidate)
                 self.store.insert_event(event)
-                self._upsert_event_entities(event)
+                self.entity_indexer.upsert_event(self.store, event)
                 accepted_event_ids.append(event.event_id)
                 local_to_event[candidate.local_id] = event.event_id
             elif decision.decision == "update_relation" and candidate.candidate_type == "relation":
-                relation = self._candidate_to_relation(candidate, local_to_fact)
+                relation = candidate_to_relation(candidate, local_to_fact)
                 if relation:
                     self.store.insert_fact_relation(relation)
 
@@ -227,8 +258,16 @@ class MemoryService:
 
     def search(self, query: str, scope: Scope, options: dict[str, Any] | None = None) -> SearchResult:
         prepared_options = prepare_retrieval_engine_options(options, self.config)
-        _, _, result, trace_id = self._run_retrieval_engine(query, scope, prepared_options)
-        return SearchResult(candidates=list(result.candidates), trace_id=trace_id, coverage=dict(result.coverage))
+        _, _, result, trace_id = self._run_retrieval_engine(
+            query,
+            scope,
+            prepared_options,
+        )
+        return SearchResult(
+            candidates=list(result.candidates),
+            trace_id=trace_id,
+            coverage=dict(result.coverage),
+        )
 
     def _run_retrieval_engine(
         self,
@@ -258,8 +297,22 @@ class MemoryService:
 
         now = datetime.now(timezone.utc)
         trace_id = new_id("trace")
-        context = RetrievalContext(scope=scope, user_id=scope.user_id, now=now, trace_id=trace_id, deadline=options.get("deadline"), include_session=include_session)
-        request = SearchRequest(query=query, limit=limit, mode=mode, time_range=options.get("time_range"), include_trace=bool(options.get("include_trace", True)), enabled_providers=options["enabled_providers"])
+        context = RetrievalContext(
+            scope=scope,
+            user_id=scope.user_id,
+            now=now,
+            trace_id=trace_id,
+            deadline=options.get("deadline"),
+            include_session=include_session,
+        )
+        request = SearchRequest(
+            query=query,
+            limit=limit,
+            mode=mode,
+            time_range=options.get("time_range"),
+            include_trace=bool(options.get("include_trace", True)),
+            enabled_providers=options["enabled_providers"],
+        )
         model_call_marks = _model_call_marks(self)
         result = self.retrieval_engine.search(context, request)
         model_calls = _product_model_calls_since(self, model_call_marks)
@@ -290,10 +343,9 @@ class MemoryService:
 
     def answer_context(self, query: str, scope: Scope, budget: dict[str, Any] | None = None) -> EvidencePack:
         product_budget = prepare_retrieval_engine_options(budget, self.config)
-        token_budget = (
-            product_budget.get("token_budget")
-            or self.config.answer_context_budget_tokens
-        )
+        token_budget = product_budget.get("token_budget")
+        if token_budget is None:
+            token_budget = self.config.answer_context_budget_tokens
         scope.validate_for_read()
         self._authorize(
             "memory.answer_context",
@@ -1000,78 +1052,6 @@ class MemoryService:
         source_spans.sort(key=lambda span: (span.timestamp, span.turn_id or "", span.span_id))
         selected = source_spans[-self.config.session_summary_max_source_spans :]
         return selected, stable_hash("|".join(span.span_id for span in selected))
-
-    def _candidate_to_fact(self, scope: Scope, candidate, session_time: datetime) -> MemoryFact:
-        structured = candidate.structured
-        return MemoryFact(
-            fact_id=new_id("fact"),
-            scope=scope,
-            subject=str(structured.get("subject", "user")),
-            predicate=str(structured.get("predicate", "said")),
-            object=str(structured.get("object", candidate.text)),
-            text=candidate.text,
-            category=str(structured.get("category", "general_fact")),
-            confidence=float(structured.get("confidence", candidate.confidence)),
-            salience=float(structured.get("salience", 0.5)),
-            observed_at=session_time,
-            valid_from=session_time,
-            valid_to=None,
-            polarity=str(structured.get("polarity", "unknown")),
-            source_span_ids=list(dict.fromkeys(candidate.source_span_ids)),
-            metadata={
-                "hash": stable_hash(candidate.text),
-                "candidate_local_id": candidate.local_id,
-                **({"value_mentions": structured["value_mentions"]} if structured.get("value_mentions") else {}),
-                **({"topic_terms": structured["topic_terms"]} if structured.get("topic_terms") else {}),
-            },
-        )
-
-    def _candidate_to_event(self, scope: Scope, candidate) -> MemoryEvent:
-        structured = candidate.structured
-        return MemoryEvent(
-            event_id=new_id("event"),
-            scope=scope,
-            event_type=str(structured.get("event_type", "user_action")),
-            participants=list(structured.get("participants", [])),
-            description=str(structured.get("description", candidate.text)),
-            time_start=dt_from_str(structured.get("time_start")),
-            time_end=dt_from_str(structured.get("time_end")),
-            time_granularity=str(structured.get("time_granularity", "unknown")),
-            time_source=str(structured.get("time_source", "unknown")),
-            source_span_ids=list(dict.fromkeys(candidate.source_span_ids)),
-            confidence=float(structured.get("confidence", candidate.confidence)),
-        )
-
-    def _candidate_to_relation(self, candidate, local_to_fact: dict[str, str]) -> FactRelation | None:
-        structured = candidate.structured
-        from_id = local_to_fact.get(str(structured.get("from_local_id")))
-        to_id = structured.get("to_fact_id")
-        if not from_id or not to_id:
-            return None
-        return FactRelation(
-            relation_id=new_id("rel"),
-            from_fact_id=from_id,
-            to_fact_id=str(to_id),
-            relation_type=str(structured.get("relation_type", "linked_to")),
-            source_span_ids=list(dict.fromkeys(candidate.source_span_ids)),
-            confidence=float(structured.get("confidence", candidate.confidence)),
-        )
-
-    def _upsert_span_entities(self, span) -> None:
-        for entity in span.entities:
-            self.store.upsert_entity(span.scope, entity, entity_type="span_entity", source_span_ids=[span.span_id], observed_at=span.timestamp)
-
-    def _upsert_fact_entities(self, fact: MemoryFact) -> None:
-        names = extract_entities(fact.text + " " + fact.object)
-        if fact.subject and fact.subject not in {"user", "assistant", "agent", "tool"}:
-            names.append(fact.subject)
-        for entity in dict.fromkeys(names):
-            self.store.upsert_entity(fact.scope, entity, entity_type="fact_entity", source_span_ids=fact.source_span_ids, observed_at=fact.observed_at or fact.created_at)
-
-    def _upsert_event_entities(self, event: MemoryEvent) -> None:
-        names = list(event.participants) + extract_entities(event.description)
-        for entity in dict.fromkeys(name for name in names if name):
-            self.store.upsert_entity(event.scope, entity, entity_type="event_participant", source_span_ids=event.source_span_ids, observed_at=event.time_start)
 
     def _create_session_event_edges(self, scope: Scope) -> None:
         events = [event for event in self.store.list_events(scope) if event.scope.session_id == scope.session_id]

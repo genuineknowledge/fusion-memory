@@ -6,7 +6,13 @@ from datetime import datetime, timezone
 import pytest
 
 from fusion_memory.core.config import MemoryConfig
-from fusion_memory.core.models import Candidate, EvidenceSpan, Scope
+from fusion_memory.core.models import (
+    Candidate,
+    CurrentView,
+    EvidenceSpan,
+    MemoryFact,
+    Scope,
+)
 from fusion_memory.retrieval.context import (
     OrderingMode,
     ProductQueryPlan,
@@ -19,9 +25,19 @@ from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
 
 
 class SpanRepository:
-    def __init__(self, spans: list[EvidenceSpan]) -> None:
+    def __init__(
+        self,
+        spans: list[EvidenceSpan],
+        *,
+        facts: list[MemoryFact] | None = None,
+        views: list[CurrentView] | None = None,
+    ) -> None:
         self.spans = {span.span_id: span for span in spans}
+        self.facts = {fact.fact_id: fact for fact in facts or []}
+        self.views = list(views or [])
         self.calls: list[tuple[str, Scope, bool]] = []
+        self.fact_calls: list[tuple[str, Scope, bool]] = []
+        self.view_calls: list[tuple[Scope, str | None, bool]] = []
 
     def get_span(
         self,
@@ -41,6 +57,42 @@ class SpanRepository:
         if include_session and span.scope.session_id != scope.session_id:
             return None
         return span
+
+    def get_fact(
+        self,
+        fact_id: str,
+        scope: Scope,
+        *,
+        include_session: bool = False,
+    ) -> MemoryFact | None:
+        self.fact_calls.append((fact_id, scope, include_session))
+        fact = self.facts.get(fact_id)
+        if fact is None or not _scope_matches(fact.scope, scope, include_session):
+            return None
+        return fact
+
+    def list_current_views(
+        self,
+        scope: Scope,
+        view_type: str | None = None,
+        *,
+        include_session: bool = False,
+    ) -> list[CurrentView]:
+        self.view_calls.append((scope, view_type, include_session))
+        return [
+            view
+            for view in self.views
+            if (view_type is None or view.view_type == view_type)
+            and _scope_matches(view.scope, scope, include_session)
+        ]
+
+
+def _scope_matches(record_scope: Scope, scope: Scope, include_session: bool) -> bool:
+    for field in ("workspace_id", "user_id", "agent_id", "run_id"):
+        expected = getattr(scope, field)
+        if expected is not None and getattr(record_scope, field) != expected:
+            return False
+    return not include_session or record_scope.session_id == scope.session_id
 
 
 def _span(
@@ -67,6 +119,8 @@ def _candidate(
     candidate_id: str,
     span_id: str | None = None,
     *,
+    candidate_type: str = "span",
+    text: str = "selected candidate",
     source: str = "product_lexical",
     timeline_index: int | None = None,
     source_span_ids: list[str] | None = None,
@@ -74,8 +128,8 @@ def _candidate(
     metadata = {} if timeline_index is None else {"timeline_index": timeline_index}
     return Candidate(
         id=candidate_id,
-        type="span",
-        text="selected candidate",
+        type=candidate_type,
+        text=text,
         source=source,
         scores={"bm25_score": 0.8},
         source_span_ids=source_span_ids if source_span_ids is not None else [str(span_id)],
@@ -155,6 +209,200 @@ def test_product_pack_preserves_source_provenance(pack_fixture: PackFixture) -> 
     assert pack_fixture.repository.calls == [("span-1", pack_fixture.context.scope, True)]
 
 
+def test_product_pack_hydrates_selected_fact_and_view_from_scoped_repository() -> None:
+    scope = Scope(user_id="user-a", session_id="session-a")
+    span = _span(
+        "span-structured",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Trusted source evidence",
+        scope=scope,
+    )
+    fact = MemoryFact(
+        fact_id="fact-1",
+        scope=scope,
+        subject="user",
+        predicate="prefers",
+        object="Qdrant",
+        text="Repository-backed fact text",
+        category="preference",
+        confidence=0.9,
+        salience=0.8,
+        source_span_ids=[span.span_id],
+    )
+    view = CurrentView(
+        view_id="view-1",
+        scope=scope,
+        view_type="preference",
+        subject="user",
+        text="Repository-backed current view",
+        state_json={"value": "Qdrant"},
+        source_fact_ids=[fact.fact_id],
+        source_event_ids=[],
+        source_span_ids=[span.span_id],
+        confidence=0.95,
+    )
+    repository = SpanRepository([span], facts=[fact], views=[view])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-structured",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                fact.fact_id,
+                candidate_type="fact",
+                text="forged candidate fact text",
+                source_span_ids=[span.span_id],
+            ),
+            _candidate(
+                view.view_id,
+                candidate_type="view",
+                text="forged candidate view text",
+                source_span_ids=[span.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What do I prefer?", limit=2),
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.facts == [
+        {
+            "id": "fact-1",
+            "text": "Repository-backed fact text",
+            "candidate_source": "product_lexical",
+            "source_span_ids": ["span-structured"],
+        }
+    ]
+    assert pack.current_views == [
+        {
+            "id": "view-1",
+            "text": "Repository-backed current view",
+            "candidate_source": "product_lexical",
+            "source_span_ids": ["span-structured"],
+        }
+    ]
+    assert "forged candidate" not in repr(pack)
+    assert repository.fact_calls == [("fact-1", scope, True)]
+    assert repository.view_calls == [(scope, None, True)]
+
+
+def test_product_pack_requires_selected_hydrated_provenance_for_structured_records() -> None:
+    scope = Scope(user_id="user-a", session_id="session-a")
+    span = _span(
+        "span-supported",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        scope=scope,
+    )
+    fact = MemoryFact(
+        fact_id="fact-unsupported",
+        scope=scope,
+        subject="user",
+        predicate="prefers",
+        object="Qdrant",
+        text="Repository fact without selected span support",
+        category="preference",
+        confidence=0.9,
+        salience=0.8,
+        source_span_ids=[span.span_id],
+    )
+    repository = SpanRepository([span], facts=[fact])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-unsupported",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                fact.fact_id,
+                candidate_type="fact",
+                source_span_ids=["missing-selected-span"],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What do I prefer?", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.source_spans == []
+    assert pack.facts == []
+
+
+def test_product_pack_applies_token_budget_to_structured_records() -> None:
+    scope = Scope(user_id="user-a", session_id="session-a")
+    span = _span(
+        "span-budget",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="support",
+        scope=scope,
+    )
+    fact = MemoryFact(
+        fact_id="fact-budget",
+        scope=scope,
+        subject="user",
+        predicate="prefers",
+        object="Qdrant",
+        text="structured record",
+        category="preference",
+        confidence=0.9,
+        salience=0.8,
+        source_span_ids=[span.span_id],
+    )
+    repository = SpanRepository([span], facts=[fact])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-structured-budget",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                fact.fact_id,
+                candidate_type="fact",
+                source_span_ids=[span.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What do I prefer?", limit=1),
+        result,
+        token_budget=1,
+    )
+
+    assert [record["id"] for record in pack.source_spans] == [span.span_id]
+    assert pack.facts == []
+
+
 def test_product_pack_omits_cross_user_and_cross_session_spans() -> None:
     scope = Scope(user_id="user-a", session_id="session-a")
     repository = SpanRepository(
@@ -206,8 +454,8 @@ def chronology_pack_fixture() -> PackFixture:
     scope = Scope(user_id="user-a", session_id="session-a")
     repository = SpanRepository(
         [
-            _span("span-late", timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc)),
-            _span("span-early", timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+            _span("span-late", timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+            _span("span-early", timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc)),
         ]
     )
     context = RetrievalContext(

@@ -96,6 +96,14 @@ class ProductEvidencePackBuilder:
 
         source_records = _ordered_source_records(source_records, result.plan.ordering)
         source_spans = [record for record, _, _, _ in source_records]
+        selected_span_ids = {str(record["id"]) for record in source_spans}
+        current_views, facts = self._structured_records(
+            context,
+            result.candidates,
+            selected_span_ids,
+            estimated_tokens,
+            token_budget,
+        )
         coverage = _product_coverage(
             result,
             source_span_count=len(source_spans),
@@ -109,9 +117,9 @@ class ProductEvidencePackBuilder:
                 if source_spans
                 else "abstain_if_not_supported"
             ),
-            current_views=[],
+            current_views=current_views,
             entity_profiles=[],
-            facts=[],
+            facts=facts,
             events=[],
             source_spans=source_spans,
             conflicts=[],
@@ -136,6 +144,75 @@ class ProductEvidencePackBuilder:
             len(tokenize(content)),
         )
 
+    def _structured_records(
+        self,
+        context: RetrievalContext,
+        candidates: tuple[Candidate, ...],
+        selected_span_ids: set[str],
+        estimated_tokens: int,
+        token_budget: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        selected_views = {}
+        if any(candidate.type == "view" for candidate in candidates):
+            selected_views = {
+                view.view_id: view
+                for view in self.repository.list_current_views(
+                    context.scope,
+                    include_session=context.include_session,
+                )
+            }
+        current_views: list[dict[str, Any]] = []
+        facts: list[dict[str, Any]] = []
+        seen_ids: set[tuple[str, str]] = set()
+
+        for candidate in candidates:
+            record_type = str(candidate.type)
+            key = (record_type, candidate.id)
+            if key in seen_ids or record_type not in {"fact", "view"}:
+                continue
+            seen_ids.add(key)
+
+            if record_type == "fact":
+                record = self.repository.get_fact(
+                    candidate.id,
+                    context.scope,
+                    include_session=context.include_session,
+                )
+                record_id = record.fact_id if record is not None else None
+            else:
+                record = selected_views.get(candidate.id)
+                record_id = record.view_id if record is not None else None
+            if record is None or record_id is None:
+                continue
+
+            source_span_ids = _supported_source_span_ids(
+                candidate,
+                record.source_span_ids,
+                selected_span_ids,
+            )
+            if not source_span_ids:
+                continue
+            text = compact_summary(
+                record.text,
+                self.config.evidence_span_summary_chars,
+            )
+            record_tokens = len(tokenize(text))
+            if estimated_tokens + record_tokens > token_budget:
+                break
+            estimated_tokens += record_tokens
+            output = {
+                "id": record_id,
+                "text": text,
+                "candidate_source": candidate.source,
+                "source_span_ids": source_span_ids,
+            }
+            if record_type == "fact":
+                facts.append(output)
+            else:
+                current_views.append(output)
+
+        return current_views, facts
+
 
 def _timeline_index(candidate: Candidate) -> int | None:
     value = candidate.metadata.get("timeline_index")
@@ -145,6 +222,21 @@ def _timeline_index(candidate: Candidate) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _supported_source_span_ids(
+    candidate: Candidate,
+    record_span_ids: list[str],
+    selected_span_ids: set[str],
+) -> list[str]:
+    candidate_span_ids = set(candidate.source_span_ids)
+    return list(
+        dict.fromkeys(
+            span_id
+            for span_id in record_span_ids
+            if span_id in candidate_span_ids and span_id in selected_span_ids
+        )
+    )
 
 
 def _ordered_source_records(
