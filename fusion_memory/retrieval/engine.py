@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol
 
 from fusion_memory.core.models import EvidencePack
+from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.context import (
     ProductQueryPlan,
     RetrievalContext,
@@ -18,6 +20,126 @@ class RetrievalUnavailable(RuntimeError):
 
 _TRACE_STAGES = ("plan", "recall", "fusion", "selection")
 _PROVIDER_KINDS = frozenset({"vector", "lexical", "temporal", "entity", "chronology"})
+_MODEL_CALL_COMPONENTS = frozenset(
+    {
+        "embedder",
+        "extractor",
+        "extractor_client",
+        "async_extractor",
+        "async_extractor_client",
+        "reranker",
+        "retrieval_engine",
+        "retrieval_planner",
+        "retrieval_registry",
+        "retrieval_reranker",
+    }
+)
+_MODEL_CALL_NUMERIC_FIELDS = ("latency_ms", "cost", "text_count", "doc_count")
+_MODEL_CALL_USAGE_FIELDS = (
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cached_tokens",
+    "completion_tokens",
+    "input_tokens",
+    "output_tokens",
+    "prompt_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+)
+
+
+def _safe_numeric(value: object) -> float | None:
+    if type(value) not in (int, float):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return None
+    return max(0.0, numeric)
+
+
+def _safe_dimension(value: object, *, readable: frozenset[str] = frozenset()) -> str | None:
+    if type(value) not in (str, int, float, bool):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    label = str(value)
+    if label in readable:
+        return label
+    return f"hashed_{stable_hash(label)[:16]}"
+
+
+def sanitize_product_model_call(
+    component: str,
+    source: object,
+    call: object,
+) -> dict[str, Any]:
+    """Project model telemetry into the confidentiality-safe product contract."""
+    call_data = call if isinstance(call, dict) else {}
+    projected: dict[str, Any] = {
+        "component": _safe_dimension(component, readable=_MODEL_CALL_COMPONENTS)
+    }
+
+    model_value = call_data.get("model")
+    if model_value is None:
+        model_value = getattr(source, "model", None)
+    model = _safe_dimension(model_value)
+    if model is not None:
+        projected["model"] = model
+
+    model_version_value = call_data.get("model_version")
+    if model_version_value is None:
+        model_version_value = getattr(source, "version", None)
+    if model_version_value is None:
+        model_version_value = (
+            model_value if model_value is not None else source.__class__.__name__
+        )
+    model_version = _safe_dimension(model_version_value)
+    if model_version is not None:
+        projected["model_version"] = model_version
+
+    for field in _MODEL_CALL_NUMERIC_FIELDS:
+        numeric = _safe_numeric(call_data.get(field))
+        if numeric is not None:
+            projected[field] = numeric
+
+    usage_data = call_data.get("usage")
+    if isinstance(usage_data, dict):
+        usage = {
+            field: numeric
+            for field in _MODEL_CALL_USAGE_FIELDS
+            if (numeric := _safe_numeric(usage_data.get(field))) is not None
+        }
+        if usage:
+            projected["usage"] = usage
+    return projected
+
+
+def summarize_product_model_calls(model_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    usage_totals: dict[str, float] = {}
+    for call in model_calls:
+        usage = call.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for field in _MODEL_CALL_USAGE_FIELDS:
+            numeric = _safe_numeric(usage.get(field))
+            if numeric is not None:
+                usage_totals[field] = usage_totals.get(field, 0.0) + numeric
+    return {
+        "count": len(model_calls),
+        "model_versions": sorted(
+            {
+                model_version
+                for call in model_calls
+                if isinstance((model_version := call.get("model_version")), str)
+            }
+        ),
+        "total_latency_ms": sum(
+            numeric
+            for call in model_calls
+            if (numeric := _safe_numeric(call.get("latency_ms"))) is not None
+        ),
+        "usage": usage_totals,
+    }
 
 
 def sanitize_retrieval_trace(trace: dict[str, Any]) -> dict[str, Any]:

@@ -38,7 +38,12 @@ from fusion_memory.retrieval.context import (
     RetrievalResult,
     SearchRequest,
 )
-from fusion_memory.retrieval.engine import RetrievalEngine, sanitize_retrieval_trace
+from fusion_memory.retrieval.engine import (
+    RetrievalEngine,
+    sanitize_product_model_call,
+    sanitize_retrieval_trace,
+    summarize_product_model_calls,
+)
 from fusion_memory.retrieval.evidence_pack import EvidencePackBuilder
 from fusion_memory.retrieval.event_graph_selection import (
     _event_milestone_group,
@@ -415,12 +420,9 @@ class MemoryService:
             "time_range",
             "token_budget",
         }
-        unsupported_options = sorted(set(options) - supported_options)
-        if unsupported_options:
-            raise ValueError(
-                "unsupported retrieval options: " + ", ".join(unsupported_options)
-            )
-        if mode not in {"fast", "balanced"}:
+        if any(option not in supported_options for option in options):
+            raise ValueError("unsupported retrieval options")
+        if type(mode) is not str or mode not in {"fast", "balanced"}:
             raise ValueError("mode must be fast or balanced")
 
         source_provider_kinds = {
@@ -443,41 +445,49 @@ class MemoryService:
         }
         enabled_providers_option = options.get("enabled_providers")
         if enabled_providers_option is not None:
-            provider_values = (
-                [enabled_providers_option]
-                if isinstance(enabled_providers_option, (str, ProviderKind))
-                else enabled_providers_option
-            )
-            try:
-                enabled_providers = frozenset(
-                    value if isinstance(value, ProviderKind) else ProviderKind(str(value))
-                    for value in provider_values
-                )
-            except (TypeError, ValueError) as exc:
-                raise ValueError("enabled_providers contains an unsupported provider") from exc
+            if (
+                isinstance(enabled_providers_option, ProviderKind)
+                or type(enabled_providers_option) is str
+            ):
+                provider_values = [enabled_providers_option]
+            elif isinstance(enabled_providers_option, (list, tuple, set, frozenset)):
+                provider_values = list(enabled_providers_option)
+            else:
+                provider_values = None
+            if provider_values is None:
+                raise ValueError("enabled_providers contains an unsupported provider")
+            provider_by_name = {provider.value: provider for provider in ProviderKind}
+            parsed_providers: set[ProviderKind] = set()
+            for value in provider_values:
+                if isinstance(value, ProviderKind):
+                    parsed_providers.add(value)
+                    continue
+                if type(value) is not str:
+                    raise ValueError("enabled_providers contains an unsupported provider")
+                provider = provider_by_name.get(value)
+                if provider is None:
+                    raise ValueError("enabled_providers contains an unsupported provider")
+                parsed_providers.add(provider)
+            enabled_providers = frozenset(parsed_providers)
         else:
             enabled_sources_option = options.get("enabled_sources")
             if enabled_sources_option is None:
                 enabled_providers = None
             else:
-                source_values = (
-                    [enabled_sources_option]
-                    if isinstance(enabled_sources_option, str)
-                    else enabled_sources_option
-                )
-                try:
-                    source_names = {str(value) for value in source_values}
-                except TypeError as exc:
-                    raise ValueError("enabled_sources must be a collection") from exc
-                unknown_sources = sorted(source_names - set(source_provider_kinds))
-                if unknown_sources:
-                    raise ValueError(
-                        "enabled_sources contains unsupported source families: "
-                        + ", ".join(unknown_sources)
-                    )
+                if type(enabled_sources_option) is str:
+                    source_values = [enabled_sources_option]
+                elif isinstance(enabled_sources_option, (list, tuple, set, frozenset)):
+                    source_values = list(enabled_sources_option)
+                else:
+                    source_values = None
+                if source_values is None or any(
+                    type(value) is not str or value not in source_provider_kinds
+                    for value in source_values
+                ):
+                    raise ValueError("enabled_sources contains an unsupported source family")
                 enabled_providers = frozenset(
                     provider
-                    for source_name in source_names
+                    for source_name in source_values
                     for provider in source_provider_kinds[source_name]
                 )
 
@@ -501,9 +511,7 @@ class MemoryService:
         )
         model_call_marks = self._model_call_marks()
         result = self.retrieval_engine.search(context, request)
-        model_calls = self._model_calls_since(model_call_marks)
-        for model_call in model_calls:
-            model_call.pop("prompt_version", None)
+        model_calls = self._product_model_calls_since(model_call_marks)
         trace = sanitize_retrieval_trace(result.trace)
         trace["operation"] = "search"
         trace["allow_cross_session"] = allow_cross_session
@@ -524,7 +532,7 @@ class MemoryService:
                 "candidate_count": len(result.candidates),
                 "allow_cross_session": allow_cross_session,
                 "include_session": include_session,
-                "model_calls": _model_call_summary(model_calls),
+                "model_calls": summarize_product_model_calls(model_calls),
             },
         )
         return context, request, result, trace_id
@@ -1666,6 +1674,19 @@ class MemoryService:
                     calls_out.append(_sanitize_model_call(component, source, call))
                 else:
                     calls_out.append({"component": component, "model_version": getattr(source, "version", source.__class__.__name__)})
+        return calls_out
+
+    def _product_model_calls_since(self, marks: dict[int, int]) -> list[dict[str, Any]]:
+        calls_out: list[dict[str, Any]] = []
+        for component, source in self._model_call_sources():
+            calls = getattr(source, "calls", None)
+            if not isinstance(calls, list):
+                continue
+            start = marks.get(id(source), 0)
+            calls_out.extend(
+                sanitize_product_model_call(component, source, call)
+                for call in calls[start:]
+            )
         return calls_out
 
     def _candidate_to_fact(self, scope: Scope, candidate, session_time: datetime) -> MemoryFact:
