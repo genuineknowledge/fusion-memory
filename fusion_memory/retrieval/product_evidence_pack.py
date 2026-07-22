@@ -15,6 +15,7 @@ from fusion_memory.retrieval.context import (
     SearchRequest,
 )
 from fusion_memory.retrieval.ports import MemorySearchRepository
+from fusion_memory.retrieval.tracing import sanitize_dimension
 
 
 _PRODUCT_COVERAGE_FIELDS = (
@@ -187,7 +188,7 @@ def _product_coverage(
             continue
         coverage[field] = value
     coverage.update(
-        intent=result.plan.intent,
+        intent=sanitize_dimension(result.plan.intent),
         query_intent=_query_intent(result.plan.query_intent),
         source_span_count=source_span_count,
         token_budget=token_budget,

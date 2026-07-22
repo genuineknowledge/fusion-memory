@@ -553,6 +553,46 @@ def test_product_pack_drops_nested_values_from_product_observability(
     ]
 
 
+def test_product_pack_sanitizes_malformed_plan_intent(
+    pack_fixture: PackFixture,
+) -> None:
+    malformed_intent = {
+        "benchmark": {"category": "abstention"},
+        "query_type": "legacy",
+        "rescue": {"preservation": "legacy"},
+        "secrets": "Bearer intent-secret",
+    }
+    result = RetrievalResult(
+        candidates=pack_fixture.result.candidates,
+        coverage={},
+        trace={},
+        plan=ProductQueryPlan(
+            **{**pack_fixture.result.plan.__dict__, "intent": malformed_intent}
+        ),
+    )
+
+    pack = pack_fixture.builder.build(
+        pack_fixture.context,
+        pack_fixture.request,
+        result,
+        token_budget=1200,
+    )
+
+    rendered = repr(pack.coverage["intent"])
+    assert isinstance(pack.coverage["intent"], str)
+    assert pack.coverage["intent"].startswith("hashed_")
+    for leaked_value in (
+        "benchmark",
+        "category",
+        "query_type",
+        "rescue",
+        "preservation",
+        "secrets",
+        "intent-secret",
+    ):
+        assert leaked_value not in rendered
+
+
 def test_product_pack_stops_before_exceeding_its_token_budget(pack_fixture: PackFixture) -> None:
     pack = pack_fixture.builder.build(
         pack_fixture.context,
