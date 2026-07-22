@@ -7,8 +7,7 @@ from typing import Any
 
 from fusion_memory.core.config import DEFAULT_CONFIG, MemoryConfig
 from fusion_memory.core.models import Candidate, EvidencePack, EvidenceSpan
-from fusion_memory.core.text import ENTITY_STOPWORDS, compact_summary, tokenize
-from fusion_memory.retrieval.aggregation_keys import aggregation_keys_for_query
+from fusion_memory.core.text import ENTITY_STOPWORDS, compact_summary, stable_hash, tokenize
 from fusion_memory.retrieval.context import (
     OrderingMode,
     ProviderKind,
@@ -67,6 +66,40 @@ _CJK_QUERY_FILLER_RE = re.compile(
     r"(?:请问|我(?:们)?(?:的)?|你(?:们)?(?:的)?|您(?:的)?|"
     r"目前|当前|现在|正在|使用|什么|哪一个|哪个|哪种)"
 )
+_FIRST_PERSON_ITEM_RE = re.compile(
+    r"""
+    \b(?:i|we)\s+(?:also\s+)?(?:
+        (?:am|are|was|were)\s+(?:trying|planning|working)\s+to
+        |(?:focused|concentrated)\s+on
+        |(?:want|wanted|need|needed|plan|planned|intend|intended|aim|aimed
+          |hope|hoped|try|tried|decide|decided)\s+to
+        |(?:implemented|added|built|created|configured|changed|switched|updated
+          |improved|adapted|selected|handled|managed|completed|finished|began|started)
+    )\s+(?P<item>[^.!?]+)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_DOCUMENT_ITEM_RE = re.compile(
+    r"""
+    ^\s*(?:
+        (?:focus|focused|concentrate|concentrated)\s+on
+        |(?:want|wanted|need|needed|plan|planned|intend|intended|aim|aimed
+          |try|tried|decide|decided)\s+to
+        |(?:implement|implemented|add|added|build|built|create|created
+          |configure|configured|change|changed|switch|switched|update|updated
+          |improve|improved|adapt|adapted|select|selected|handle|handled
+          |manage|managed|complete|completed|finish|finished|begin|began|start|started)
+    )\s+(?P<item>[^.!?]+)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_ITEM_KEY_STOPWORDS = ENTITY_STOPWORDS | {
+    "also",
+    "my",
+    "on",
+    "our",
+    "to",
+}
 
 
 class ProductEvidencePackBuilder:
@@ -111,11 +144,7 @@ class ProductEvidencePackBuilder:
                 span = hydrated_spans[span_id]
                 if span is None:
                     continue
-                aggregation_keys = _source_aggregation_keys(
-                    request.query,
-                    result,
-                    span,
-                )
+                aggregation_keys = _source_aggregation_keys(result, span)
                 support = _source_span_support(
                     candidate,
                     span,
@@ -335,11 +364,9 @@ class ProductEvidencePackBuilder:
         return current_views, facts, estimated_tokens
 
 
-def _product_target_terms(result: RetrievalResult) -> frozenset[str] | None:
+def _product_target_terms(result: RetrievalResult) -> frozenset[str]:
     raw_terms = result.plan.query_intent.get("target_terms")
     if not isinstance(raw_terms, (list, tuple)):
-        if not result.plan.entities:
-            return None
         raw_terms = ()
     return frozenset(
         token
@@ -368,7 +395,6 @@ def _requires_duration(result: RetrievalResult) -> bool:
 
 
 def _source_aggregation_keys(
-    query: str,
     result: RetrievalResult,
     span: EvidenceSpan,
 ) -> list[str]:
@@ -377,7 +403,19 @@ def _source_aggregation_keys(
         or not _plan_requests_aggregation(result)
     ):
         return []
-    return aggregation_keys_for_query(query, span.content, speaker=span.speaker)
+    match = _FIRST_PERSON_ITEM_RE.search(span.content)
+    if match is None and span.speaker == "document":
+        match = _DOCUMENT_ITEM_RE.search(span.content)
+    if match is None:
+        return []
+    normalized = " ".join(
+        token
+        for token in tokenize(match.group("item"))
+        if len(token) >= 2 and token not in _ITEM_KEY_STOPWORDS
+    )
+    if not normalized:
+        return []
+    return [f"item:{stable_hash(normalized)[:16]}"]
 
 
 def _plan_requests_aggregation(result: RetrievalResult) -> bool:
@@ -391,11 +429,9 @@ def _plan_requests_aggregation(result: RetrievalResult) -> bool:
 def _source_span_support(
     candidate: Candidate,
     span: EvidenceSpan,
-    target_terms: frozenset[str] | None,
+    target_terms: frozenset[str],
     aggregation_keys: list[str],
 ) -> frozenset[str]:
-    if target_terms is None:
-        return frozenset({f"selected:{candidate.id}:{span.span_id}"})
     overlap = target_terms.intersection(tokenize(span.content))
     if overlap:
         return frozenset(overlap)
@@ -405,7 +441,8 @@ def _source_span_support(
         span_id for span_id in candidate.source_span_ids if span_id
     }
     if (
-        len(candidate_span_ids) == 1
+        target_terms
+        and len(candidate_span_ids) == 1
         and max(
             float(candidate.scores.get("exact_signal", 0.0)),
             float(candidate.scores.get("value_exact_signal", 0.0)),

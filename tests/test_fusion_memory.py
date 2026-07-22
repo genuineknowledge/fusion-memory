@@ -2007,9 +2007,12 @@ class FusionMemoryTests(unittest.TestCase):
 
         keyed_spans = [span for span in pack.source_spans if span.get("aggregation_keys")]
         keys = {key for span in keyed_spans for key in span["aggregation_keys"]}
-        self.assertIn("area:resume_international_standards", keys)
-        self.assertIn("area:portfolio_project_selection", keys)
-        self.assertFalse(any("interview_practice" in key for key in keys))
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(all(key.startswith("item:") for key in keys))
+        keyed_content = " ".join(span["content"].lower() for span in keyed_spans)
+        self.assertIn("resume to international standards", keyed_content)
+        self.assertIn("portfolio project selection", keyed_content)
+        self.assertNotIn("interview practice", keyed_content)
 
     def test_multi_session_aggregation_prefers_user_spans_for_shared_keys(self) -> None:
         memory = MemoryService()

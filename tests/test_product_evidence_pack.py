@@ -20,6 +20,7 @@ from fusion_memory.ingestion.views import ViewBuilder
 from fusion_memory.retrieval.context import (
     OrderingMode,
     ProductQueryPlan,
+    ProviderKind,
     RetrievalContext,
     RetrievalResult,
     SearchRequest,
@@ -27,6 +28,7 @@ from fusion_memory.retrieval.context import (
 from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
 from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
 from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.providers.product_base import ProviderOutcome
 
 
 class SpanRepository:
@@ -162,7 +164,7 @@ def _plan(
         speaker=None,
         ordering=ordering,
         use_reranker=False,
-        query_intent={"target": "Atlas"} if query_intent is None else query_intent,
+        query_intent={"target_terms": ["Atlas"]} if query_intent is None else query_intent,
     )
 
 
@@ -283,7 +285,7 @@ def test_product_pack_hydrates_selected_fact_and_view_from_scoped_repository() -
         ),
         coverage={},
         trace={},
-        plan=_plan(),
+        plan=_plan(query_intent={"target_terms": ["trusted"]}),
     )
 
     pack = ProductEvidencePackBuilder(repository).build(
@@ -405,7 +407,7 @@ def test_product_pack_applies_token_budget_to_structured_records() -> None:
         ),
         coverage={},
         trace={},
-        plan=_plan(),
+        plan=_plan(query_intent={"target_terms": ["support"]}),
     )
 
     pack = ProductEvidencePackBuilder(repository).build(
@@ -469,7 +471,10 @@ def test_product_pack_prioritizes_current_view_bundle_before_stale_evidence() ->
         plan=_plan(
             OrderingMode.RECENCY,
             intent="current_state",
-            query_intent={"needs_current_state": True},
+            query_intent={
+                "needs_current_state": True,
+                "target_terms": ["qdrant", "postgres"],
+            },
         ),
     )
 
@@ -534,7 +539,10 @@ def test_product_pack_reserves_recency_budget_for_authoritative_current_view() -
         plan=_plan(
             OrderingMode.RECENCY,
             intent="current_state",
-            query_intent={"needs_current_state": True},
+            query_intent={
+                "needs_current_state": True,
+                "target_terms": ["qdrant", "postgres"],
+            },
         ),
     )
 
@@ -737,13 +745,17 @@ def test_product_pack_authorizes_only_typed_per_span_aggregation_items() -> None
         resume.span_id,
         portfolio.span_id,
     ]
-    assert {
+    keys_by_span = {
         span["id"]: span["aggregation_keys"]
         for span in pack.source_spans
-    } == {
-        resume.span_id: ["area:resume_international_standards"],
-        portfolio.span_id: ["area:portfolio_project_selection"],
     }
+    assert set(keys_by_span) == {resume.span_id, portfolio.span_id}
+    assert all(
+        len(keys) == 1 and keys[0].startswith("item:")
+        for keys in keys_by_span.values()
+    )
+    assert len({keys[0] for keys in keys_by_span.values()}) == 2
+    assert all(span["speaker"] == "user" for span in pack.source_spans)
     assert all(
         "cohort_umbrella" not in key
         for span in pack.source_spans
@@ -2640,6 +2652,175 @@ def test_product_pack_abstains_for_explicit_empty_planner_targets() -> None:
     assert pack.answer_policy == "abstain_if_not_supported"
 
 
+def test_invalid_plan_fallback_authorizes_only_independently_relevant_provenance() -> None:
+    class InvalidPlanner:
+        def plan(self, request: SearchRequest) -> object:
+            del request
+            return object()
+
+        def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+            return ProductQueryPlanner().safe_default(request)
+
+    class StaticRegistry:
+        def __init__(self, candidate: Candidate) -> None:
+            self.candidate = candidate
+
+        def run(self, *args: object) -> tuple[ProviderOutcome, ...]:
+            del args
+            return (
+                ProviderOutcome(
+                    provider=ProviderKind.LEXICAL,
+                    candidates=(self.candidate,),
+                    elapsed_ms=0.0,
+                ),
+            )
+
+    scope = Scope(user_id="user-a")
+    relevant = _span(
+        "span-fallback-atlas",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Project Atlas has a deadline on Friday.",
+        scope=scope,
+    )
+    unrelated = _span(
+        "span-fallback-coffee",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="I drink coffee every morning.",
+        scope=scope,
+    )
+    candidate = _candidate(
+        "candidate-fallback-atlas",
+        text="Selected Project Atlas deadline evidence.",
+        source_span_ids=[unrelated.span_id, relevant.span_id],
+    )
+    repository = SpanRepository([relevant, unrelated])
+    engine = ProductRetrievalEngine(
+        InvalidPlanner(),
+        StaticRegistry(candidate),
+        pack_builder=ProductEvidencePackBuilder(repository),
+    )
+    request = SearchRequest("What is the current Project Atlas deadline?", 2)
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-invalid-plan-fallback",
+        deadline=None,
+        include_session=False,
+    )
+
+    result = engine.search(context, request)
+    pack = engine.build_evidence_pack(context, request, result, token_budget=1200)
+
+    assert result.coverage["planner_fallback"] == "invalid_plan"
+    assert set(result.plan.query_intent["target_terms"]) == {
+        "project",
+        "atlas",
+        "deadline",
+    }
+    assert [span["id"] for span in pack.source_spans] == [relevant.span_id]
+    assert pack.coverage["query_intent"]["target_terms"] == [
+        "project",
+        "atlas",
+        "deadline",
+    ]
+
+
+def test_invalid_plan_fallback_abstains_for_ambiguous_query_support() -> None:
+    class InvalidPlanner:
+        def plan(self, request: SearchRequest) -> object:
+            del request
+            return object()
+
+        def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+            return ProductQueryPlanner().safe_default(request)
+
+    class StaticRegistry:
+        def __init__(self, candidate: Candidate) -> None:
+            self.candidate = candidate
+
+        def run(self, *args: object) -> tuple[ProviderOutcome, ...]:
+            del args
+            return (
+                ProviderOutcome(
+                    provider=ProviderKind.LEXICAL,
+                    candidates=(self.candidate,),
+                    elapsed_ms=0.0,
+                ),
+            )
+
+    scope = Scope(user_id="user-a")
+    span = _span(
+        "span-ambiguous-fallback",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Remember that my database is PostgreSQL.",
+        scope=scope,
+    )
+    repository = SpanRepository([span])
+    engine = ProductRetrievalEngine(
+        InvalidPlanner(),
+        StaticRegistry(
+            _candidate(
+                "candidate-ambiguous-fallback",
+                span.span_id,
+                scores={"exact_signal": 1.0},
+            )
+        ),
+        pack_builder=ProductEvidencePackBuilder(repository),
+    )
+    request = SearchRequest("What is it?", 1)
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-ambiguous-fallback",
+        deadline=None,
+        include_session=False,
+    )
+
+    result = engine.search(context, request)
+    pack = engine.build_evidence_pack(context, request, result, token_budget=1200)
+
+    assert result.plan.query_intent["target_terms"] == []
+    assert pack.source_spans == []
+    assert pack.answer_policy == "abstain_if_not_supported"
+
+
+def test_product_pack_abstains_when_legacy_plan_has_no_typed_support() -> None:
+    scope = Scope(user_id="user-a")
+    span = _span(
+        "span-legacy-plan-no-support",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Remember that my database is PostgreSQL.",
+        scope=scope,
+    )
+    repository = SpanRepository([span])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-legacy-plan-no-support",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(_candidate("candidate-legacy-plan-no-support", span.span_id),),
+        coverage={},
+        trace={},
+        plan=_plan(query_intent={}),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest("What is it?", 1),
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.source_spans == []
+    assert pack.answer_policy == "abstain_if_not_supported"
+
+
 def test_product_pack_keeps_only_supported_chronology_topics() -> None:
     scope = Scope(user_id="user-a")
     transaction = _span(
@@ -3220,6 +3401,7 @@ def test_product_pack_observability_uses_only_product_schema(
                 **pack_fixture.result.plan.__dict__,
                 "query_intent": {
                     "answer_shape": "short_answer",
+                    "target_terms": ["Atlas"],
                     "temporal": {
                         "requires_time": False,
                         "requires_order": False,
@@ -3252,6 +3434,7 @@ def test_product_pack_observability_uses_only_product_schema(
         "intent": "factual",
         "query_intent": {
             "answer_shape": "short_answer",
+            "target_terms": ["Atlas"],
             "temporal": {"requires_time": False, "requires_order": False},
             "aggregation": {"operation": "none", "distinct": False},
         },
@@ -3337,7 +3520,7 @@ def test_product_pack_drops_nested_values_from_product_observability(
     assert pack.coverage == {
         "provider_failures": ["model_unavailable"],
         "intent": "factual",
-        "query_intent": {},
+        "query_intent": {"target_terms": ["Atlas"]},
         "source_span_count": 1,
         "token_budget": 1200,
         "estimated_source_tokens": 3,

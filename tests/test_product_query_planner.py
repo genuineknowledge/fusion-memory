@@ -46,3 +46,27 @@ def test_planner_does_not_emit_semantic_current_state_whitelists() -> None:
     for plan in (owner_plan, database_plan, retrieval_plan, latest_plan):
         assert "entity_context_terms" not in plan.query_intent
         assert "current_state_slot_groups" not in plan.query_intent
+
+
+def test_safe_default_carries_generic_query_targets_and_entities() -> None:
+    plan = ProductQueryPlanner().safe_default(
+        SearchRequest("What is the current Project Atlas deadline?", 6)
+    )
+
+    assert set(plan.query_intent["target_terms"]) == {"project", "atlas", "deadline"}
+    assert plan.entities == ("Project", "Atlas")
+    assert plan.query_intent["entities"] == ["Project", "Atlas"]
+    assert plan.query_intent["aggregation"] == {
+        "operation": "none",
+        "distinct": False,
+        "target_terms": [],
+        "unit_terms": [],
+    }
+
+
+def test_safe_default_keeps_ambiguous_query_support_empty() -> None:
+    plan = ProductQueryPlanner().safe_default(SearchRequest("What is it?", 2))
+
+    assert plan.entities == ()
+    assert plan.query_intent["target_terms"] == []
+    assert plan.query_intent["entities"] == []

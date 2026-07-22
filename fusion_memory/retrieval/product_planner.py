@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+
+from fusion_memory.core.text import ENTITY_STOPWORDS, extract_entities, tokenize
 from fusion_memory.retrieval.context import (
     OrderingMode,
     ProductQueryPlan,
@@ -8,6 +11,37 @@ from fusion_memory.retrieval.context import (
     SearchRequest,
 )
 from fusion_memory.retrieval.query_intent import QueryIntent, analyze_query_intent
+
+
+_FALLBACK_QUERY_STOPWORDS = ENTITY_STOPWORDS | {
+    "about",
+    "across",
+    "all",
+    "any",
+    "current",
+    "currently",
+    "different",
+    "has",
+    "have",
+    "having",
+    "its",
+    "latest",
+    "many",
+    "mine",
+    "my",
+    "now",
+    "of",
+    "our",
+    "ours",
+    "this",
+    "was",
+    "were",
+    "your",
+}
+_FALLBACK_CJK_QUERY_FILLER_RE = re.compile(
+    r"(?:请问|我(?:们)?(?:的)?|你(?:们)?(?:的)?|您(?:的)?|"
+    r"目前|当前|现在|正在|使用|什么|哪一个|哪个|哪种)"
+)
 
 
 class ProductQueryPlanner:
@@ -27,6 +61,7 @@ class ProductQueryPlanner:
         )
 
     def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+        entities = tuple(extract_entities(request.query))
         return ProductQueryPlan(
             intent="factual",
             provider_requests=(
@@ -34,10 +69,11 @@ class ProductQueryPlanner:
                 ProviderRequest(ProviderKind.LEXICAL, max(request.limit * 2, 12)),
             ),
             time_range=request.time_range,
-            entities=(),
+            entities=entities,
             speaker=None,
             ordering=OrderingMode.RELEVANCE,
             use_reranker=request.mode == "balanced",
+            query_intent=_safe_default_query_intent(request.query, entities),
         )
 
 
@@ -78,3 +114,61 @@ def _ordering(intent: QueryIntent) -> OrderingMode:
     if intent.needs_current_state:
         return OrderingMode.RECENCY
     return OrderingMode.RELEVANCE
+
+
+def _safe_default_query_intent(
+    query: str,
+    entities: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "schema_version": "query-intent-v1",
+        "language": _fallback_language(query),
+        "answer_shape": "short_answer",
+        "evidence_scope": "local_or_best_match",
+        "speaker_scope": "any",
+        "entities": list(entities),
+        "target_terms": _fallback_target_terms(query),
+        "object_types": [],
+        "temporal": {
+            "requires_time": False,
+            "requires_order": False,
+            "requires_duration": False,
+            "order_direction": "unknown",
+            "endpoint_roles": [],
+            "time_expressions": [],
+        },
+        "aggregation": {
+            "operation": "none",
+            "distinct": False,
+            "target_terms": [],
+            "unit_terms": [],
+        },
+        "needs_current_state": False,
+        "needs_conflict_check": False,
+        "confidence": 0.0,
+        "route_reasons": ["planner_fallback"],
+    }
+
+
+def _fallback_target_terms(query: str) -> list[str]:
+    normalized = _FALLBACK_CJK_QUERY_FILLER_RE.sub(" ", query.lower())
+    terms: list[str] = []
+    for token in tokenize(normalized):
+        has_cjk = any("\u4e00" <= character <= "\u9fff" for character in token)
+        if has_cjk:
+            if len(token) < 2:
+                continue
+        elif len(token) < 3 or token in _FALLBACK_QUERY_STOPWORDS:
+            continue
+        terms.append(token)
+    return list(dict.fromkeys(terms[:16]))
+
+
+def _fallback_language(query: str) -> str:
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", query))
+    has_latin = bool(re.search(r"[A-Za-z]", query))
+    if has_cjk and has_latin:
+        return "mixed"
+    if has_cjk:
+        return "zh"
+    return "en"
