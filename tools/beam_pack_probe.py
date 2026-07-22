@@ -74,10 +74,11 @@ def build_probe(args: argparse.Namespace | SimpleNamespace) -> dict[str, Any]:
         for query_id in query_ids:
             query = by_id[query_id]
             query_scope = adapter._beam_scope(query.id)
-            pack = service.answer_context(
+            pack = adapter.retrieval_engine.answer_context(
                 query.query,
                 query_scope,
-                budget={"mode": "benchmark", "query_type_hint": query.category},
+                query.category,
+                budget={"mode": "balanced"},
             )
             model_pack = _pack_for_model(pack)
             records.append(_probe_record(query, pack, model_pack, include_full_pack=bool(args.include_full_pack)))

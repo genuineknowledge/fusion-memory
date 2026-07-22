@@ -27,7 +27,7 @@ class BeamRetrievalEngine:
     ) -> None:
         self.product_engine = product_engine
         self.pack_builder = pack_builder
-        self.planner = planner or BeamQueryPlanner()
+        self.planner = planner if planner is not None else BeamQueryPlanner()
 
     @classmethod
     def from_service(cls, service: Any) -> "BeamRetrievalEngine":

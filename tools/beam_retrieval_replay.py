@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from fusion_memory import Scope  # noqa: E402
 from fusion_memory.core.runtime_config import memory_service_from_env  # noqa: E402
+from fusion_memory.eval.beam.engine import BeamRetrievalEngine  # noqa: E402
 from fusion_memory.eval.beam_adapter import _load_official_beam_dataset  # noqa: E402
 
 
@@ -230,6 +231,7 @@ def run_replay(
     query_limit: int | None,
     dataset: str | Path | None = None,
     split: str = "100k",
+    retrieval_engine: Any | None = None,
 ) -> dict[str, Any]:
     selected_categories = set(categories)
     dataset = dataset or _default_beam_dataset()
@@ -237,15 +239,20 @@ def run_replay(
     if query_limit is not None:
         queries = queries[: max(0, query_limit)]
 
+    engine = (
+        retrieval_engine
+        if retrieval_engine is not None
+        else BeamRetrievalEngine.from_service(service)
+    )
     records: list[dict[str, Any]] = []
     started = perf_counter()
     for query in queries:
         canonical_category = _canonical_category(query.category, selected_categories) or str(query.category)
         query_scope = _query_scope(base_scope, query.id)
-        pack = service.answer_context(
+        pack = engine.answer_context(
             query.query,
             query_scope,
-            budget={"mode": "benchmark", "query_type_hint": canonical_category},
+            canonical_category,
         )
         coverage = _coverage_dict(getattr(pack, "coverage", {}))
         pipeline_trace = _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or [])

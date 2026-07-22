@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,15 @@ from fusion_memory.eval.beam_adapter import BeamAdapter, _event_ordering_score
 from fusion_memory.retrieval.context import (
     ProductQueryPlan,
     ProviderKind,
+    ProviderRequest,
     RetrievalResult,
 )
+from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.providers.chronology import ChronologyProvider
+from fusion_memory.retrieval.providers.entity import EntityProvider
+from fusion_memory.retrieval.providers.lexical import LexicalProvider
+from fusion_memory.retrieval.providers.temporal import TemporalProvider
+from fusion_memory.retrieval.providers.vector import VectorProvider
 
 
 @dataclass(frozen=True)
@@ -93,29 +101,107 @@ class CapturePackBuilder:
 class BeamAdapterTests(unittest.TestCase):
     def test_beam_query_planner_decorates_product_plan_by_category(self) -> None:
         expected = {
-            "event_ordering": {ProviderKind.CHRONOLOGY, ProviderKind.TEMPORAL},
-            "temporal_reasoning": {ProviderKind.TEMPORAL},
-            "contradiction_resolution": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
-            "knowledge_update": {ProviderKind.TEMPORAL, ProviderKind.LEXICAL},
-            "multi_session_reasoning": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
-            "preference_following": {ProviderKind.LEXICAL, ProviderKind.ENTITY},
-            "instruction_following": {ProviderKind.LEXICAL},
-            "information_extraction": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
-            "summarization": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
-            "abstention": {ProviderKind.LEXICAL, ProviderKind.VECTOR},
+            "event_ordering": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+                (ProviderKind.CHRONOLOGY, 14),
+                (ProviderKind.TEMPORAL, 14),
+            ),
+            "temporal_reasoning": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+                (ProviderKind.TEMPORAL, 14),
+            ),
+            "contradiction_resolution": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "knowledge_update": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+                (ProviderKind.TEMPORAL, 14),
+            ),
+            "multi_session_reasoning": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "preference_following": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "instruction_following": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "information_extraction": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "summarization": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
+            "abstention": (
+                (ProviderKind.VECTOR, 14),
+                (ProviderKind.LEXICAL, 14),
+                (ProviderKind.ENTITY, 14),
+            ),
         }
         planner = BeamQueryPlanner()
 
-        for category, required_providers in expected.items():
+        for category, expected_requests in expected.items():
             with self.subTest(category=category):
                 plan = planner.plan("What memory applies?", category, 7)
-                planned_providers = {request.kind for request in plan.provider_requests}
+                actual_requests = tuple((request.kind, request.limit) for request in plan.provider_requests)
+                planned_providers = [request.kind for request in plan.provider_requests]
 
                 self.assertIsInstance(plan, ProductQueryPlan)
-                self.assertTrue(required_providers.issubset(planned_providers))
+                self.assertEqual(actual_requests, expected_requests)
+                self.assertEqual(len(planned_providers), len(set(planned_providers)))
                 self.assertTrue(plan.use_reranker)
                 self.assertFalse(hasattr(plan, "category"))
                 self.assertNotIn(category, repr(plan))
+
+    def test_beam_query_planner_preserves_falsey_product_planner(self) -> None:
+        class FalseyProductPlanner(ProductQueryPlanner):
+            def __init__(self) -> None:
+                self.calls = []
+
+            def __bool__(self) -> bool:
+                return False
+
+            def plan(self, request):
+                self.calls.append(request)
+                return ProductQueryPlan(
+                    intent="injected",
+                    provider_requests=(ProviderRequest(ProviderKind.VECTOR, 22),),
+                    time_range=None,
+                    entities=(),
+                    speaker=None,
+                    ordering=self.safe_default(request).ordering,
+                    use_reranker=True,
+                )
+
+        product_planner = FalseyProductPlanner()
+        planner = BeamQueryPlanner(product_planner)
+
+        plan = planner.plan("What memory applies?", "instruction_following", 11)
+
+        self.assertIs(planner.product_planner, product_planner)
+        self.assertEqual(len(product_planner.calls), 1)
+        self.assertEqual(
+            tuple((request.kind, request.limit) for request in plan.provider_requests),
+            ((ProviderKind.VECTOR, 22), (ProviderKind.LEXICAL, 22)),
+        )
 
     def test_beam_retrieval_engine_applies_eval_limits_after_product_pack(self) -> None:
         product_engine = CaptureProductEngine()
@@ -160,6 +246,139 @@ class BeamAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(product_engine.calls[0][1].limit, 50)
+
+    def test_beam_retrieval_engine_preserves_above_floor_limit_and_token_budget(self) -> None:
+        product_engine = CaptureProductEngine()
+        pack_builder = CapturePackBuilder()
+        engine = BeamRetrievalEngine(product_engine=product_engine, pack_builder=pack_builder)
+
+        engine.answer_context(
+            "Summarize the project history",
+            Scope(user_id="u", session_id="beam:100k:1"),
+            "summarization",
+            {"limit": 81, "token_budget": 32000},
+        )
+
+        self.assertEqual(product_engine.calls[0][1].limit, 81)
+        self.assertEqual(pack_builder.calls[0][3], 32000)
+
+    def test_beam_retrieval_engine_propagates_trace_preference_and_deadline(self) -> None:
+        product_engine = CaptureProductEngine()
+        pack_builder = CapturePackBuilder()
+        engine = BeamRetrievalEngine(product_engine=product_engine, pack_builder=pack_builder)
+        deadline = datetime(2030, 1, 2, 3, 4, tzinfo=timezone.utc)
+
+        engine.answer_context(
+            "What memory applies?",
+            Scope(user_id="u", session_id="beam:100k:1"),
+            "information_extraction",
+            {"include_trace": False, "deadline": deadline},
+        )
+
+        context, request, _ = product_engine.calls[0]
+        self.assertIs(context.deadline, deadline)
+        self.assertFalse(request.include_trace)
+        self.assertTrue(context.trace_id.startswith("trace_"))
+        self.assertIs(pack_builder.calls[0][0], context)
+        self.assertIs(pack_builder.calls[0][1], request)
+
+    def test_beam_retrieval_engine_rejects_invalid_read_scope_before_collaborators(self) -> None:
+        product_engine = CaptureProductEngine()
+        pack_builder = CapturePackBuilder()
+        engine = BeamRetrievalEngine(product_engine=product_engine, pack_builder=pack_builder)
+
+        with self.assertRaisesRegex(ValueError, "read requires"):
+            engine.answer_context("What memory applies?", Scope(), "information_extraction")
+
+        self.assertEqual(product_engine.calls, [])
+        self.assertEqual(pack_builder.calls, [])
+
+    def test_beam_retrieval_engine_always_includes_session_scope(self) -> None:
+        product_engine = CaptureProductEngine()
+        engine = BeamRetrievalEngine(product_engine=product_engine, pack_builder=CapturePackBuilder())
+
+        engine.answer_context(
+            "What memory applies?",
+            Scope(user_id="u", session_id="beam:100k:1"),
+            "information_extraction",
+        )
+
+        self.assertTrue(product_engine.calls[0][0].include_session)
+
+    def test_beam_retrieval_engine_preserves_falsey_beam_planner(self) -> None:
+        class FalseyBeamPlanner:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def __bool__(self) -> bool:
+                return False
+
+            def plan(self, query, category, limit):
+                self.calls.append((query, category, limit))
+                return BeamQueryPlanner().plan(query, category, limit)
+
+        planner = FalseyBeamPlanner()
+        engine = BeamRetrievalEngine(
+            product_engine=CaptureProductEngine(),
+            pack_builder=CapturePackBuilder(),
+            planner=planner,
+        )
+
+        engine.answer_context(
+            "What memory applies?",
+            Scope(user_id="u", session_id="beam:100k:1"),
+            "information_extraction",
+        )
+
+        self.assertIs(engine.planner, planner)
+        self.assertEqual(planner.calls, [("What memory applies?", "information_extraction", 50)])
+
+    def test_beam_retrieval_engine_from_service_composes_product_dependencies(self) -> None:
+        service = MemoryService()
+
+        engine = BeamRetrievalEngine.from_service(service)
+
+        self.assertIs(engine.pack_builder.repository, service.store)
+        self.assertIs(engine.pack_builder.config, service.config)
+        self.assertIs(engine.product_engine.pack_builder, engine.pack_builder)
+        self.assertIs(engine.product_engine.reranker, service.reranker)
+        self.assertEqual(engine.product_engine.mmr_lambda, service.config.mmr_lambda)
+        providers = engine.product_engine.registry._providers
+        self.assertEqual(
+            tuple(providers),
+            (
+                ProviderKind.VECTOR,
+                ProviderKind.LEXICAL,
+                ProviderKind.TEMPORAL,
+                ProviderKind.ENTITY,
+                ProviderKind.CHRONOLOGY,
+            ),
+        )
+        self.assertIsInstance(providers[ProviderKind.VECTOR], VectorProvider)
+        self.assertIsInstance(providers[ProviderKind.LEXICAL], LexicalProvider)
+        self.assertIsInstance(providers[ProviderKind.TEMPORAL], TemporalProvider)
+        self.assertIsInstance(providers[ProviderKind.ENTITY], EntityProvider)
+        self.assertIsInstance(providers[ProviderKind.CHRONOLOGY], ChronologyProvider)
+        self.assertTrue(all(provider.repository is service.store for provider in providers.values()))
+
+    def test_beam_adapter_default_engine_does_not_call_service_answer_context(self) -> None:
+        class CaptureService(MemoryService):
+            def answer_context(self, query, scope, budget=None):
+                raise AssertionError("default BeamAdapter path must use the eval-owned engine")
+
+        service = CaptureService()
+        adapter = BeamAdapter(service, Scope(workspace_id="w", user_id="u", agent_id="a"), split="100k")
+
+        result = adapter.answer_query(
+            EvalQuery(
+                id="beam:100k:1:information_extraction:0",
+                query="What memory applies?",
+                gold_answers=["No supported answer."],
+                category="information_extraction",
+            )
+        )
+
+        self.assertEqual(result.query_type, "information_extraction")
 
     def test_beam_adapter_loads_official_chat_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

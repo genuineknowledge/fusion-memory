@@ -495,10 +495,11 @@ def _query_chunk(
             record = _jsonable(result)
             if include_full_pack:
                 record["full_evidence_pack"] = _jsonable(
-                    service.answer_context(
+                    adapter.retrieval_engine.answer_context(
                         query_dict["query"],
                         query_scope,
-                        budget={"mode": "benchmark", "query_type_hint": query_dict.get("category")},
+                        query_dict.get("category"),
+                        budget={"mode": "balanced"},
                     )
                 )
             out.append(record)

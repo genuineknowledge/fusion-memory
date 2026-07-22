@@ -8,7 +8,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def _load_runner_module():
@@ -279,6 +279,75 @@ class BeamParallelRunnerResumeTests(unittest.TestCase):
         runner = _load_runner_module()
         self.assertEqual(runner.REPO_ROOT.name, "memory")
         self.assertTrue((runner.REPO_ROOT / "fusion_memory").is_dir())
+
+    def test_query_chunk_uses_eval_engine_for_full_pack(self) -> None:
+        runner = _load_runner_module()
+        query_scope = SimpleNamespace(session_id="beam:100k:1")
+        pack = SimpleNamespace()
+        retrieval_engine = SimpleNamespace(answer_context=MagicMock(return_value=pack))
+        result = SimpleNamespace(query_id="q1", answer_failed=False, score=1.0)
+        adapter = SimpleNamespace(
+            retrieval_engine=retrieval_engine,
+            _beam_scope=MagicMock(return_value=query_scope),
+            answer_query=MagicMock(return_value=result),
+        )
+        service = SimpleNamespace(
+            close=MagicMock(),
+            answer_context=MagicMock(side_effect=AssertionError("production answer_context must not be called")),
+        )
+
+        def jsonable(value):
+            if value is result:
+                return {"query_id": "q1", "answer_failed": False, "score": 1.0}
+            if value is pack:
+                return {"query": "full pack"}
+            raise AssertionError(f"unexpected jsonable value: {value!r}")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            runner, "_memory_service", return_value=service
+        ), patch.object(
+            runner, "_build_eval_models", return_value=(SimpleNamespace(), SimpleNamespace())
+        ), patch.object(
+            runner, "BeamAdapter", return_value=adapter
+        ), patch.object(
+            runner, "_load_resumable_partial_records", return_value=[]
+        ), patch.object(
+            runner, "_append_partial_record"
+        ), patch.object(
+            runner, "_jsonable", side_effect=jsonable
+        ):
+            records = runner._query_chunk(
+                [
+                    {
+                        "id": "q1",
+                        "query": "What memory applies?",
+                        "category": "information_extraction",
+                    }
+                ],
+                "/unused",
+                "100k",
+                "w",
+                "u",
+                "a",
+                None,
+                None,
+                "sqlite://unused",
+                {},
+                0,
+                tmp,
+                True,
+                3,
+                None,
+            )
+
+        self.assertEqual(records[0]["full_evidence_pack"], {"query": "full pack"})
+        retrieval_engine.answer_context.assert_called_once_with(
+            "What memory applies?",
+            query_scope,
+            "information_extraction",
+            budget={"mode": "balanced"},
+        )
+        service.answer_context.assert_not_called()
 
     def test_query_help_exposes_retry_and_llm_aggregation_switches(self) -> None:
         path = Path(__file__).resolve().parents[1] / "tools" / "beam_parallel_runner.py"

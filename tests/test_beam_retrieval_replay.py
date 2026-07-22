@@ -11,6 +11,12 @@ import tools.beam_retrieval_replay as replay
 from tools.rule_audit import build_provider_audit, build_rule_audit
 
 
+def _eval_engine(pack):
+    engine = MagicMock()
+    engine.answer_context.return_value = pack
+    return engine
+
+
 class BeamRetrievalReplayTests(unittest.TestCase):
     def test_default_dataset_is_environment_or_relative_path(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -38,6 +44,31 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertEqual(summary["categories"]["current_value"]["mean_source_span_count"], 1.0)
         self.assertEqual(summary["categories"]["zh_recall"]["query_count"], 1)
 
+    def test_run_replay_builds_one_eval_engine_for_the_service(self) -> None:
+        queries = [
+            SimpleNamespace(id="q1", query="First question?", category="knowledge_update"),
+            SimpleNamespace(id="q2", query="Second question?", category="knowledge_update"),
+        ]
+        pack = SimpleNamespace(source_spans=[], coverage={}, debug_trace=[])
+        retrieval_engine = _eval_engine(pack)
+        service = MagicMock()
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=queries), patch.object(
+            replay.BeamRetrievalEngine, "from_service", return_value=retrieval_engine
+        ) as from_service:
+            replay.run_replay(
+                service,
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value"},
+                output_path=Path(tmp) / "replay.json",
+                query_limit=None,
+            )
+
+        from_service.assert_called_once_with(service)
+        self.assertEqual(retrieval_engine.answer_context.call_count, 2)
+        service.answer_context.assert_not_called()
+
     def test_run_replay_writes_records_with_pipeline_trace(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         fake_pack = SimpleNamespace(
@@ -46,7 +77,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -56,11 +88,18 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
         self.assertEqual(report["summary"]["categories"]["current_value"]["query_count"], 1)
         self.assertIn("pipeline_trace", payload["records"][0])
+        retrieval_engine.answer_context.assert_called_once_with(
+            "What is my current IDE?",
+            replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+            "current_value",
+        )
+        service.answer_context.assert_not_called()
 
     def test_run_replay_prefers_coverage_pipeline_trace_from_answer_context(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
@@ -81,7 +120,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -91,6 +131,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -141,7 +182,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -151,6 +193,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -213,7 +256,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -223,6 +267,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -274,7 +319,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             ],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -284,6 +330,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -329,7 +376,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             ],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -339,6 +387,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -366,7 +415,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -376,12 +426,14 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
         self.assertNotIn("query", report["records"][0])
         self.assertNotIn("query", payload["records"][0])
-        self.assertEqual(service.answer_context.call_args.args[0], "What is my current IDE?")
+        self.assertEqual(retrieval_engine.answer_context.call_args.args[0], "What is my current IDE?")
+        service.answer_context.assert_not_called()
 
     def test_run_replay_writes_sanitized_candidate_lifecycle(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my private token?", category="knowledge_update")
@@ -400,7 +452,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -410,6 +463,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -463,7 +517,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -473,6 +528,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -538,7 +594,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -548,6 +605,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -629,7 +687,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -639,6 +698,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -694,7 +754,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -704,6 +765,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 
@@ -749,7 +811,8 @@ class BeamRetrievalReplayTests(unittest.TestCase):
             debug_trace=[],
         )
         service = MagicMock()
-        service.answer_context.return_value = fake_pack
+        service.answer_context.side_effect = AssertionError("production answer_context must not be called")
+        retrieval_engine = _eval_engine(fake_pack)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=[fake_query]):
             out = Path(tmp) / "replay.json"
@@ -759,6 +822,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
                 categories={"current_value"},
                 output_path=out,
                 query_limit=None,
+                retrieval_engine=retrieval_engine,
             )
             payload = json.loads(out.read_text(encoding="utf-8"))
 

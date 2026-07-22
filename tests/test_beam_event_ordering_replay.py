@@ -270,11 +270,11 @@ class BeamReplayPreflightTests(unittest.TestCase):
             ],
             coverage={"event_ordering_shadow": {"selected_driver": "graph"}},
         )
-        service = SimpleNamespace(answer_context=MagicMock(return_value=pack))
+        retrieval_engine = SimpleNamespace(answer_context=MagicMock(return_value=pack))
 
         with patch.object(replay, "_pack_for_model", side_effect=AssertionError("_pack_for_model should not be called")):
             items, sources, coverage = _hybrid_items(
-                service,
+                retrieval_engine,
                 "rank the work",
                 SimpleNamespace(),
                 5,
@@ -285,6 +285,12 @@ class BeamReplayPreflightTests(unittest.TestCase):
         self.assertEqual(items, ["first source span", "second source span"])
         self.assertEqual(sources, ["source_a", "source_b"])
         self.assertEqual(coverage, {"event_ordering_shadow": {"selected_driver": "graph"}})
+        retrieval_engine.answer_context.assert_called_once_with(
+            "rank the work",
+            unittest.mock.ANY,
+            "event_ordering",
+            budget={"limit": 5},
+        )
 
     def test_compact_coverage_preserves_rule_hits_for_audit(self) -> None:
         coverage = _compact_coverage(
@@ -592,6 +598,7 @@ class BeamReplayModeTests(unittest.TestCase):
                 "event_ordering_episode_recall",
             ],
         )
+        service.planner.plan.assert_called_once_with("rank the work")
 
     def test_dual_graph_legacy_items_uses_graph_order_over_legacy_text_when_aligned(self) -> None:
         service = SimpleNamespace(
@@ -661,6 +668,21 @@ class BeamReplayModeTests(unittest.TestCase):
                 "event_ordering_episode_recall",
             ],
         )
+        service.planner.plan.assert_called_once_with("rank the work")
+
+    def test_legacy_items_does_not_pass_event_category_to_production_planner(self) -> None:
+        service = SimpleNamespace(
+            planner=SimpleNamespace(plan=MagicMock(return_value=SimpleNamespace())),
+            _event_ordering_episode_recall_candidates=MagicMock(return_value=[]),
+            _event_ordering_timeline_candidates=MagicMock(return_value=[]),
+            _event_ordering_event_candidates=MagicMock(return_value=[]),
+        )
+
+        items, sources = replay._legacy_items(service, "rank the work", SimpleNamespace(), 3)
+
+        self.assertEqual(items, [])
+        self.assertEqual(sources, [])
+        service.planner.plan.assert_called_once_with("rank the work")
 
     def test_run_replay_graph_dual_legacy_mode_skips_hybrid_path(self) -> None:
         query = SimpleNamespace(

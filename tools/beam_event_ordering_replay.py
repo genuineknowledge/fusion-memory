@@ -293,7 +293,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                 dual_items, dual_sources = _dual_graph_legacy_items(service, query.query, query_scope, args.limit)
             if args.mode in {"hybrid", "all"}:
                 hybrid_items, hybrid_sources, hybrid_coverage = _hybrid_items(
-                    service,
+                    adapter.retrieval_engine,
                     query.query,
                     query_scope,
                     args.limit,
@@ -415,7 +415,7 @@ def _graph_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[li
 
 
 def _legacy_items(service: Any, query: str, scope: Scope, limit: int) -> tuple[list[str], list[str]]:
-    plan = service.planner.plan(query, query_type_hint="event_ordering")
+    plan = service.planner.plan(query)
     candidates: list[Candidate] = []
     candidates.extend(_event_ordering_coverage_candidates_for_replay(service, query, scope, limit))
     candidates.extend(
@@ -465,7 +465,7 @@ def _dual_graph_legacy_items(service: Any, query: str, scope: Scope, limit: int)
         for candidate in service._event_ordering_graph_selector_candidates(query, scope, limit=limit, include_session=True)
         if candidate.source == "event_ordering_persisted_graph"
     ]
-    plan = service.planner.plan(query, query_type_hint="event_ordering")
+    plan = service.planner.plan(query)
     legacy_candidates: list[Candidate] = []
     legacy_candidates.extend(_event_ordering_coverage_candidates_for_replay(service, query, scope, limit))
     legacy_candidates.extend(
@@ -524,14 +524,19 @@ def _event_ordering_coverage_candidates_for_replay(service: Any, query: str, sco
 
 
 def _hybrid_items(
-    service: Any,
+    retrieval_engine: Any,
     query: str,
     scope: Scope,
     limit: int,
     category: str,
     hybrid_source: str = "model_pack",
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    pack = service.answer_context(query, scope, budget={"mode": "benchmark", "query_type_hint": category})
+    pack = retrieval_engine.answer_context(
+        query,
+        scope,
+        category,
+        budget={"limit": limit},
+    )
     if hybrid_source == "source_spans":
         items = [
             str(span.get("content") or span.get("conversation_content") or "").strip()

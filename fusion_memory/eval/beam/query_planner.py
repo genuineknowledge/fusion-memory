@@ -27,7 +27,9 @@ CATEGORY_PROVIDERS = {
 
 class BeamQueryPlanner:
     def __init__(self, product_planner: ProductQueryPlanner | None = None) -> None:
-        self.product_planner = product_planner or ProductQueryPlanner()
+        self.product_planner = (
+            product_planner if product_planner is not None else ProductQueryPlanner()
+        )
 
     def plan(self, query: str, category: str | None, limit: int) -> ProductQueryPlan:
         request = SearchRequest(query=query, limit=limit, mode="balanced")
