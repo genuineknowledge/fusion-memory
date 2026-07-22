@@ -40,6 +40,7 @@ from fusion_memory.retrieval.context import (
 )
 from fusion_memory.retrieval.engine import (
     RetrievalEngine,
+    build_product_retrieval_engine,
     sanitize_product_model_call,
     sanitize_retrieval_trace,
     summarize_product_model_calls,
@@ -220,7 +221,16 @@ class MemoryService:
         self.extractor = extractor or RuleBasedExtractor()
         self.async_extractor = async_extractor
         self.retrieval_flags = retrieval_flags
-        self.retrieval_engine = retrieval_engine
+        self.reranker = reranker or LexicalCrossEncoderReranker()
+        self.retrieval_engine = (
+            retrieval_engine
+            if retrieval_engine is not None
+            else build_product_retrieval_engine(
+                self.store,
+                self.config,
+                self.reranker,
+            )
+        )
         self.gate = EncodingGate(self.config)
         self.views = ViewBuilder()
         self.planner = QueryPlanner(
@@ -231,7 +241,6 @@ class MemoryService:
         self.quota = RawEvidenceQuota(self.store, self.config)
         self.pack_builder = EvidencePackBuilder(self.store, self.config)
         self.utility_scorer = LogisticUtilityScorer()
-        self.reranker = reranker or LexicalCrossEncoderReranker()
 
     def close(self) -> None:
         self.store.close()
@@ -372,20 +381,17 @@ class MemoryService:
         )
 
     def search(self, query: str, scope: Scope, options: dict[str, Any] | None = None) -> SearchResult:
-        if self.retrieval_engine is not None:
-            prepared_options = self._prepare_retrieval_engine_options(options)
-            _, _, result, trace_id = self._run_retrieval_engine(
-                query,
-                scope,
-                prepared_options,
-            )
-            return SearchResult(
-                candidates=list(result.candidates),
-                trace_id=trace_id,
-                coverage=dict(result.coverage),
-            )
-        with collect_rule_hits() as rule_hits:
-            return self._search_with_rule_hits(query, scope, options, rule_hits)
+        prepared_options = self._prepare_retrieval_engine_options(options)
+        _, _, result, trace_id = self._run_retrieval_engine(
+            query,
+            scope,
+            prepared_options,
+        )
+        return SearchResult(
+            candidates=list(result.candidates),
+            trace_id=trace_id,
+            coverage=dict(result.coverage),
+        )
 
     def _prepare_retrieval_engine_options(
         self,
@@ -862,37 +868,34 @@ class MemoryService:
         return SearchResult(candidates=selected, trace_id=trace_id, coverage=coverage)
 
     def answer_context(self, query: str, scope: Scope, budget: dict[str, Any] | None = None) -> EvidencePack:
-        if self.retrieval_engine is not None:
-            product_budget = self._prepare_retrieval_engine_options(budget)
-            token_budget = (
-                product_budget.get("token_budget")
-                or self.config.answer_context_budget_tokens
-            )
-            scope.validate_for_read()
-            self._authorize(
-                "memory.answer_context",
-                scope,
-                {
-                    "query": query,
-                    "allow_cross_session": product_budget["allow_cross_session"],
-                    "limit": product_budget["limit"],
-                    "mode": product_budget["mode"],
-                    "token_budget": token_budget,
-                },
-            )
-            context, request, result, _ = self._run_retrieval_engine(
-                query,
-                scope,
-                product_budget,
-            )
-            return self.retrieval_engine.build_evidence_pack(
-                context,
-                request,
-                result,
-                token_budget,
-            )
-        with collect_rule_hits() as rule_hits:
-            return self._answer_context_with_rule_hits(query, scope, budget, rule_hits)
+        product_budget = self._prepare_retrieval_engine_options(budget)
+        token_budget = (
+            product_budget.get("token_budget")
+            or self.config.answer_context_budget_tokens
+        )
+        scope.validate_for_read()
+        self._authorize(
+            "memory.answer_context",
+            scope,
+            {
+                "query": query,
+                "allow_cross_session": product_budget["allow_cross_session"],
+                "limit": product_budget["limit"],
+                "mode": product_budget["mode"],
+                "token_budget": token_budget,
+            },
+        )
+        context, request, result, _ = self._run_retrieval_engine(
+            query,
+            scope,
+            product_budget,
+        )
+        return self.retrieval_engine.build_evidence_pack(
+            context,
+            request,
+            result,
+            token_budget,
+        )
 
     def _answer_context_with_rule_hits(self, query: str, scope: Scope, budget: dict[str, Any] | None, rule_hits) -> EvidencePack:
         budget = budget or {}
@@ -904,10 +907,10 @@ class MemoryService:
         if mode == "benchmark":
             if plan.query_type == "event_ordering":
                 limit = limit or max(self.config.retrieval_output_n, 24)
-                rerank_top_n = rerank_top_n or max(self.config.benchmark_mode_rerank_top_n, min(72, limit * 2))
+                rerank_top_n = rerank_top_n or max(20, min(72, limit * 2))
             else:
                 limit = limit or max(self.config.retrieval_output_n, 50)
-                rerank_top_n = rerank_top_n or max(self.config.benchmark_mode_rerank_top_n, min(160, limit * 3))
+                rerank_top_n = rerank_top_n or max(20, min(160, limit * 3))
             token_budget = token_budget or max(self.config.answer_context_budget_tokens, 24000)
         else:
             limit = limit or self.config.retrieval_output_n

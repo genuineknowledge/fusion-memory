@@ -2,7 +2,7 @@ from fusion_memory.core.models import Scope
 from fusion_memory.mcp_server import RequestProvenance
 
 
-def test_request_provenance_keeps_workspace_and_session_separate():
+def test_mcp_read_scope_still_contains_only_authenticated_user():
     provenance = RequestProvenance("workspace-a", "session-a")
     write_scope = Scope(
         user_id="user-a",

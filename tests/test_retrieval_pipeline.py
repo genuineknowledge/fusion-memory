@@ -28,7 +28,6 @@ class RetrievalPipelineTests(unittest.TestCase):
             rrf_k = 1
             retrieval_output_n = 2
             balanced_mode_rerank_top_n = 5
-            benchmark_mode_rerank_top_n = 7
 
         class FakeQuota:
             def __init__(self) -> None:

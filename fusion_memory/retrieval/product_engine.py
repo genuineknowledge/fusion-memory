@@ -57,7 +57,7 @@ class ProductRetrievalEngine:
         reranker: Reranker | None = None,
         mmr_lambda: float = 0.72,
     ) -> None:
-        self.planner = planner or ProductQueryPlanner()
+        self.planner = planner if planner is not None else ProductQueryPlanner()
         self.registry = registry
         self.reranker = reranker or LexicalCrossEncoderReranker()
         self.mmr_lambda = mmr_lambda

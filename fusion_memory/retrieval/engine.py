@@ -234,3 +234,39 @@ class RetrievalEngine(Protocol):
         result: RetrievalResult,
         token_budget: int,
     ) -> EvidencePack: ...
+
+
+def build_product_retrieval_engine(
+    repository: Any,
+    config: Any,
+    reranker: Any,
+    planner: Any | None = None,
+) -> RetrievalEngine:
+    from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
+    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+    from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+    from fusion_memory.retrieval.providers.chronology import ChronologyProvider
+    from fusion_memory.retrieval.providers.entity import EntityProvider
+    from fusion_memory.retrieval.providers.lexical import LexicalProvider
+    from fusion_memory.retrieval.providers.product_registry import ProductProviderRegistry
+    from fusion_memory.retrieval.providers.temporal import TemporalProvider
+    from fusion_memory.retrieval.providers.vector import VectorProvider
+
+    pack_builder = ProductEvidencePackBuilder(repository, config)
+    registry = ProductProviderRegistry(
+        [
+            VectorProvider(repository),
+            LexicalProvider(repository),
+            TemporalProvider(repository),
+            EntityProvider(repository),
+            ChronologyProvider(repository),
+        ]
+    )
+    product_planner = planner if planner is not None else ProductQueryPlanner()
+    return ProductRetrievalEngine(
+        product_planner,
+        registry,
+        pack_builder=pack_builder,
+        reranker=reranker,
+        mmr_lambda=config.mmr_lambda,
+    )

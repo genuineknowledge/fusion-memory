@@ -4,11 +4,21 @@ import os
 import unittest
 from unittest.mock import patch
 
+from fusion_memory.core.config import MemoryConfig
 from fusion_memory.core.runtime_config import build_runtime_retrieval_flags, memory_service_from_env
 from fusion_memory.model_pool import PooledEmbedder, PooledReranker
 
 
 class RuntimeRetrievalFlagTests(unittest.TestCase):
+    def test_runtime_config_snapshot_contains_only_product_rerank_setting(self) -> None:
+        rerank_settings = {
+            name: value
+            for name, value in MemoryConfig().snapshot().items()
+            if name.endswith("rerank_top_n")
+        }
+
+        self.assertEqual(rerank_settings, {"balanced_mode_rerank_top_n": 50})
+
     def test_event_ordering_flags_keep_only_legacy_selector(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             flags = build_runtime_retrieval_flags()

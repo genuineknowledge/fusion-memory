@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from fusion_memory import AuthorizationError, MemoryService, Scope
+from fusion_memory.core.config import MemoryConfig
 from fusion_memory.core.models import Candidate, EvidencePack
 from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.context import (
@@ -187,6 +188,57 @@ def memory_store() -> RecordingStore:
 @pytest.fixture
 def fake_engine() -> FakeEngine:
     return FakeEngine()
+
+
+def test_memory_service_uses_product_engine_by_default() -> None:
+    service = MemoryService()
+    try:
+        assert service.retrieval_engine.__class__.__name__ == "ProductRetrievalEngine"
+    finally:
+        service.close()
+
+
+def test_product_engine_factory_wires_all_providers_pack_builder_and_falsey_planner(
+    memory_store: RecordingStore,
+) -> None:
+    from fusion_memory.retrieval.engine import build_product_retrieval_engine
+    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+
+    class FalseyPlanner:
+        def __bool__(self) -> bool:
+            return False
+
+    planner = FalseyPlanner()
+    reranker = object()
+
+    engine = build_product_retrieval_engine(
+        memory_store,
+        MemoryConfig(),
+        reranker,
+        planner=planner,
+    )
+
+    assert engine.planner is planner
+    assert engine.reranker is reranker
+    assert isinstance(engine.pack_builder, ProductEvidencePackBuilder)
+    assert set(engine.registry._providers) == set(ProviderKind)
+    assert all(
+        provider.repository is memory_store
+        for provider in engine.registry._providers.values()
+    )
+
+
+@pytest.mark.parametrize("operation", ["search", "answer_context"])
+def test_memory_service_never_falls_back_when_product_engine_is_unavailable(
+    memory_store: RecordingStore,
+    fake_engine: FakeEngine,
+    operation: str,
+) -> None:
+    service = MemoryService(store=memory_store, retrieval_engine=fake_engine)
+    service.retrieval_engine = None
+
+    with pytest.raises(RuntimeError, match="retrieval engine is not configured"):
+        getattr(service, operation)("Atlas database", Scope(user_id="user-a"))
 
 
 def test_memory_service_delegates_search_to_injected_engine(

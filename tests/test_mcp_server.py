@@ -490,6 +490,53 @@ def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
     assert captured["dsn"] == "postgresql://memory"
 
 
+def test_runtime_rejects_benchmark_search_mode() -> None:
+    with pytest.raises(ValueError, match="fast or balanced"):
+        FusionMemoryRuntime(object(), lambda _store: object(), search_mode="benchmark")
+
+
+def test_runtime_from_env_rejects_benchmark_search_mode_and_closes_resources(monkeypatch):
+    calls: list[str] = []
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            calls.append("pool")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            calls.append("store")
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            calls.append("executor")
+
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setenv("FUSION_MEMORY_MCP_SEARCH_MODE", "benchmark")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+
+    with pytest.raises(ValueError, match="fast or balanced"):
+        runtime_from_env()
+
+    assert calls == ["executor", "store"]
+
+
 def test_runtime_from_env_preserves_embedding_and_reranker_slots(monkeypatch):
     class FakePool:
         def __init__(self, *args, **kwargs):

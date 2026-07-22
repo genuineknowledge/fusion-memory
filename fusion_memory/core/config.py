@@ -75,7 +75,6 @@ class MemoryConfig:
     answer_context_budget_tokens: int = 8000
     retrieval_output_n: int = 12
     balanced_mode_rerank_top_n: int = 50
-    benchmark_mode_rerank_top_n: int = 20
     evidence_span_summary_chars: int = 500
     local_answer_summary_chars: int = 360
     raw_evidence_quotas: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_RAW_EVIDENCE_QUOTAS))

@@ -41,8 +41,8 @@ class FusionMemoryRuntime:
     ) -> None:
         if worker_limit < 1:
             raise ValueError("FUSION_MEMORY_MCP_WORKER_LIMIT must be positive")
-        if search_mode not in {"fast", "balanced", "benchmark"}:
-            raise ValueError("FUSION_MEMORY_MCP_SEARCH_MODE must be fast, balanced, or benchmark")
+        if search_mode not in {"fast", "balanced"}:
+            raise ValueError("FUSION_MEMORY_MCP_SEARCH_MODE must be fast or balanced")
         self._operation_executor = operation_executor
         self._service_factory = service_factory
         self._worker_limiter = anyio.CapacityLimiter(worker_limit)

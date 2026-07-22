@@ -255,8 +255,6 @@ class CandidateFusionEngine:
         rerank_top_n = context.options.get("rerank_top_n") or (
             service.config.balanced_mode_rerank_top_n
             if mode == "balanced"
-            else service.config.benchmark_mode_rerank_top_n
-            if mode == "benchmark"
             else limit
         )
         return FusionResult(
