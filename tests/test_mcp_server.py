@@ -838,7 +838,7 @@ def test_runtime_from_env_closes_resources_when_model_builder_fails(monkeypatch)
     assert calls == ["store", "pool"]
 
 
-def test_runtime_factory_creates_request_local_extractor_without_legacy_refiner(monkeypatch):
+def test_runtime_factory_creates_request_local_models_and_validates_query_intent_config(monkeypatch):
     import concurrent.futures
 
     class FakePool:
@@ -875,7 +875,13 @@ def test_runtime_factory_creates_request_local_extractor_without_legacy_refiner(
         "fusion_memory.mcp_runtime._build_async_extractor",
         lambda: created_extractors.append(object()) or created_extractors[-1],
     )
+    monkeypatch.setattr(
+        "fusion_memory.mcp_runtime._build_query_intent_refiner",
+        lambda: created_refiners.append(object()) or created_refiners[-1],
+    )
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+    monkeypatch.setenv("FUSION_MEMORY_QUERY_INTENT_MODE", "always")
+    monkeypatch.setenv("FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE", "0.82")
 
     runtime, _ = runtime_from_env()
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -883,7 +889,21 @@ def test_runtime_factory_creates_request_local_extractor_without_legacy_refiner(
     first, second = [future.result() for future in futures]
 
     assert first.async_extractor is not second.async_extractor
-    assert created_refiners == []
+    assert len(created_refiners) == 2
+    assert first.retrieval_engine.planner.intent_refiner is not second.retrieval_engine.planner.intent_refiner
+    assert {
+        first.retrieval_engine.planner.intent_refiner,
+        second.retrieval_engine.planner.intent_refiner,
+    } == set(created_refiners)
+    assert first.retrieval_engine.planner.intent_refiner_mode == "always"
+    assert first.retrieval_engine.planner.intent_refiner_min_confidence == 0.82
+
+    monkeypatch.setenv("FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE", "1.1")
+    with pytest.raises(
+        ValueError,
+        match="intent_refiner_min_confidence must be a finite number between 0.0 and 1.0",
+    ):
+        runtime._service_factory(object())
 
 
 def test_runtime_factory_applies_request_local_embedder_to_bound_postgres_store(monkeypatch):

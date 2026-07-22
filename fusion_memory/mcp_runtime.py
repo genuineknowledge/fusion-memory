@@ -15,7 +15,9 @@ from fusion_memory.core.runtime_config import (
     _build_async_extractor,
     _build_embedder,
     _build_extractor,
+    _build_query_intent_refiner,
     _build_reranker,
+    _float_env,
     build_runtime_retrieval_flags,
     postgres_pool_settings_from_env,
 )
@@ -232,6 +234,13 @@ def runtime_from_env() -> tuple[FusionMemoryRuntime, PostgresConnectionPool]:
                 reranker=_request_local_adapter(shared_reranker, _build_reranker),
                 extractor=_build_extractor(),
                 async_extractor=_build_async_extractor(),
+                query_intent_refiner=_build_query_intent_refiner(),
+                query_intent_refiner_min_confidence=_float_env(
+                    "FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE", 0.70
+                ),
+                query_intent_refiner_mode=os.getenv(
+                    "FUSION_MEMORY_QUERY_INTENT_MODE", "off"
+                ).strip().lower(),
                 retrieval_flags=retrieval_flags,
             )
 

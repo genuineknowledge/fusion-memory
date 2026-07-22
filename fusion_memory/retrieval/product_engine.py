@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import Protocol
+from typing import Any, Protocol
 
 from fusion_memory.core.models import EvidencePack
 from fusion_memory.retrieval.context import (
@@ -18,6 +18,7 @@ from fusion_memory.retrieval.selection import select_candidates
 from fusion_memory.retrieval.tracing import (
     build_retrieval_trace,
     sanitize_dimension,
+    sanitize_query_intent_telemetry,
     validate_product_plan,
 )
 
@@ -79,14 +80,33 @@ class ProductRetrievalEngine:
         plan: ProductQueryPlan | None = None,
     ) -> RetrievalResult:
         plan_started = perf_counter()
-        planned = plan or self.planner.plan(request)
+        planned = plan if plan is not None else self.planner.plan(request)
+        intent_telemetry = (
+            {}
+            if plan is not None
+            else sanitize_query_intent_telemetry(
+                getattr(self.planner, "last_intent_telemetry", None)
+            )
+        )
         plan_elapsed_ms = (perf_counter() - plan_started) * 1000
         if validate_product_plan(planned):
-            return self._search_with_plan(context, request, planned, plan_elapsed_ms=plan_elapsed_ms)
+            return self._search_with_plan(
+                context,
+                request,
+                planned,
+                plan_elapsed_ms=plan_elapsed_ms,
+                query_intent_telemetry=intent_telemetry,
+            )
 
         fallback = self.planner.safe_default(request)
         plan_elapsed_ms = (perf_counter() - plan_started) * 1000
-        result = self._search_with_plan(context, request, fallback, plan_elapsed_ms=plan_elapsed_ms)
+        result = self._search_with_plan(
+            context,
+            request,
+            fallback,
+            plan_elapsed_ms=plan_elapsed_ms,
+            query_intent_telemetry=intent_telemetry,
+        )
         return RetrievalResult(
             candidates=result.candidates,
             coverage={**result.coverage, "planner_fallback": "invalid_plan"},
@@ -111,6 +131,7 @@ class ProductRetrievalEngine:
         plan: ProductQueryPlan,
         *,
         plan_elapsed_ms: float,
+        query_intent_telemetry: dict[str, Any] | None = None,
     ) -> RetrievalResult:
         context.check_deadline()
         recall_started = perf_counter()
@@ -155,6 +176,9 @@ class ProductRetrievalEngine:
         }
         if reranker_failure is not None:
             coverage["reranker_unavailable"] = True
+        sanitized_telemetry = sanitize_query_intent_telemetry(query_intent_telemetry)
+        if sanitized_telemetry:
+            coverage["query_intent_telemetry"] = sanitized_telemetry
 
         fused_count = int(selection_status.get("fused_count", 0))
         trace = build_retrieval_trace(
@@ -171,5 +195,6 @@ class ProductRetrievalEngine:
                 "selection": float(selection_status.get("selection_elapsed_ms", 0.0)),
             },
             reranker_failure=reranker_failure,
+            query_intent_telemetry=sanitized_telemetry,
         )
         return RetrievalResult(tuple(selected), coverage, trace, plan)

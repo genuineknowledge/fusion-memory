@@ -33,6 +33,12 @@ TRANSITIONAL_PRODUCT_MODULES = (
     Path("fusion_memory/retrieval/providers/product_base.py"),
     Path("fusion_memory/retrieval/providers/product_registry.py"),
 )
+TASK11_MIGRATED_TESTS = (
+    Path("tests/test_value_history_pack.py"),
+    Path("tests/test_retrieval_trace.py"),
+    Path("tests/test_rule_registry.py"),
+    Path("tests/test_temporal_normalizer.py"),
+)
 
 
 def _production_python() -> str:
@@ -120,6 +126,26 @@ def test_production_imports_do_not_reference_legacy_or_transitional_modules() ->
         for path in (*LEGACY_RETRIEVAL_MODULES, *TRANSITIONAL_PRODUCT_MODULES)
     }
     assert imported_modules.isdisjoint(forbidden_modules)
+
+
+def test_task11_migrated_tests_do_not_import_deleted_legacy_contracts() -> None:
+    imported_modules: set[str] = set()
+    imported_names: set[tuple[str, str]] = set()
+    for path in TASK11_MIGRATED_TESTS:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+                imported_names.update((node.module, alias.name) for alias in node.names)
+            elif isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+
+    forbidden_modules = {
+        ".".join(path.with_suffix("").parts) for path in LEGACY_RETRIEVAL_MODULES
+    }
+    assert imported_modules.isdisjoint(forbidden_modules)
+    assert ("fusion_memory.retrieval.query_planner", "QueryPlanner") not in imported_names
+    assert ("fusion_memory.api.service", "_event_ordering_legacy_candidate") not in imported_names
 
 
 def test_product_production_modules_do_not_import_legacy_scenario_helpers() -> None:

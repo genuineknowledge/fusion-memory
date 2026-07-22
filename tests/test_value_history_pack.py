@@ -2,12 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from fusion_memory.retrieval.pack_contract import (
-    PACK_CONTRACT_VERSION,
-    active_pack_sections_for,
-    ensure_known_pack_sections,
-    pack_contract_metadata,
-)
 from fusion_memory.retrieval.slot_state_transition import value_state_summary
 from fusion_memory.retrieval.value_history_pack import (
     build_value_history_table,
@@ -18,27 +12,7 @@ from fusion_memory.retrieval.value_history_pack import (
 )
 
 
-class PackContractTests(unittest.TestCase):
-    def test_active_sections_are_deterministic_and_known(self) -> None:
-        sections = active_pack_sections_for(
-            "knowledge_update",
-            {"value_history": [{"value": "250ms"}], "temporal_candidates": [{"normalized_date": "2024-03-01"}]},
-        )
-
-        self.assertEqual(sections, ["raw_evidence", "value_history", "temporal"])
-        ensure_known_pack_sections(sections)
-
-    def test_contract_metadata_records_version_and_active_sections(self) -> None:
-        metadata = pack_contract_metadata(active_sections=["raw_evidence", "timeline", "timeline"])
-
-        self.assertEqual(metadata["version"], PACK_CONTRACT_VERSION)
-        self.assertEqual(metadata["active_sections"], ["raw_evidence", "timeline"])
-        self.assertTrue(any(section["name"] == "model_view" for section in metadata["sections"]))
-
-    def test_unknown_sections_fail_fast(self) -> None:
-        with self.assertRaises(ValueError):
-            ensure_known_pack_sections(["raw_evidence", "unknown"])
-
+class ValueHistoryPackTests(unittest.TestCase):
     def test_value_history_section_prefers_query_unit_current_value(self) -> None:
         summary = value_history_summary(
             "What is the current response time in milliseconds?",

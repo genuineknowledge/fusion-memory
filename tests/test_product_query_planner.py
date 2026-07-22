@@ -1,5 +1,39 @@
+import pytest
+
+from fusion_memory.core.llm import StaticLLMClient
 from fusion_memory.retrieval.context import OrderingMode, ProviderKind, SearchRequest
 from fusion_memory.retrieval.query_planner import ProductQueryPlanner
+
+
+def _refined_response(*, confidence: float = 0.88) -> dict[str, object]:
+    return {
+        "intent": {
+            "language": "zh",
+            "answer_shape": "unordered_list",
+            "evidence_scope": "multi_session",
+            "speaker_scope": "user",
+            "target_terms": ["权限控制", "登录保护"],
+            "object_types": ["security_feature"],
+            "temporal": {
+                "requires_time": False,
+                "requires_order": False,
+                "requires_duration": False,
+                "order_direction": "unknown",
+                "endpoint_roles": [],
+                "time_expressions": [],
+            },
+            "aggregation": {
+                "operation": "count_distinct",
+                "distinct": True,
+                "target_terms": ["security_feature"],
+                "unit_terms": [],
+            },
+            "needs_current_state": False,
+            "needs_conflict_check": False,
+            "confidence": confidence,
+            "route_reasons": ["llm_multilingual_normalization"],
+        }
+    }
 
 
 def _providers(plan):
@@ -70,3 +104,139 @@ def test_safe_default_keeps_ambiguous_query_support_empty() -> None:
     assert plan.entities == ()
     assert plan.query_intent["target_terms"] == []
     assert plan.query_intent["entities"] == []
+
+
+def test_planner_default_and_off_modes_do_not_call_configured_refiner() -> None:
+    default_client = StaticLLMClient(_refined_response())
+    off_client = StaticLLMClient(_refined_response())
+    default_planner = ProductQueryPlanner(intent_refiner=default_client)
+    off_planner = ProductQueryPlanner(
+        intent_refiner=off_client,
+        intent_refiner_mode="off",
+    )
+
+    default_plan = default_planner.plan(
+        SearchRequest("我之前提过哪些权限控制能力？", 6)
+    )
+    off_plan = off_planner.plan(SearchRequest("我之前提过哪些权限控制能力？", 6))
+
+    assert default_client.calls == []
+    assert off_client.calls == []
+    assert "llm_refined" not in default_plan.query_intent["route_reasons"]
+    assert "llm_refined" not in off_plan.query_intent["route_reasons"]
+    assert default_planner.last_intent_telemetry is None
+    assert off_planner.last_intent_telemetry is None
+
+
+def test_planner_always_mode_uses_strict_refinement() -> None:
+    client = StaticLLMClient(_refined_response())
+    planner = ProductQueryPlanner(intent_refiner=client, intent_refiner_mode="always")
+
+    plan = planner.plan(SearchRequest("我之前提过哪些权限控制能力？", 6))
+
+    assert len(client.calls) == 1
+    assert plan.query_intent["answer_shape"] == "unordered_list"
+    assert plan.query_intent["aggregation"]["operation"] == "count_distinct"
+    assert "llm_refined" in plan.query_intent["route_reasons"]
+    assert set(plan.query_intent) == {
+        "schema_version",
+        "language",
+        "answer_shape",
+        "evidence_scope",
+        "speaker_scope",
+        "entities",
+        "target_terms",
+        "object_types",
+        "temporal",
+        "aggregation",
+        "needs_current_state",
+        "needs_conflict_check",
+        "confidence",
+        "route_reasons",
+    }
+    assert planner.last_intent_telemetry == {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": False,
+        "accepted": True,
+        "deterministic_confidence": 0.73,
+        "confidence": 0.88,
+    }
+
+
+def test_planner_auto_mode_follows_deterministic_confidence_predicate() -> None:
+    client = StaticLLMClient(_refined_response())
+    planner = ProductQueryPlanner(intent_refiner=client, intent_refiner_mode="auto")
+
+    high_confidence = planner.plan(
+        SearchRequest(
+            "What is my current updated Atlas security budget across all sessions?",
+            6,
+        )
+    )
+    low_confidence = planner.plan(
+        SearchRequest("我之前提过哪些权限控制能力？", 6)
+    )
+
+    assert "llm_refined" not in high_confidence.query_intent["route_reasons"]
+    assert "llm_refined" in low_confidence.query_intent["route_reasons"]
+    assert len(client.calls) == 1
+
+
+def test_planner_invalid_refinement_falls_back_to_deterministic_plan() -> None:
+    query = "我之前提过哪些权限控制能力？"
+    deterministic = ProductQueryPlanner(intent_refiner_mode="off").plan(
+        SearchRequest(query, 6)
+    )
+    client = StaticLLMClient(_refined_response(confidence=0.2))
+    planner = ProductQueryPlanner(intent_refiner=client, intent_refiner_mode="always")
+
+    plan = planner.plan(SearchRequest(query, 6))
+
+    assert plan == deterministic
+    assert planner.last_intent_telemetry["fallback"] is True
+    assert planner.last_intent_telemetry["reason"] == "invalid_or_low_confidence_output"
+
+
+def test_planner_model_failure_falls_back_without_exposing_error_in_plan() -> None:
+    class FailingClient:
+        def structured(self, prompt, schema, input):
+            raise RuntimeError("Bearer intent-secret https://intent.internal")
+
+    query = "我之前提过哪些权限控制能力？"
+    deterministic = ProductQueryPlanner(intent_refiner_mode="off").plan(
+        SearchRequest(query, 6)
+    )
+    planner = ProductQueryPlanner(
+        intent_refiner=FailingClient(),
+        intent_refiner_mode="always",
+    )
+
+    plan = planner.plan(SearchRequest(query, 6))
+
+    assert plan == deterministic
+    assert "intent-secret" not in repr(plan)
+    assert planner.last_intent_telemetry["fallback"] is True
+    assert planner.last_intent_telemetry["reason"] == "llm_call_failed"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-0.01, 1.01, float("nan"), float("inf"), float("-inf"), True, "0.7"],
+)
+def test_planner_rejects_invalid_refiner_min_confidence_before_model_use(
+    value: object,
+) -> None:
+    client = StaticLLMClient(_refined_response())
+
+    with pytest.raises(
+        ValueError,
+        match="intent_refiner_min_confidence must be a finite number between 0.0 and 1.0",
+    ):
+        ProductQueryPlanner(
+            intent_refiner=client,
+            intent_refiner_min_confidence=value,
+            intent_refiner_mode="always",
+        )
+
+    assert client.calls == []

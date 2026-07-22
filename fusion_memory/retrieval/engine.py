@@ -12,7 +12,10 @@ from fusion_memory.retrieval.context import (
     RetrievalResult,
     SearchRequest,
 )
-from fusion_memory.retrieval.tracing import sanitize_dimension
+from fusion_memory.retrieval.tracing import (
+    sanitize_dimension,
+    sanitize_query_intent_telemetry,
+)
 
 
 class RetrievalUnavailable(RuntimeError):
@@ -210,6 +213,11 @@ def sanitize_retrieval_trace(trace: dict[str, Any]) -> dict[str, Any]:
         sanitized["planner_fallback"] = (
             fallback if fallback == "invalid_plan" else sanitize_dimension(fallback)
         )
+    query_intent_telemetry = sanitize_query_intent_telemetry(
+        trace.get("query_intent_telemetry")
+    )
+    if query_intent_telemetry:
+        sanitized["query_intent_telemetry"] = query_intent_telemetry
     return sanitized
 
 
@@ -356,6 +364,10 @@ def build_product_retrieval_engine(
     config: Any,
     reranker: Any,
     planner: Any | None = None,
+    *,
+    query_intent_refiner: Any | None = None,
+    query_intent_refiner_min_confidence: float = 0.70,
+    query_intent_refiner_mode: str = "off",
 ) -> RetrievalEngine:
     from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
     from fusion_memory.retrieval.evidence_pack import ProductEvidencePackBuilder
@@ -377,7 +389,15 @@ def build_product_retrieval_engine(
             ChronologyProvider(repository),
         ]
     )
-    product_planner = planner if planner is not None else ProductQueryPlanner()
+    product_planner = (
+        planner
+        if planner is not None
+        else ProductQueryPlanner(
+            intent_refiner=query_intent_refiner,
+            intent_refiner_min_confidence=query_intent_refiner_min_confidence,
+            intent_refiner_mode=query_intent_refiner_mode,
+        )
+    )
     return ProductRetrievalEngine(
         product_planner,
         registry,

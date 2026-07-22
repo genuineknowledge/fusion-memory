@@ -3365,6 +3365,15 @@ def test_product_pack_observability_uses_only_product_schema(
             },
             "reranker_unavailable": True,
             "planner_fallback": "invalid_plan",
+            "query_intent_telemetry": {
+                "source": "llm_query_intent",
+                "prompt_version": "query-intent-refiner-v0",
+                "fallback": True,
+                "accepted": False,
+                "deterministic_confidence": 0.6,
+                "reason": "llm_call_failed",
+                "error": "Bearer private-secret",
+            },
             "benchmark": {"category": "abstention"},
             "rescue": {"preservation": "legacy"},
             "unknown": "injected",
@@ -3393,6 +3402,15 @@ def test_product_pack_observability_uses_only_product_schema(
             },
             "reranker_failure": "reranker_unavailable",
             "planner_fallback": "invalid_plan",
+            "query_intent_telemetry": {
+                "source": "llm_query_intent",
+                "prompt_version": "query-intent-refiner-v0",
+                "fallback": True,
+                "accepted": False,
+                "deterministic_confidence": 0.6,
+                "reason": "llm_call_failed",
+                "error": "Bearer private-secret",
+            },
             "query_type": "legacy",
             "unknown": {"benchmark": True},
         },
@@ -3431,6 +3449,14 @@ def test_product_pack_observability_uses_only_product_schema(
         "provider_counts": {"lexical": 1},
         "reranker_unavailable": True,
         "planner_fallback": "invalid_plan",
+        "query_intent_telemetry": {
+            "source": "llm_query_intent",
+            "prompt_version": "query-intent-refiner-v0",
+            "fallback": True,
+            "accepted": False,
+            "deterministic_confidence": 0.6,
+            "reason": "llm_call_failed",
+        },
         "intent": "factual",
         "query_intent": {
             "answer_shape": "short_answer",
@@ -3457,6 +3483,7 @@ def test_product_pack_observability_uses_only_product_schema(
             "stage_durations_ms",
             "reranker_failure",
             "planner_fallback",
+            "query_intent_telemetry",
         }
     assert pack.debug_trace == [
         {
@@ -3481,8 +3508,18 @@ def test_product_pack_observability_uses_only_product_schema(
             },
             "reranker_failure": "reranker_unavailable",
             "planner_fallback": "invalid_plan",
+            "query_intent_telemetry": {
+                "source": "llm_query_intent",
+                "prompt_version": "query-intent-refiner-v0",
+                "fallback": True,
+                "accepted": False,
+                "deterministic_confidence": 0.6,
+                "reason": "llm_call_failed",
+            },
         }
     ]
+    assert "private-secret" not in repr(pack.coverage)
+    assert "private-secret" not in repr(pack.debug_trace)
 
 
 def test_product_pack_drops_nested_values_from_product_observability(

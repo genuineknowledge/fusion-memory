@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
 
+from fusion_memory.core.llm import LLMClient
 from fusion_memory.core.text import ENTITY_STOPWORDS, extract_entities, tokenize
 from fusion_memory.retrieval.context import (
     OrderingMode,
@@ -10,7 +12,12 @@ from fusion_memory.retrieval.context import (
     ProviderRequest,
     SearchRequest,
 )
-from fusion_memory.retrieval.query_intent import QueryIntent, analyze_query_intent
+from fusion_memory.retrieval.query_intent import (
+    QueryIntent,
+    analyze_query_intent,
+    refine_query_intent_with_llm,
+    should_refine_query_intent,
+)
 
 
 _FALLBACK_QUERY_STOPWORDS = ENTITY_STOPWORDS | {
@@ -47,8 +54,39 @@ _FALLBACK_CJK_QUERY_FILLER_RE = re.compile(
 class ProductQueryPlanner:
     """Build product retrieval plans from deterministic query capabilities."""
 
+    def __init__(
+        self,
+        *,
+        intent_refiner: LLMClient | None = None,
+        intent_refiner_min_confidence: float = 0.70,
+        intent_refiner_mode: str = "off",
+    ) -> None:
+        if intent_refiner_mode not in {"off", "auto", "always"}:
+            raise ValueError("intent_refiner_mode must be off, auto, or always")
+        if (
+            type(intent_refiner_min_confidence) not in (int, float)
+            or not math.isfinite(float(intent_refiner_min_confidence))
+            or not 0.0 <= float(intent_refiner_min_confidence) <= 1.0
+        ):
+            raise ValueError(
+                "intent_refiner_min_confidence must be a finite number between 0.0 and 1.0"
+            )
+        self.intent_refiner = intent_refiner
+        self.intent_refiner_min_confidence = float(intent_refiner_min_confidence)
+        self.intent_refiner_mode = intent_refiner_mode
+        self.last_intent_telemetry: dict[str, object] | None = None
+
     def plan(self, request: SearchRequest) -> ProductQueryPlan:
-        intent = analyze_query_intent(request.query)
+        deterministic = analyze_query_intent(request.query)
+        intent = deterministic
+        self.last_intent_telemetry = None
+        if self.intent_refiner is not None and self._should_refine(request.query, deterministic):
+            intent, self.last_intent_telemetry = refine_query_intent_with_llm(
+                self.intent_refiner,
+                request.query,
+                deterministic,
+                min_confidence=self.intent_refiner_min_confidence,
+            )
         return ProductQueryPlan(
             intent=_intent_label(intent),
             provider_requests=_provider_requests(intent, request.limit),
@@ -59,6 +97,13 @@ class ProductQueryPlanner:
             use_reranker=request.mode == "balanced",
             query_intent=intent.to_dict(),
         )
+
+    def _should_refine(self, query: str, deterministic: QueryIntent) -> bool:
+        if self.intent_refiner_mode == "always":
+            return True
+        if self.intent_refiner_mode == "off":
+            return False
+        return should_refine_query_intent(query, deterministic)
 
     def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
         entities = tuple(extract_entities(request.query))

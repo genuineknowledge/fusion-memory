@@ -1,35 +1,93 @@
 from __future__ import annotations
 
-import unittest
+from fusion_memory.core.models import Candidate
+from fusion_memory.core.text import stable_hash
+from fusion_memory.retrieval.context import (
+    OrderingMode,
+    ProductQueryPlan,
+    ProviderKind,
+    ProviderRequest,
+    SearchRequest,
+)
+from fusion_memory.retrieval.engine import sanitize_retrieval_trace
+from fusion_memory.retrieval.providers.base import ProviderOutcome
+from fusion_memory.retrieval.tracing import build_retrieval_trace
 
-from fusion_memory.retrieval.retrieval_trace import RetrievalTraceBuilder
+
+def _plan() -> ProductQueryPlan:
+    return ProductQueryPlan(
+        intent="chronology",
+        provider_requests=(ProviderRequest(ProviderKind.CHRONOLOGY, 4),),
+        time_range=None,
+        entities=("Atlas",),
+        speaker="user",
+        ordering=OrderingMode.CHRONOLOGICAL,
+        use_reranker=False,
+    )
 
 
-class RetrievalTraceBuilderTests(unittest.TestCase):
-    def test_builds_pipeline_sections_without_raw_text(self) -> None:
-        builder = RetrievalTraceBuilder(query_type="event_ordering", mode="benchmark")
-        builder.query_understanding(language="en", intent="event_ordering", features=["temporal", "multi_condition"])
-        builder.candidate_recall(source_counts={"event_ordering_episode_recall": 3, "event_ordering_persisted_graph": 2})
-        builder.candidate_fusion(selected_sources=["event_ordering_episode_recall"], dropped_count=1)
-        builder.evidence_output(source_span_count=3, coverage_insufficient=False)
+def test_product_trace_has_stable_stages_without_query_or_candidate_text() -> None:
+    request = SearchRequest("private Atlas deployment sequence", 4)
+    candidate = Candidate(
+        id="event-1",
+        type="event",
+        text="private deployment details",
+        source="product_chronology",
+        scores={"chronology_rank": 1.0},
+        source_span_ids=["span-1"],
+        metadata={},
+    )
 
-        trace = builder.to_dict()
+    trace = build_retrieval_trace(
+        object(),
+        request,
+        _plan(),
+        (ProviderOutcome(ProviderKind.CHRONOLOGY, (candidate,), 1.25),),
+        [candidate],
+        filtered_count=2,
+    )
 
-        self.assertEqual(trace["query_understanding"]["intent"], "event_ordering")
-        self.assertEqual(trace["candidate_recall"]["source_counts"]["event_ordering_episode_recall"], 3)
-        self.assertEqual(trace["candidate_fusion"]["dropped_count"], 1)
-        self.assertFalse(trace["evidence_output"]["coverage_insufficient"])
-        self.assertNotIn("query", trace)
+    assert trace["stages"] == ["plan", "recall", "fusion", "selection"]
+    assert trace["providers"] == [
+        {
+            "kind": "chronology",
+            "count": 1,
+            "elapsed_ms": 1.25,
+            "failure_code": None,
+        }
+    ]
+    assert trace["filtered_count"] == 2
+    assert trace["selected_ids"] == [stable_hash("event-1")]
+    assert request.query not in repr(trace)
+    assert candidate.text not in repr(trace)
 
-    def test_pipeline_layers_expose_stable_boundaries(self) -> None:
-        builder = RetrievalTraceBuilder(query_type="event_ordering", mode="benchmark")
-        builder.query_understanding(language="zh", intent="event_ordering", features=["temporal"])
-        builder.candidate_recall(source_counts={"graph": 2})
-        builder.candidate_fusion(selected_sources=["graph"], dropped_count=0)
-        builder.evidence_output(source_span_count=2, coverage_insufficient=False)
 
-        layers = builder.pipeline_layers()
+def test_trace_sanitizer_keeps_only_allowed_query_intent_telemetry() -> None:
+    trace = sanitize_retrieval_trace(
+        {
+            "stages": ["plan", "recall", "private_stage"],
+            "mode": "fast",
+            "intent": "chronology",
+            "query": "private query",
+            "query_intent_telemetry": {
+                "source": "llm_query_intent",
+                "prompt_version": "query-intent-refiner-v0",
+                "fallback": True,
+                "accepted": False,
+                "deterministic_confidence": 0.6,
+                "reason": "llm_call_failed",
+                "error": "Bearer private-secret",
+            },
+        }
+    )
 
-        self.assertEqual(list(layers), ["QueryUnderstanding", "CandidateRecall", "CandidateFusion", "EvidencePackBuilder"])
-        self.assertEqual(layers["QueryUnderstanding"]["language"], "zh")
-        self.assertEqual(layers["CandidateRecall"]["source_counts"], {"graph": 2})
+    assert trace["stages"] == ["plan", "recall"]
+    assert trace["query_intent_telemetry"] == {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": True,
+        "accepted": False,
+        "deterministic_confidence": 0.6,
+        "reason": "llm_call_failed",
+    }
+    assert "private" not in repr(trace)

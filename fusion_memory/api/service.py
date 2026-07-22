@@ -105,6 +105,9 @@ class MemoryService:
                 self.store,
                 self.config,
                 self.reranker,
+                query_intent_refiner=query_intent_refiner,
+                query_intent_refiner_min_confidence=query_intent_refiner_min_confidence,
+                query_intent_refiner_mode=query_intent_refiner_mode,
             )
         )
         self.gate = EncodingGate(self.config)

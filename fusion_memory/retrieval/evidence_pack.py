@@ -16,7 +16,10 @@ from fusion_memory.retrieval.context import (
     SearchRequest,
 )
 from fusion_memory.retrieval.ports import MemorySearchRepository
-from fusion_memory.retrieval.tracing import sanitize_dimension
+from fusion_memory.retrieval.tracing import (
+    sanitize_dimension,
+    sanitize_query_intent_telemetry,
+)
 
 
 _PRODUCT_COVERAGE_FIELDS = (
@@ -25,6 +28,7 @@ _PRODUCT_COVERAGE_FIELDS = (
     "provider_counts",
     "reranker_unavailable",
     "planner_fallback",
+    "query_intent_telemetry",
 )
 _PRODUCT_PROVIDER_KINDS = {provider.value for provider in ProviderKind}
 _PRODUCT_STAGES = {"plan", "recall", "fusion", "selection"}
@@ -530,6 +534,10 @@ def _product_coverage(
                 continue
         elif field == "planner_fallback" and not isinstance(value, str):
             continue
+        elif field == "query_intent_telemetry":
+            value = sanitize_query_intent_telemetry(value)
+            if not value:
+                continue
         coverage[field] = value
     coverage.update(
         intent=sanitize_dimension(result.plan.intent),
@@ -571,6 +579,11 @@ def _product_trace(value: Any) -> list[dict[str, Any]]:
     for field in ("reranker_failure", "planner_fallback"):
         if isinstance(value.get(field), str):
             trace[field] = value[field]
+    query_intent_telemetry = sanitize_query_intent_telemetry(
+        value.get("query_intent_telemetry")
+    )
+    if query_intent_telemetry:
+        trace["query_intent_telemetry"] = query_intent_telemetry
     return [trace] if trace else []
 
 

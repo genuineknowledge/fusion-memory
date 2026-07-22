@@ -63,6 +63,44 @@ class RuntimeRetrievalFlagTests(unittest.TestCase):
             memory_service_from_env()
 
         self.assertEqual(captured_kwargs["query_intent_refiner_mode"], "off")
+        self.assertIsNone(captured_kwargs["query_intent_refiner"])
+
+    def test_query_intent_environment_is_passed_to_memory_service(self) -> None:
+        captured_kwargs: dict[str, object] = {}
+
+        class DummyMemoryService:
+            def __init__(self, *args, **kwargs) -> None:
+                captured_kwargs.update(kwargs)
+
+        with patch.dict(
+            os.environ,
+            {
+                "FUSION_MEMORY_QUERY_INTENT_MODE": " ALWAYS ",
+                "FUSION_MEMORY_QUERY_INTENT_ENDPOINT": "http://intent/v1/chat/completions",
+                "FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE": "0.84",
+            },
+            clear=True,
+        ), patch("fusion_memory.core.runtime_config.MemoryService", DummyMemoryService):
+            memory_service_from_env()
+
+        self.assertEqual(captured_kwargs["query_intent_refiner_mode"], "always")
+        self.assertEqual(captured_kwargs["query_intent_refiner_min_confidence"], 0.84)
+        self.assertIsNotNone(captured_kwargs["query_intent_refiner"])
+
+    def test_invalid_query_intent_min_confidence_fails_during_service_construction(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "FUSION_MEMORY_QUERY_INTENT_MODE": "off",
+                "FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE": "nan",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "intent_refiner_min_confidence must be a finite number between 0.0 and 1.0",
+            ):
+                memory_service_from_env()
 
     def test_memory_service_from_env_raises_for_invalid_selector(self) -> None:
         with patch.dict(os.environ, {"FUSION_MEMORY_EVENT_ORDERING_SELECTOR": "graph"}, clear=True):

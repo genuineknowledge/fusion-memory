@@ -301,6 +301,42 @@ def test_trace_never_contains_query_memory_text_or_sensitive_configuration(
     ]
 
 
+def test_engine_exposes_only_sanitized_query_intent_telemetry(
+    engine_fixture: EngineFixture,
+) -> None:
+    planner = StaticPlanner(engine_fixture.plan)
+    planner.last_intent_telemetry = {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": True,
+        "accepted": False,
+        "deterministic_confidence": 0.5,
+        "reason": "llm_call_failed",
+        "error": "Bearer secret-token https://intent.internal/v1",
+        "raw_query": "private retrieval query",
+    }
+    engine = ProductRetrievalEngine(
+        planner,
+        engine_fixture.engine.registry,
+        pack_builder=PACK_BUILDER,
+    )
+
+    result = engine.search(engine_fixture.context, engine_fixture.request)
+
+    expected = {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": True,
+        "accepted": False,
+        "deterministic_confidence": 0.5,
+        "reason": "llm_call_failed",
+    }
+    assert result.coverage["query_intent_telemetry"] == expected
+    assert result.trace["query_intent_telemetry"] == expected
+    assert "secret-token" not in repr(result)
+    assert "private retrieval query" not in repr(result.trace)
+
+
 def test_engine_sanitizes_caller_supplied_intent_in_coverage_and_trace(
     engine_fixture: EngineFixture,
 ) -> None:

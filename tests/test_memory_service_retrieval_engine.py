@@ -6,6 +6,7 @@ import pytest
 
 from fusion_memory import AuthorizationError, MemoryService, Scope
 from fusion_memory.core.config import MemoryConfig
+from fusion_memory.core.llm import StaticLLMClient
 from fusion_memory.core.models import Candidate, EvidencePack
 from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.context import (
@@ -196,6 +197,80 @@ def test_memory_service_uses_product_engine_by_default() -> None:
         assert service.retrieval_engine.__class__.__name__ == "ProductRetrievalEngine"
     finally:
         service.close()
+
+
+def test_memory_service_wires_refiner_into_default_engine_search() -> None:
+    client = StaticLLMClient(
+        {
+            "intent": {
+                "language": "zh",
+                "answer_shape": "unordered_list",
+                "evidence_scope": "multi_session",
+                "speaker_scope": "user",
+                "target_terms": ["权限控制"],
+                "object_types": ["security_feature"],
+                "temporal": {
+                    "requires_time": False,
+                    "requires_order": False,
+                    "requires_duration": False,
+                    "order_direction": "unknown",
+                    "endpoint_roles": [],
+                    "time_expressions": [],
+                },
+                "aggregation": {
+                    "operation": "count_distinct",
+                    "distinct": True,
+                    "target_terms": ["security_feature"],
+                    "unit_terms": [],
+                },
+                "needs_current_state": False,
+                "needs_conflict_check": False,
+                "confidence": 0.88,
+                "route_reasons": ["llm_multilingual_normalization"],
+            }
+        }
+    )
+    service = MemoryService(
+        query_intent_refiner=client,
+        query_intent_refiner_min_confidence=0.8,
+        query_intent_refiner_mode="always",
+    )
+    scope = Scope(user_id="user-a")
+    try:
+        result = service.search("我之前提过哪些权限控制能力？", scope)
+        trace = service.store.get_trace(result.trace_id, scope)
+
+        assert len(client.calls) == 1
+        assert service.retrieval_engine.planner.intent_refiner is client
+        assert result.coverage["query_intent_telemetry"]["accepted"] is True
+        assert trace["query_intent_telemetry"] == {
+            "source": "llm_query_intent",
+            "prompt_version": "query-intent-refiner-v0",
+            "fallback": False,
+            "accepted": True,
+            "deterministic_confidence": 0.73,
+            "confidence": 0.88,
+        }
+    finally:
+        service.close()
+
+
+def test_refiner_options_do_not_modify_injected_retrieval_engine(
+    fake_engine: FakeEngine,
+    memory_store: RecordingStore,
+) -> None:
+    client = StaticLLMClient({"intent": {}})
+    service = MemoryService(
+        store=memory_store,
+        retrieval_engine=fake_engine,
+        query_intent_refiner=client,
+        query_intent_refiner_mode="always",
+    )
+
+    service.search("Atlas database", Scope(user_id="user-a"))
+
+    assert service.retrieval_engine is fake_engine
+    assert client.calls == []
 
 
 def test_product_engine_factory_wires_all_providers_pack_builder_and_falsey_planner(

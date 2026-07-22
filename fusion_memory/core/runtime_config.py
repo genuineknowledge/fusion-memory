@@ -62,7 +62,9 @@ def memory_service_from_env(
         async_extractor=_build_async_extractor(),
         query_intent_refiner=_build_query_intent_refiner(),
         query_intent_refiner_min_confidence=_float_env("FUSION_MEMORY_QUERY_INTENT_MIN_CONFIDENCE", 0.70),
-        query_intent_refiner_mode=os.getenv("FUSION_MEMORY_QUERY_INTENT_MODE", "off"),
+        query_intent_refiner_mode=os.getenv(
+            "FUSION_MEMORY_QUERY_INTENT_MODE", "off"
+        ).strip().lower(),
         retrieval_flags=build_runtime_retrieval_flags(),
     )
 
