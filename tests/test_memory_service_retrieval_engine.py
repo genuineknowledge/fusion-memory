@@ -384,22 +384,33 @@ def test_injected_engine_rejects_non_product_options(
         ),
     ],
 )
+@pytest.mark.parametrize("operation", ["search", "answer_context"])
 def test_injected_engine_validation_errors_are_stable_unchained_and_non_reflective(
     fake_engine: FakeEngine,
     memory_store: RecordingStore,
     options: dict[str, object],
     message: str,
     secret: str,
+    operation: str,
 ) -> None:
-    service = MemoryService(store=memory_store, retrieval_engine=fake_engine)
+    authorizer = RecordingAuthorizer({"memory.search", "memory.answer_context"})
+    service = MemoryService(
+        store=memory_store,
+        retrieval_engine=fake_engine,
+        authorizer=authorizer,
+    )
 
     with pytest.raises(ValueError) as error:
-        service.search("Atlas database", Scope(user_id="user-a"), options)
+        if operation == "search":
+            service.search("Atlas database", Scope(user_id="user-a"), options)
+        else:
+            service.answer_context("Atlas database", Scope(user_id="user-a"), options)
 
     assert str(error.value) == message
     assert secret not in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+    assert authorizer.calls == []
     assert fake_engine.search_calls == []
 
 

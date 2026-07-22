@@ -373,7 +373,12 @@ class MemoryService:
 
     def search(self, query: str, scope: Scope, options: dict[str, Any] | None = None) -> SearchResult:
         if self.retrieval_engine is not None:
-            _, _, result, trace_id = self._run_retrieval_engine(query, scope, options)
+            prepared_options = self._prepare_retrieval_engine_options(options)
+            _, _, result, trace_id = self._run_retrieval_engine(
+                query,
+                scope,
+                prepared_options,
+            )
             return SearchResult(
                 candidates=list(result.candidates),
                 trace_id=trace_id,
@@ -382,33 +387,11 @@ class MemoryService:
         with collect_rule_hits() as rule_hits:
             return self._search_with_rule_hits(query, scope, options, rule_hits)
 
-    def _run_retrieval_engine(
+    def _prepare_retrieval_engine_options(
         self,
-        query: str,
-        scope: Scope,
         options: dict[str, Any] | None,
-    ) -> tuple[RetrievalContext, SearchRequest, RetrievalResult, str]:
-        if self.retrieval_engine is None:
-            raise RuntimeError("retrieval engine is not configured")
+    ) -> dict[str, Any]:
         options = dict(options or {})
-        scope.validate_for_read()
-        allow_cross_session = bool(options.get("allow_cross_session", False))
-        include_session = bool(scope.session_id and not allow_cross_session)
-        mode = options.get("mode", "fast")
-        limit = options.get("limit", self.config.retrieval_output_n)
-        self._authorize(
-            "memory.search",
-            scope,
-            {
-                "query": query,
-                "allow_cross_session": allow_cross_session,
-                "include_session": include_session,
-                "mode": mode,
-                "limit": limit,
-                "enabled_sources": options.get("enabled_sources"),
-            },
-        )
-
         supported_options = {
             "allow_cross_session",
             "deadline",
@@ -422,6 +405,8 @@ class MemoryService:
         }
         if any(option not in supported_options for option in options):
             raise ValueError("unsupported retrieval options")
+
+        mode = options.get("mode", "fast")
         if type(mode) is not str or mode not in {"fast", "balanced"}:
             raise ValueError("mode must be fast or balanced")
 
@@ -443,6 +428,23 @@ class MemoryService:
             "views": {ProviderKind.LEXICAL},
             "profiles": {ProviderKind.LEXICAL, ProviderKind.ENTITY},
         }
+        enabled_sources_option = options.get("enabled_sources")
+        if enabled_sources_option is None:
+            source_values: list[str] | None = None
+        elif type(enabled_sources_option) is str:
+            source_values = [enabled_sources_option]
+        elif isinstance(enabled_sources_option, (list, tuple, set, frozenset)):
+            source_values = list(enabled_sources_option)
+        else:
+            source_values = None
+        if source_values is None and enabled_sources_option is not None:
+            raise ValueError("enabled_sources contains an unsupported source family")
+        if source_values is not None and any(
+            type(value) is not str or value not in source_provider_kinds
+            for value in source_values
+        ):
+            raise ValueError("enabled_sources contains an unsupported source family")
+
         enabled_providers_option = options.get("enabled_providers")
         if enabled_providers_option is not None:
             if (
@@ -469,27 +471,66 @@ class MemoryService:
                     raise ValueError("enabled_providers contains an unsupported provider")
                 parsed_providers.add(provider)
             enabled_providers = frozenset(parsed_providers)
+        elif source_values is None:
+            enabled_providers = None
         else:
-            enabled_sources_option = options.get("enabled_sources")
-            if enabled_sources_option is None:
-                enabled_providers = None
-            else:
-                if type(enabled_sources_option) is str:
-                    source_values = [enabled_sources_option]
-                elif isinstance(enabled_sources_option, (list, tuple, set, frozenset)):
-                    source_values = list(enabled_sources_option)
-                else:
-                    source_values = None
-                if source_values is None or any(
-                    type(value) is not str or value not in source_provider_kinds
-                    for value in source_values
-                ):
-                    raise ValueError("enabled_sources contains an unsupported source family")
-                enabled_providers = frozenset(
-                    provider
-                    for source_name in source_values
-                    for provider in source_provider_kinds[source_name]
-                )
+            enabled_providers = frozenset(
+                provider
+                for source_name in source_values
+                for provider in source_provider_kinds[source_name]
+            )
+
+        limit = options.get("limit", self.config.retrieval_output_n)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be positive")
+        token_budget = options.get("token_budget")
+        if (
+            token_budget is not None
+            and (
+                not isinstance(token_budget, int)
+                or isinstance(token_budget, bool)
+                or token_budget < 0
+            )
+        ):
+            raise ValueError("token_budget must be a non-negative integer")
+
+        return {
+            "allow_cross_session": bool(options.get("allow_cross_session", False)),
+            "deadline": options.get("deadline"),
+            "enabled_providers": enabled_providers,
+            "enabled_sources": tuple(source_values) if source_values is not None else None,
+            "include_trace": bool(options.get("include_trace", True)),
+            "limit": int(limit),
+            "mode": mode,
+            "time_range": options.get("time_range"),
+            "token_budget": int(token_budget) if token_budget is not None else None,
+        }
+
+    def _run_retrieval_engine(
+        self,
+        query: str,
+        scope: Scope,
+        options: dict[str, Any],
+    ) -> tuple[RetrievalContext, SearchRequest, RetrievalResult, str]:
+        if self.retrieval_engine is None:
+            raise RuntimeError("retrieval engine is not configured")
+        scope.validate_for_read()
+        allow_cross_session = options["allow_cross_session"]
+        include_session = bool(scope.session_id and not allow_cross_session)
+        mode = options["mode"]
+        limit = options["limit"]
+        self._authorize(
+            "memory.search",
+            scope,
+            {
+                "query": query,
+                "allow_cross_session": allow_cross_session,
+                "include_session": include_session,
+                "mode": mode,
+                "limit": limit,
+                "enabled_sources": options.get("enabled_sources"),
+            },
+        )
 
         now = datetime.now(timezone.utc)
         trace_id = new_id("trace")
@@ -507,7 +548,7 @@ class MemoryService:
             mode=mode,
             time_range=options.get("time_range"),
             include_trace=bool(options.get("include_trace", True)),
-            enabled_providers=enabled_providers,
+            enabled_providers=options["enabled_providers"],
         )
         model_call_marks = self._model_call_marks()
         result = self.retrieval_engine.search(context, request)
@@ -822,7 +863,7 @@ class MemoryService:
 
     def answer_context(self, query: str, scope: Scope, budget: dict[str, Any] | None = None) -> EvidencePack:
         if self.retrieval_engine is not None:
-            product_budget = dict(budget or {})
+            product_budget = self._prepare_retrieval_engine_options(budget)
             token_budget = (
                 product_budget.get("token_budget")
                 or self.config.answer_context_budget_tokens
@@ -833,11 +874,9 @@ class MemoryService:
                 scope,
                 {
                     "query": query,
-                    "allow_cross_session": bool(
-                        product_budget.get("allow_cross_session", False)
-                    ),
-                    "limit": product_budget.get("limit", self.config.retrieval_output_n),
-                    "mode": product_budget.get("mode", "fast"),
+                    "allow_cross_session": product_budget["allow_cross_session"],
+                    "limit": product_budget["limit"],
+                    "mode": product_budget["mode"],
                     "token_budget": token_budget,
                 },
             )
