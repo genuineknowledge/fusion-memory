@@ -82,11 +82,6 @@ def test_product_retrieval_uses_only_canonical_module_paths() -> None:
     from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
     from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
-    assert ProductQueryPlanner
-    assert ProductEvidencePackBuilder
-    assert CandidateProvider
-    assert ProviderContext
-    assert ProductProviderRegistry
     assert all(not path.exists() for path in TRANSITIONAL_PRODUCT_MODULES)
 
 

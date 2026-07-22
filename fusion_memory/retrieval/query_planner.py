@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from typing import Any
 
 from fusion_memory.core.llm import LLMClient
 from fusion_memory.core.text import ENTITY_STOPWORDS, extract_entities, tokenize
@@ -74,28 +75,37 @@ class ProductQueryPlanner:
         self.intent_refiner = intent_refiner
         self.intent_refiner_min_confidence = float(intent_refiner_min_confidence)
         self.intent_refiner_mode = intent_refiner_mode
-        self.last_intent_telemetry: dict[str, object] | None = None
 
     def plan(self, request: SearchRequest) -> ProductQueryPlan:
+        plan, _ = self.plan_with_telemetry(request)
+        return plan
+
+    def plan_with_telemetry(
+        self,
+        request: SearchRequest,
+    ) -> tuple[ProductQueryPlan, dict[str, Any]]:
         deterministic = analyze_query_intent(request.query)
         intent = deterministic
-        self.last_intent_telemetry = None
+        intent_telemetry: dict[str, Any] = {}
         if self.intent_refiner is not None and self._should_refine(request.query, deterministic):
-            intent, self.last_intent_telemetry = refine_query_intent_with_llm(
+            intent, intent_telemetry = refine_query_intent_with_llm(
                 self.intent_refiner,
                 request.query,
                 deterministic,
                 min_confidence=self.intent_refiner_min_confidence,
             )
-        return ProductQueryPlan(
-            intent=_intent_label(intent),
-            provider_requests=_provider_requests(intent, request.limit),
-            time_range=request.time_range,
-            entities=tuple(intent.entities),
-            speaker=None if intent.speaker_scope == "any" else intent.speaker_scope,
-            ordering=_ordering(intent),
-            use_reranker=request.mode == "balanced",
-            query_intent=intent.to_dict(),
+        return (
+            ProductQueryPlan(
+                intent=_intent_label(intent),
+                provider_requests=_provider_requests(intent, request.limit),
+                time_range=request.time_range,
+                entities=tuple(intent.entities),
+                speaker=None if intent.speaker_scope == "any" else intent.speaker_scope,
+                ordering=_ordering(intent),
+                use_reranker=request.mode == "balanced",
+                query_intent=intent.to_dict(),
+            ),
+            intent_telemetry,
         )
 
     def _should_refine(self, query: str, deterministic: QueryIntent) -> bool:

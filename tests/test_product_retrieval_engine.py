@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Event
 
 import pytest
 
@@ -58,6 +60,21 @@ class StaticPlanner:
 
     def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
         return ProductQueryPlanner().safe_default(request)
+
+
+class RequestLocalTelemetryPlanner(StaticPlanner):
+    def __init__(self, plan: object, telemetry: dict[str, object]) -> None:
+        super().__init__(plan)
+        self.telemetry = telemetry
+
+    def plan_with_telemetry(
+        self,
+        request: SearchRequest,
+    ) -> tuple[object, dict[str, object]]:
+        return self.planned, self.telemetry
+
+    def plan(self, request: SearchRequest) -> object:
+        raise AssertionError("engine must prefer request-local planner telemetry")
 
 
 class RaisingPlanner:
@@ -283,6 +300,53 @@ def test_engine_uses_safe_default_for_invalid_plan(engine_fixture: EngineFixture
     assert result.coverage["planner_fallback"] == "invalid_plan"
 
 
+def test_engine_supports_custom_planner_with_only_plan_and_safe_default(
+    engine_fixture: EngineFixture,
+) -> None:
+    planner = StaticPlanner(engine_fixture.plan)
+    engine = ProductRetrievalEngine(
+        planner,
+        engine_fixture.engine.registry,
+        pack_builder=PACK_BUILDER,
+    )
+
+    result = engine.search(engine_fixture.context, engine_fixture.request)
+
+    assert result.plan is engine_fixture.plan
+    assert "query_intent_telemetry" not in result.coverage
+    assert "query_intent_telemetry" not in result.trace
+
+
+def test_engine_explicit_plan_bypasses_all_planner_apis(
+    engine_fixture: EngineFixture,
+) -> None:
+    class ExplodingPlanner:
+        def plan_with_telemetry(self, request: SearchRequest) -> object:
+            raise AssertionError("explicit plan must bypass plan_with_telemetry")
+
+        def plan(self, request: SearchRequest) -> object:
+            raise AssertionError("explicit plan must bypass plan")
+
+        def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+            raise AssertionError("explicit plan must bypass safe_default")
+
+    engine = ProductRetrievalEngine(
+        ExplodingPlanner(),
+        engine_fixture.engine.registry,
+        pack_builder=PACK_BUILDER,
+    )
+
+    result = engine.search(
+        engine_fixture.context,
+        engine_fixture.request,
+        plan=engine_fixture.plan,
+    )
+
+    assert result.plan is engine_fixture.plan
+    assert "query_intent_telemetry" not in result.coverage
+    assert "query_intent_telemetry" not in result.trace
+
+
 def test_trace_never_contains_query_memory_text_or_sensitive_configuration(
     engine_fixture: EngineFixture,
 ) -> None:
@@ -304,17 +368,19 @@ def test_trace_never_contains_query_memory_text_or_sensitive_configuration(
 def test_engine_exposes_only_sanitized_query_intent_telemetry(
     engine_fixture: EngineFixture,
 ) -> None:
-    planner = StaticPlanner(engine_fixture.plan)
-    planner.last_intent_telemetry = {
-        "source": "llm_query_intent",
-        "prompt_version": "query-intent-refiner-v0",
-        "fallback": True,
-        "accepted": False,
-        "deterministic_confidence": 0.5,
-        "reason": "llm_call_failed",
-        "error": "Bearer secret-token https://intent.internal/v1",
-        "raw_query": "private retrieval query",
-    }
+    planner = RequestLocalTelemetryPlanner(
+        engine_fixture.plan,
+        {
+            "source": "llm_query_intent",
+            "prompt_version": "query-intent-refiner-v0",
+            "fallback": True,
+            "accepted": False,
+            "deterministic_confidence": 0.5,
+            "reason": "llm_call_failed",
+            "error": "Bearer secret-token https://intent.internal/v1",
+            "raw_query": "private retrieval query",
+        },
+    )
     engine = ProductRetrievalEngine(
         planner,
         engine_fixture.engine.registry,
@@ -335,6 +401,100 @@ def test_engine_exposes_only_sanitized_query_intent_telemetry(
     assert result.trace["query_intent_telemetry"] == expected
     assert "secret-token" not in repr(result)
     assert "private retrieval query" not in repr(result.trace)
+
+
+def test_concurrent_searches_keep_accepted_and_fallback_telemetry_request_local(
+    engine_fixture: EngineFixture,
+) -> None:
+    accepted_ready = Event()
+    fallback_ready = Event()
+    accepted_recall_started = Event()
+
+    accepted_telemetry = {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": False,
+        "accepted": True,
+        "deterministic_confidence": 0.5,
+        "confidence": 0.91,
+    }
+    fallback_telemetry = {
+        "source": "llm_query_intent",
+        "prompt_version": "query-intent-refiner-v0",
+        "fallback": True,
+        "accepted": False,
+        "deterministic_confidence": 0.5,
+        "reason": "invalid_or_low_confidence_output",
+    }
+
+    class InterleavingPlanner:
+        def __init__(self) -> None:
+            self.last_intent_telemetry: dict[str, object] | None = None
+
+        def plan_with_telemetry(
+            self,
+            request: SearchRequest,
+        ) -> tuple[object, dict[str, object]]:
+            if request.query == "accepted request":
+                telemetry = accepted_telemetry
+                self.last_intent_telemetry = telemetry
+                accepted_ready.set()
+                assert fallback_ready.wait(timeout=5)
+                return engine_fixture.plan, telemetry
+
+            assert accepted_ready.wait(timeout=5)
+            telemetry = fallback_telemetry
+            self.last_intent_telemetry = telemetry
+            fallback_ready.set()
+            assert accepted_recall_started.wait(timeout=5)
+            return object(), telemetry
+
+        def plan(self, request: SearchRequest) -> object:
+            planned, _ = self.plan_with_telemetry(request)
+            return planned
+
+        def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+            return engine_fixture.plan
+
+    planner = InterleavingPlanner()
+
+    class InterleavingRegistry(StaticRegistry):
+        def run(
+            self,
+            context: RetrievalContext,
+            request: SearchRequest,
+            plan: ProductQueryPlan,
+        ) -> tuple[ProviderOutcome, ...]:
+            if request.query == "accepted request":
+                accepted_recall_started.set()
+            return super().run(context, request, plan)
+
+    registry = InterleavingRegistry(engine_fixture.engine.registry.outcomes)
+    engine = ProductRetrievalEngine(planner, registry, pack_builder=PACK_BUILDER)
+    accepted_request = SearchRequest("accepted request", engine_fixture.request.limit)
+    fallback_request = SearchRequest("fallback request", engine_fixture.request.limit)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        accepted_future = executor.submit(
+            engine.search,
+            engine_fixture.context,
+            accepted_request,
+        )
+        fallback_future = executor.submit(
+            engine.search,
+            engine_fixture.context,
+            fallback_request,
+        )
+        accepted_result = accepted_future.result(timeout=10)
+        fallback_result = fallback_future.result(timeout=10)
+
+    assert accepted_result.coverage["query_intent_telemetry"] == accepted_telemetry
+    assert accepted_result.trace["query_intent_telemetry"] == accepted_telemetry
+    assert "planner_fallback" not in accepted_result.coverage
+    assert fallback_result.coverage["query_intent_telemetry"] == fallback_telemetry
+    assert fallback_result.trace["query_intent_telemetry"] == fallback_telemetry
+    assert fallback_result.coverage["planner_fallback"] == "invalid_plan"
+    assert fallback_result.trace["planner_fallback"] == "invalid_plan"
 
 
 def test_engine_sanitizes_caller_supplied_intent_in_coverage_and_trace(

@@ -1,7 +1,12 @@
 import pytest
 
 from fusion_memory.core.llm import StaticLLMClient
-from fusion_memory.retrieval.context import OrderingMode, ProviderKind, SearchRequest
+from fusion_memory.retrieval.context import (
+    OrderingMode,
+    ProductQueryPlan,
+    ProviderKind,
+    SearchRequest,
+)
 from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
 
@@ -115,24 +120,30 @@ def test_planner_default_and_off_modes_do_not_call_configured_refiner() -> None:
         intent_refiner_mode="off",
     )
 
-    default_plan = default_planner.plan(
+    default_plan, default_telemetry = default_planner.plan_with_telemetry(
         SearchRequest("我之前提过哪些权限控制能力？", 6)
     )
-    off_plan = off_planner.plan(SearchRequest("我之前提过哪些权限控制能力？", 6))
+    off_plan, off_telemetry = off_planner.plan_with_telemetry(
+        SearchRequest("我之前提过哪些权限控制能力？", 6)
+    )
 
     assert default_client.calls == []
     assert off_client.calls == []
     assert "llm_refined" not in default_plan.query_intent["route_reasons"]
     assert "llm_refined" not in off_plan.query_intent["route_reasons"]
-    assert default_planner.last_intent_telemetry is None
-    assert off_planner.last_intent_telemetry is None
+    assert default_telemetry == {}
+    assert off_telemetry == {}
+    assert not hasattr(default_planner, "last_intent_telemetry")
+    assert not hasattr(off_planner, "last_intent_telemetry")
 
 
 def test_planner_always_mode_uses_strict_refinement() -> None:
     client = StaticLLMClient(_refined_response())
     planner = ProductQueryPlanner(intent_refiner=client, intent_refiner_mode="always")
 
-    plan = planner.plan(SearchRequest("我之前提过哪些权限控制能力？", 6))
+    plan, telemetry = planner.plan_with_telemetry(
+        SearchRequest("我之前提过哪些权限控制能力？", 6)
+    )
 
     assert len(client.calls) == 1
     assert plan.query_intent["answer_shape"] == "unordered_list"
@@ -154,7 +165,7 @@ def test_planner_always_mode_uses_strict_refinement() -> None:
         "confidence",
         "route_reasons",
     }
-    assert planner.last_intent_telemetry == {
+    assert telemetry == {
         "source": "llm_query_intent",
         "prompt_version": "query-intent-refiner-v0",
         "fallback": False,
@@ -162,6 +173,10 @@ def test_planner_always_mode_uses_strict_refinement() -> None:
         "deterministic_confidence": 0.73,
         "confidence": 0.88,
     }
+    assert not hasattr(planner, "last_intent_telemetry")
+
+    compatible_plan = planner.plan(SearchRequest("我之前提过哪些权限控制能力？", 6))
+    assert isinstance(compatible_plan, ProductQueryPlan)
 
 
 def test_planner_auto_mode_follows_deterministic_confidence_predicate() -> None:
@@ -191,11 +206,11 @@ def test_planner_invalid_refinement_falls_back_to_deterministic_plan() -> None:
     client = StaticLLMClient(_refined_response(confidence=0.2))
     planner = ProductQueryPlanner(intent_refiner=client, intent_refiner_mode="always")
 
-    plan = planner.plan(SearchRequest(query, 6))
+    plan, telemetry = planner.plan_with_telemetry(SearchRequest(query, 6))
 
     assert plan == deterministic
-    assert planner.last_intent_telemetry["fallback"] is True
-    assert planner.last_intent_telemetry["reason"] == "invalid_or_low_confidence_output"
+    assert telemetry["fallback"] is True
+    assert telemetry["reason"] == "invalid_or_low_confidence_output"
 
 
 def test_planner_model_failure_falls_back_without_exposing_error_in_plan() -> None:
@@ -212,12 +227,12 @@ def test_planner_model_failure_falls_back_without_exposing_error_in_plan() -> No
         intent_refiner_mode="always",
     )
 
-    plan = planner.plan(SearchRequest(query, 6))
+    plan, telemetry = planner.plan_with_telemetry(SearchRequest(query, 6))
 
     assert plan == deterministic
     assert "intent-secret" not in repr(plan)
-    assert planner.last_intent_telemetry["fallback"] is True
-    assert planner.last_intent_telemetry["reason"] == "llm_call_failed"
+    assert telemetry["fallback"] is True
+    assert telemetry["reason"] == "llm_call_failed"
 
 
 @pytest.mark.parametrize(

@@ -80,14 +80,18 @@ class ProductRetrievalEngine:
         plan: ProductQueryPlan | None = None,
     ) -> RetrievalResult:
         plan_started = perf_counter()
-        planned = plan if plan is not None else self.planner.plan(request)
-        intent_telemetry = (
-            {}
-            if plan is not None
-            else sanitize_query_intent_telemetry(
-                getattr(self.planner, "last_intent_telemetry", None)
-            )
-        )
+        intent_telemetry: dict[str, Any] = {}
+        if plan is not None:
+            planned: object = plan
+        else:
+            plan_with_telemetry = getattr(self.planner, "plan_with_telemetry", None)
+            if callable(plan_with_telemetry):
+                planned, raw_intent_telemetry = plan_with_telemetry(request)
+                intent_telemetry = sanitize_query_intent_telemetry(
+                    raw_intent_telemetry
+                )
+            else:
+                planned = self.planner.plan(request)
         plan_elapsed_ms = (perf_counter() - plan_started) * 1000
         if validate_product_plan(planned):
             return self._search_with_plan(
