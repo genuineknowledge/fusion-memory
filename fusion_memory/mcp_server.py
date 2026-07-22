@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
 import anyio
+import uvicorn
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
@@ -168,7 +169,7 @@ def run_mcp_server(
     runtime, pool = runtime_from_env()
     token_store = PostgresTokenStore(_pooled_connection_factory(pool), pepper=pepper)
     verifier = FusionMemoryTokenVerifier(token_store, pepper=pepper)
-    server = create_mcp_server(
+    app = create_mcp_app(
         runtime=runtime,
         token_verifier=verifier,
         host=host,
@@ -176,7 +177,7 @@ def run_mcp_server(
         path=path,
         public_url=public_url,
     )
-    server.run(transport="streamable-http")
+    uvicorn.run(app, host=host, port=port)
 
 
 async def _call_tool(runtime: Any, required_scopes: set[str], **payload: Any) -> dict[str, Any]:

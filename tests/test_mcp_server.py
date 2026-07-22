@@ -14,7 +14,14 @@ from mcp.server.fastmcp import Context
 
 from fusion_memory.core.models import Scope
 from fusion_memory.mcp_runtime import FusionMemoryRuntime, runtime_from_env
-from fusion_memory.mcp_server import _health_supervisor, _pooled_connection_factory, create_mcp_app, create_mcp_server, run_mcp_server
+from fusion_memory.mcp_server import (
+    RequestProvenanceMiddleware,
+    _health_supervisor,
+    _pooled_connection_factory,
+    create_mcp_app,
+    create_mcp_server,
+    run_mcp_server,
+)
 from fusion_memory.storage.postgres_store import PostgresMemoryStore
 from fusion_memory.storage.token_store import PostgresTokenStore
 
@@ -496,6 +503,74 @@ def test_mcp_server_checks_pepper_before_constructing_runtime(monkeypatch):
         run_mcp_server()
 
     assert constructed is False
+
+
+@pytest.mark.anyio
+async def test_run_mcp_server_serves_provenance_wrapped_app(monkeypatch):
+    runtime = FakeMemoryRuntime()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("FUSION_MEMORY_TOKEN_PEPPER", "test-pepper")
+    monkeypatch.setattr("fusion_memory.mcp_server.runtime_from_env", lambda: (runtime, object()))
+    monkeypatch.setattr("fusion_memory.mcp_server.PostgresTokenStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        "fusion_memory.mcp_server.FusionMemoryTokenVerifier",
+        lambda *args, **kwargs: FakeTokenVerifier(),
+    )
+
+    def reject_direct_fastmcp_run(*args, **kwargs):
+        raise AssertionError("run_mcp_server must serve the middleware-wrapped ASGI app")
+
+    def capture_uvicorn_run(app, *, host, port, **kwargs):
+        captured.update(app=app, host=host, port=port, kwargs=kwargs)
+
+    monkeypatch.setattr("mcp.server.fastmcp.FastMCP.run", reject_direct_fastmcp_run)
+    monkeypatch.setattr("uvicorn.run", capture_uvicorn_run)
+
+    run_mcp_server(
+        host="0.0.0.0",
+        port=9123,
+        path="/mcp",
+        public_url="http://localhost/mcp",
+    )
+
+    app = captured["app"]
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 9123
+    assert any(middleware.cls is RequestProvenanceMiddleware for middleware in app.user_middleware)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        headers = {
+            "Authorization": "Bearer token-a",
+            "X-Fusion-Memory-Workspace": "workspace-from-production-startup",
+            "X-Fusion-Memory-Session": "session-from-production-startup",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            headers=headers,
+        ) as http_client:
+            async with streamable_http_client(
+                "http://localhost/mcp",
+                http_client=http_client,
+            ) as (read_stream, write_stream, _):
+                async with ClientSession(read_stream, write_stream) as client:
+                    await client.initialize()
+                    result = await client.call_tool("memory_add", {"content": "production write"})
+
+    assert result.structuredContent["ok"] is True
+    assert runtime.calls == [
+        (
+            "add",
+            Scope(
+                user_id="user-a",
+                workspace_id="workspace-from-production-startup",
+                session_id="session-from-production-startup",
+                app_id="mcp",
+            ),
+        )
+    ]
 
 
 def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
