@@ -8,7 +8,7 @@ from fusion_memory.retrieval.context import (
     ProviderRequest,
     SearchRequest,
 )
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
 
 CATEGORY_PROVIDERS = {

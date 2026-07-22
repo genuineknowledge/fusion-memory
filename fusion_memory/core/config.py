@@ -2,24 +2,9 @@ from __future__ import annotations
 
 import os
 import platform
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-
-
-DEFAULT_RAW_EVIDENCE_QUOTAS = {
-    "factual_exact": 2,
-    "temporal_lookup": 4,
-    "event_ordering": 6,
-    "contradiction_resolution": 4,
-    "knowledge_update": 4,
-    "multi_session_reasoning": 4,
-    "abstention": 3,
-    "summarization": 6,
-    "preference": 1,
-    "instruction": 1,
-    "assistant_reference": 2,
-}
 
 
 def _default_home() -> Path:
@@ -77,8 +62,6 @@ class MemoryConfig:
     balanced_mode_rerank_top_n: int = 50
     evidence_span_summary_chars: int = 500
     local_answer_summary_chars: int = 360
-    raw_evidence_quotas: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_RAW_EVIDENCE_QUOTAS))
-
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)
 

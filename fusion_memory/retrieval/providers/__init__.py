@@ -1,4 +1,15 @@
-from fusion_memory.retrieval.providers.base import RecallContext, RecallProvider
-from fusion_memory.retrieval.providers.registry import ProviderRegistry, default_provider_registry
+from fusion_memory.retrieval.providers.base import (
+    CandidateProvider,
+    ProviderContext,
+    ProviderOutcome,
+    ProviderUnavailable,
+)
+from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
 
-__all__ = ["ProviderRegistry", "RecallContext", "RecallProvider", "default_provider_registry"]
+__all__ = [
+    "CandidateProvider",
+    "ProductProviderRegistry",
+    "ProviderContext",
+    "ProviderOutcome",
+    "ProviderUnavailable",
+]

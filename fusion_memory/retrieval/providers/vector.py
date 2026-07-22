@@ -6,7 +6,7 @@ from fusion_memory.core.models import Candidate
 from fusion_memory.model_pool import EndpointUnavailable
 from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
-from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome, ProviderUnavailable
+from fusion_memory.retrieval.providers.base import ProviderContext, ProviderOutcome, ProviderUnavailable
 
 
 VECTOR_SOURCE = "product_vector"

@@ -11,8 +11,8 @@ from fusion_memory.retrieval.context import (
     SearchRequest,
 )
 from fusion_memory.retrieval.engine import RetrievalUnavailable
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
-from fusion_memory.retrieval.providers.product_base import ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderOutcome
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.selection import select_candidates
 from fusion_memory.retrieval.tracing import (

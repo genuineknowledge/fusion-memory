@@ -22,7 +22,7 @@ from fusion_memory.retrieval.context import (
     ProviderRequest,
     RetrievalResult,
 )
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 from fusion_memory.retrieval.providers.chronology import ChronologyProvider
 from fusion_memory.retrieval.providers.entity import EntityProvider
 from fusion_memory.retrieval.providers.lexical import LexicalProvider

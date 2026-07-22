@@ -1,5 +1,5 @@
 from fusion_memory.retrieval.context import OrderingMode, ProviderKind, SearchRequest
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
 
 def _providers(plan):

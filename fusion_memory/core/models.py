@@ -204,20 +204,6 @@ class Candidate:
 
 
 @dataclass
-class QueryPlan:
-    query: str
-    query_type: str
-    entities: list[str]
-    time_constraints: list[dict[str, Any]]
-    retrieval_hints: list[str] = field(default_factory=list)
-    speaker_focus: str = "any"
-    needs_current_state: bool = False
-    needs_source_evidence: bool = True
-    must_include_sources: list[str] = field(default_factory=list)
-    intent: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class AddResult:
     span_ids: list[str]
     accepted_fact_ids: list[str]

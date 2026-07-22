@@ -6,7 +6,7 @@ from typing import Any
 from fusion_memory.core.models import Candidate
 from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.context import ProductQueryPlan, SearchRequest
-from fusion_memory.retrieval.providers.product_base import ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderOutcome
 
 
 _SAFE_DIMENSIONS = {

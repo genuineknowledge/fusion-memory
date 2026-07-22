@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fusion_memory.core.models import Candidate, QueryPlan
+from fusion_memory.core.models import Candidate
+from fusion_memory.retrieval.context import ProductQueryPlan
 from fusion_memory.retrieval.utility_scorer import feature_vector
 
 
@@ -98,12 +99,20 @@ class LogisticUtilityScorer:
             mrr=mrr,
         )
 
-    def predict_candidate(self, candidate: Candidate, plan: QueryPlan) -> float:
+    def predict_candidate(
+        self,
+        candidate: Candidate,
+        plan: ProductQueryPlan,
+    ) -> float:
         if not self.trained:
             return candidate.scores.get("utility_score", 0.0)
         return self._predict_encoded(self._encode_features(feature_vector(candidate, plan)))
 
-    def rank_shadow(self, candidates: list[Candidate], plan: QueryPlan) -> list[dict[str, Any]]:
+    def rank_shadow(
+        self,
+        candidates: list[Candidate],
+        plan: ProductQueryPlan,
+    ) -> list[dict[str, Any]]:
         ranked = [
             {
                 "id": candidate.id,

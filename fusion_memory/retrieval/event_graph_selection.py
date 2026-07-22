@@ -13,7 +13,7 @@ from fusion_memory.retrieval.taxonomy import taxonomy_alias_hits
 register_rule(
     RuleDefinition(
         rule_id="taxonomy.alias_match",
-        module="fusion_memory.api.service_helpers",
+        module="fusion_memory.retrieval.event_graph_selection",
         purpose="Observe taxonomy alias matching without changing retrieval behavior.",
         category="taxonomy_candidate",
         ability="zh_recall",

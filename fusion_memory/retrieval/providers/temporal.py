@@ -7,7 +7,7 @@ from fusion_memory.core.models import Candidate
 from fusion_memory.core.text import keyword_score
 from fusion_memory.retrieval.context import ProviderKind, TimeRange
 from fusion_memory.retrieval.ports import MemorySearchRepository
-from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderContext, ProviderOutcome
 
 
 TEMPORAL_SOURCE = "product_temporal"

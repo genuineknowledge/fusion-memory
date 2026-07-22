@@ -7,7 +7,7 @@ from fusion_memory.core.models import Candidate, MemoryEvent
 from fusion_memory.retrieval.chronology_selector import select_persisted_graph_event_ordering_candidates
 from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
-from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderContext, ProviderOutcome
 
 
 CHRONOLOGY_SOURCE = "product_chronology"

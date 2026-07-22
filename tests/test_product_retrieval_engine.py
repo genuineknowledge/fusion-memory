@@ -22,13 +22,13 @@ from fusion_memory.retrieval.context import (
 )
 from fusion_memory.retrieval.engine import RetrievalUnavailable
 from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
-from fusion_memory.retrieval.providers.product_base import (
+from fusion_memory.retrieval.providers.base import (
     ProviderContext,
     ProviderOutcome,
     ProviderUnavailable,
 )
-from fusion_memory.retrieval.providers.product_registry import ProductProviderRegistry
+from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
 
 def _candidate(

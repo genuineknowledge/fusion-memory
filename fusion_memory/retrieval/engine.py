@@ -358,14 +358,14 @@ def build_product_retrieval_engine(
     planner: Any | None = None,
 ) -> RetrievalEngine:
     from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
-    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
-    from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+    from fusion_memory.retrieval.evidence_pack import ProductEvidencePackBuilder
     from fusion_memory.retrieval.providers.chronology import ChronologyProvider
     from fusion_memory.retrieval.providers.entity import EntityProvider
     from fusion_memory.retrieval.providers.lexical import LexicalProvider
-    from fusion_memory.retrieval.providers.product_registry import ProductProviderRegistry
+    from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
     from fusion_memory.retrieval.providers.temporal import TemporalProvider
     from fusion_memory.retrieval.providers.vector import VectorProvider
+    from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
     pack_builder = ProductEvidencePackBuilder(repository, config)
     registry = ProductProviderRegistry(

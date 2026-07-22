@@ -202,7 +202,7 @@ def test_product_engine_factory_wires_all_providers_pack_builder_and_falsey_plan
     memory_store: RecordingStore,
 ) -> None:
     from fusion_memory.retrieval.engine import build_product_retrieval_engine
-    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+    from fusion_memory.retrieval.evidence_pack import ProductEvidencePackBuilder
 
     class FalseyPlanner:
         def __bool__(self) -> bool:

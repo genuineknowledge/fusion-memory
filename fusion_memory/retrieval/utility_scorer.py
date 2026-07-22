@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from fusion_memory.core.models import Candidate, QueryPlan, new_id
+from fusion_memory.core.models import Candidate, new_id
+from fusion_memory.retrieval.context import ProductQueryPlan
 
 
-def feature_vector(candidate: Candidate, plan: QueryPlan) -> dict[str, float | str]:
+def feature_vector(
+    candidate: Candidate,
+    plan: ProductQueryPlan,
+) -> dict[str, float | str]:
     scores = candidate.scores
     return {
         "rrf_score": scores.get("rrf_score", 0.0),
@@ -16,27 +20,32 @@ def feature_vector(candidate: Candidate, plan: QueryPlan) -> dict[str, float | s
         "source_quality": scores.get("source_quality", 0.0),
         "utility_score": scores.get("utility_score", 0.0),
         "candidate_type": candidate.type,
-        "query_type": plan.query_type,
+        "query_type": plan.intent,
         "quota_selected": 1.0 if candidate.metadata.get("quota_selected") else 0.0,
     }
 
 
-def weak_label(candidate: Candidate, plan: QueryPlan) -> str:
+def weak_label(candidate: Candidate, plan: ProductQueryPlan) -> str:
     if candidate.type == "span" and candidate.scores.get("bm25_score", 0.0) > 0.15:
         return "useful"
-    if candidate.type in {"view", "profile"} and plan.query_type in {"preference", "instruction"}:
+    if candidate.type in {"view", "profile"} and plan.intent in {"preference", "instruction"}:
         return "useful"
     if candidate.scores.get("utility_score", 0.0) <= 0:
         return "not_useful"
     return "unknown"
 
 
-def utility_example(query_id: str, query: str, plan: QueryPlan, candidate: Candidate) -> dict:
+def utility_example(
+    query_id: str,
+    query: str,
+    plan: ProductQueryPlan,
+    candidate: Candidate,
+) -> dict:
     return {
         "example_id": new_id("utility"),
         "query_id": query_id,
         "query_text": query,
-        "query_type": plan.query_type,
+        "query_type": plan.intent,
         "candidate_id": candidate.id,
         "candidate_type": candidate.type,
         "features": feature_vector(candidate, plan),
@@ -44,4 +53,3 @@ def utility_example(query_id: str, query: str, plan: QueryPlan, candidate: Candi
         "label_source": "weak_rule",
         "answer_correct": None,
     }
-

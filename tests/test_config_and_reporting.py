@@ -54,8 +54,8 @@ class ConfigAndReportingTests(unittest.TestCase):
         )
         self.assertEqual(precision, 1.0)
 
-    def test_config_controls_chunking_quota_and_trace_snapshot(self) -> None:
-        config = MemoryConfig(chunk_size_tokens=5, chunk_overlap_tokens=1, raw_evidence_quotas={"factual_exact": 1})
+    def test_config_controls_chunking_and_trace_snapshot(self) -> None:
+        config = MemoryConfig(chunk_size_tokens=5, chunk_overlap_tokens=1)
         memory = MemoryService(config=config)
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
         result = memory.add(
@@ -74,7 +74,7 @@ class ConfigAndReportingTests(unittest.TestCase):
         memory.add("I prefer Qdrant for Atlas retrieval.", scope, datetime(2026, 6, 2, tzinfo=timezone.utc))
         trace = memory.debug_trace(result.trace_id)
         self.assertEqual(trace["config"]["chunk_size_tokens"], 5)
-        self.assertEqual(trace["config"]["raw_evidence_quotas"]["factual_exact"], 1)
+        self.assertNotIn("raw_evidence_quotas", trace["config"])
 
         pack = memory.answer_context("one seven", scope)
         self.assertGreaterEqual(pack.coverage["source_span_count"], 1)
@@ -88,7 +88,7 @@ class ConfigAndReportingTests(unittest.TestCase):
         self.assertEqual(encoding_report["accept_source_coverage"], 1.0)
 
     def test_benchmark_report_includes_config_snapshot(self) -> None:
-        config = MemoryConfig(retrieval_output_n=3, raw_evidence_quotas={"factual_exact": 1})
+        config = MemoryConfig(retrieval_output_n=3)
         service = MemoryService(config=config)
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
         adapter = BenchmarkAdapter(service, scope)
@@ -109,7 +109,7 @@ class ConfigAndReportingTests(unittest.TestCase):
         )
 
         self.assertEqual(report["config"]["retrieval_output_n"], 3)
-        self.assertEqual(report["config"]["raw_evidence_quotas"]["factual_exact"], 1)
+        self.assertNotIn("raw_evidence_quotas", report["config"])
         self.assertIn("encoding_report", report)
         self.assertIn("profile_report", report)
 

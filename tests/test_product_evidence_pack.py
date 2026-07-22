@@ -25,10 +25,10 @@ from fusion_memory.retrieval.context import (
     RetrievalResult,
     SearchRequest,
 )
-from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+from fusion_memory.retrieval.evidence_pack import ProductEvidencePackBuilder
 from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
-from fusion_memory.retrieval.product_planner import ProductQueryPlanner
-from fusion_memory.retrieval.providers.product_base import ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderOutcome
+from fusion_memory.retrieval.query_planner import ProductQueryPlanner
 
 
 class SpanRepository:

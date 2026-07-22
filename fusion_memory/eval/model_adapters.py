@@ -29,10 +29,12 @@ from fusion_memory.retrieval.aggregation_pack import (
 from fusion_memory.retrieval.aggregation_answers import aggregation_answer_candidates, deadline_answer_candidates
 from fusion_memory.retrieval.answer_requirements import answer_requirements
 from fusion_memory.retrieval.contradiction_claims import conflict_claims_for_model
-from fusion_memory.retrieval.pack_contract import PACK_CONTRACT_VERSION
 from fusion_memory.retrieval.slot_state_transition import value_state_summary
 from fusion_memory.retrieval.temporal_pack import direct_date_answer_candidates, temporal_answer_candidates, temporal_model_candidates
 from fusion_memory.retrieval.value_history_pack import exact_candidate_value_rows, value_history_summary
+
+
+PACK_CONTRACT_VERSION = "typed-evidence-pack-v1"
 
 
 ANSWER_SCHEMA: dict[str, Any] = {

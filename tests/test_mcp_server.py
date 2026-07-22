@@ -606,7 +606,6 @@ def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: object())
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: object())
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
-    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
 
     runtime, _ = runtime_from_env()
@@ -654,7 +653,6 @@ async def test_runtime_request_factory_builds_the_product_retrieval_composition(
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: object())
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
-    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
 
     runtime, _ = runtime_from_env()
@@ -666,7 +664,7 @@ async def test_runtime_request_factory_builds_the_product_retrieval_composition(
 
     from fusion_memory.retrieval.context import ProviderKind
     from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
-    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+    from fusion_memory.retrieval.evidence_pack import ProductEvidencePackBuilder
 
     assert isinstance(service.retrieval_engine, ProductRetrievalEngine)
     assert isinstance(service.retrieval_engine.pack_builder, ProductEvidencePackBuilder)
@@ -715,7 +713,6 @@ def test_runtime_from_env_rejects_benchmark_search_mode_and_closes_resources(mon
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
-    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
 
     with pytest.raises(ValueError, match="fast or balanced"):
@@ -762,7 +759,6 @@ def test_runtime_from_env_preserves_embedding_and_reranker_slots(monkeypatch):
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: SimpleNamespace(pool=reranker_pool))
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
-    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
 
     runtime, pool = runtime_from_env()
@@ -842,7 +838,7 @@ def test_runtime_from_env_closes_resources_when_model_builder_fails(monkeypatch)
     assert calls == ["store", "pool"]
 
 
-def test_runtime_factory_creates_request_local_extractor_and_refiner(monkeypatch):
+def test_runtime_factory_creates_request_local_extractor_without_legacy_refiner(monkeypatch):
     import concurrent.futures
 
     class FakePool:
@@ -879,19 +875,15 @@ def test_runtime_factory_creates_request_local_extractor_and_refiner(monkeypatch
         "fusion_memory.mcp_runtime._build_async_extractor",
         lambda: created_extractors.append(object()) or created_extractors[-1],
     )
-    monkeypatch.setattr(
-        "fusion_memory.mcp_runtime._build_query_intent_refiner",
-        lambda: created_refiners.append(object()) or created_refiners[-1],
-    )
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
 
     runtime, _ = runtime_from_env()
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(runtime._service_factory, object()) for _ in range(2)]
-        first, second = [future.result() for future in futures]
+    first, second = [future.result() for future in futures]
 
     assert first.async_extractor is not second.async_extractor
-    assert first.planner.intent_refiner is not second.planner.intent_refiner
+    assert created_refiners == []
 
 
 def test_runtime_factory_applies_request_local_embedder_to_bound_postgres_store(monkeypatch):
@@ -937,7 +929,6 @@ def test_runtime_factory_applies_request_local_embedder_to_bound_postgres_store(
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
-    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
     monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
     runtime, _ = runtime_from_env()
     bound_store = BoundStore()

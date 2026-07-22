@@ -30,12 +30,12 @@ from fusion_memory.retrieval.context import (
 from fusion_memory.retrieval.providers.chronology import ChronologyProvider
 from fusion_memory.retrieval.providers.entity import EntityProvider
 from fusion_memory.retrieval.providers.lexical import LexicalProvider
-from fusion_memory.retrieval.providers.product_base import (
+from fusion_memory.retrieval.providers.base import (
     ProviderContext,
     ProviderOutcome,
     ProviderUnavailable,
 )
-from fusion_memory.retrieval.providers.product_registry import ProductProviderRegistry
+from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
 from fusion_memory.retrieval.providers.temporal import TemporalProvider
 from fusion_memory.retrieval.providers.vector import VectorProvider
 

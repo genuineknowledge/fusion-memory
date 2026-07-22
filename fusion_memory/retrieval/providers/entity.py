@@ -5,7 +5,7 @@ from time import perf_counter
 from fusion_memory.core.models import Candidate
 from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
-from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome
+from fusion_memory.retrieval.providers.base import ProviderContext, ProviderOutcome
 
 
 ENTITY_SOURCE = "product_entity"

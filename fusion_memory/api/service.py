@@ -49,7 +49,6 @@ from fusion_memory.retrieval.engine import (
     sanitize_retrieval_trace,
     summarize_product_model_calls,
 )
-from fusion_memory.retrieval.query_planner import QueryPlanner
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.rule_registry import collect_rule_hits
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer, UtilityTrainingReport
@@ -111,11 +110,6 @@ class MemoryService:
         self.gate = EncodingGate(self.config)
         self.views = ViewBuilder()
         self.entity_indexer = EntityIndexer()
-        self.planner = QueryPlanner(
-            intent_refiner=query_intent_refiner,
-            intent_refiner_min_confidence=query_intent_refiner_min_confidence,
-            intent_refiner_mode=query_intent_refiner_mode,
-        )
         self.utility_scorer = LogisticUtilityScorer()
 
     def close(self) -> None:
