@@ -35,26 +35,33 @@ class FakeTokenVerifier:
 class FakeMemoryRuntime:
     def __init__(self) -> None:
         self.items: list[tuple[Scope, str]] = []
+        self.calls: list[tuple[str, Scope]] = []
         self.last_scope = Scope()
 
     async def add(self, scope: Scope, content: str, source: str | None) -> dict[str, Any]:
         self.last_scope = scope
+        self.calls.append(("add", scope))
         self.items.append((scope, content))
         return {"saved": True, "source": source}
 
     async def search(self, scope: Scope, query: str, limit: int) -> dict[str, Any]:
         self.last_scope = scope
+        self.calls.append(("search", scope))
         matches = [content for item_scope, content in self.items if item_scope.user_id == scope.user_id and query in content]
         return {"candidates": matches[:limit]}
 
     async def answer_context(self, scope: Scope, query: str, limit: int) -> dict[str, Any]:
-        return await self.search(scope, query, limit)
+        self.last_scope = scope
+        self.calls.append(("answer_context", scope))
+        matches = [content for item_scope, content in self.items if item_scope.user_id == scope.user_id and query in content]
+        return {"candidates": matches[:limit]}
 
     async def add_batch(
         self, scope: Scope, messages: list[dict[str, Any]], batch_id: str, metadata: dict[str, Any] | None
     ) -> dict[str, Any]:
         del metadata
         self.last_scope = scope
+        self.calls.append(("add_batch", scope))
         self.items.extend((scope, str(message.get("content") or "")) for message in messages)
         return {"batch_id": batch_id, "message_count": len(messages)}
 
@@ -130,6 +137,49 @@ async def test_user_id_comes_from_token_and_is_not_a_tool_parameter(mcp_client_f
         assert "user_id" not in tools["memory_search"].inputSchema["properties"]
         await client.call_tool("memory_search", {"query": "secret"})
     assert fake_runtime.last_scope.user_id == "user-a"
+
+
+@pytest.mark.anyio
+async def test_authenticated_mcp_tool_calls_pass_exact_read_and_write_scopes(mcp_client_factory, fake_runtime):
+    async with mcp_client_factory(
+        token="token-a",
+        session_id="session-from-header",
+        workspace_id="workspace-from-header",
+    ) as client:
+        await client.call_tool("memory_add", {"content": "write", "source": "tool-argument"})
+        await client.call_tool(
+            "memory_add_batch",
+            {
+                "messages": [{"role": "user", "content": "batch write"}],
+                "batch_id": "batch-1",
+                "metadata": {"tool_argument": "does-not-control-scope"},
+            },
+        )
+        await client.call_tool("memory_search", {"query": "write"})
+        await client.call_tool("memory_answer_context", {"query": "write"})
+
+    assert fake_runtime.calls == [
+        (
+            "add",
+            Scope(
+                user_id="user-a",
+                workspace_id="workspace-from-header",
+                session_id="session-from-header",
+                app_id="mcp",
+            ),
+        ),
+        (
+            "add_batch",
+            Scope(
+                user_id="user-a",
+                workspace_id="workspace-from-header",
+                session_id="session-from-header",
+                app_id="mcp",
+            ),
+        ),
+        ("search", Scope(user_id="user-a", app_id="mcp")),
+        ("answer_context", Scope(user_id="user-a", app_id="mcp")),
+    ]
 
 
 @pytest.mark.anyio
@@ -488,6 +538,68 @@ def test_runtime_from_env_accepts_pg_dsn(monkeypatch):
 
     assert isinstance(runtime, FusionMemoryRuntime)
     assert captured["dsn"] == "postgresql://memory"
+
+
+@pytest.mark.anyio
+async def test_runtime_request_factory_builds_the_product_retrieval_composition(monkeypatch):
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self.embedder = None
+
+        def set_embedder(self, embedder):
+            self.embedder = embedder
+
+        def close(self):
+            pass
+
+    class FakeExecutor:
+        def __init__(self, store, *args, **kwargs):
+            self.store = store
+
+        def run(self, callback, *, user_id, write):
+            assert user_id == "user-a"
+            assert write is False
+            return callback(self.store)
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("FUSION_MEMORY_PG_DSN", "postgresql://memory")
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresConnectionPool", FakePool)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresMemoryStore", FakeStore)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.PostgresOperationExecutor", FakeExecutor)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_embedder", lambda: object())
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_reranker", lambda: object())
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_async_extractor", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime._build_query_intent_refiner", lambda: None)
+    monkeypatch.setattr("fusion_memory.mcp_runtime.build_runtime_retrieval_flags", lambda: object())
+
+    runtime, _ = runtime_from_env()
+    service = await runtime._run(
+        Scope(user_id="user-a"),
+        write=False,
+        operation=lambda request_service: request_service,
+    )
+
+    from fusion_memory.retrieval.context import ProviderKind
+    from fusion_memory.retrieval.product_engine import ProductRetrievalEngine
+    from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
+
+    assert isinstance(service.retrieval_engine, ProductRetrievalEngine)
+    assert isinstance(service.retrieval_engine.pack_builder, ProductEvidencePackBuilder)
+    assert set(service.retrieval_engine.registry._providers) == set(ProviderKind)
+    assert all(
+        provider.repository is service.store
+        for provider in service.retrieval_engine.registry._providers.values()
+    )
 
 
 def test_runtime_rejects_benchmark_search_mode() -> None:
