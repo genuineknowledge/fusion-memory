@@ -31,7 +31,16 @@ class SpanRepository:
         include_session: bool = False,
     ) -> EvidenceSpan | None:
         self.calls.append((span_id, scope, include_session))
-        return self.spans.get(span_id)
+        span = self.spans.get(span_id)
+        if span is None:
+            return None
+        for field in ("workspace_id", "user_id", "agent_id", "run_id"):
+            expected = getattr(scope, field)
+            if expected is not None and getattr(span.scope, field) != expected:
+                return None
+        if include_session and span.scope.session_id != scope.session_id:
+            return None
+        return span
 
 
 def _span(
@@ -39,10 +48,11 @@ def _span(
     *,
     timestamp: datetime,
     content: str = "Atlas source evidence",
+    scope: Scope | None = None,
 ) -> EvidenceSpan:
     return EvidenceSpan(
         span_id=span_id,
-        scope=Scope(user_id="user-a", session_id="session-a"),
+        scope=scope or Scope(user_id="user-a", session_id="session-a"),
         turn_id=f"turn-{span_id}",
         speaker="user",
         span_type="turn",
@@ -55,10 +65,11 @@ def _span(
 
 def _candidate(
     candidate_id: str,
-    span_id: str,
+    span_id: str | None = None,
     *,
     source: str = "product_lexical",
     timeline_index: int | None = None,
+    source_span_ids: list[str] | None = None,
 ) -> Candidate:
     metadata = {} if timeline_index is None else {"timeline_index": timeline_index}
     return Candidate(
@@ -67,7 +78,7 @@ def _candidate(
         text="selected candidate",
         source=source,
         scores={"bm25_score": 0.8},
-        source_span_ids=[span_id],
+        source_span_ids=source_span_ids if source_span_ids is not None else [str(span_id)],
         metadata=metadata,
     )
 
@@ -130,11 +141,64 @@ def test_product_pack_preserves_source_provenance(pack_fixture: PackFixture) -> 
         token_budget=1200,
     )
 
-    assert pack.source_spans[0]["id"] == "span-1"
-    assert pack.source_spans[0]["session_id"] == "session-a"
-    assert pack.source_spans[0]["candidate_source"] == "product_lexical"
-    assert pack.source_spans[0]["source_span_ids"] == ["span-1"]
+    assert pack.source_spans[0] == {
+        "id": "span-1",
+        "session_id": "session-a",
+        "turn_id": "turn-span-1",
+        "speaker": "user",
+        "timestamp": "2026-07-01T00:00:00+00:00",
+        "source_uri": "memory://span-1",
+        "content": "Atlas source evidence",
+        "candidate_source": "product_lexical",
+        "source_span_ids": ["span-1"],
+    }
     assert pack_fixture.repository.calls == [("span-1", pack_fixture.context.scope, True)]
+
+
+def test_product_pack_omits_cross_user_and_cross_session_spans() -> None:
+    scope = Scope(user_id="user-a", session_id="session-a")
+    repository = SpanRepository(
+        [
+            _span("allowed", timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+            _span(
+                "cross-user",
+                timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+                scope=Scope(user_id="user-b", session_id="session-a"),
+            ),
+            _span(
+                "cross-session",
+                timestamp=datetime(2026, 7, 3, tzinfo=timezone.utc),
+                scope=Scope(user_id="user-a", session_id="session-b"),
+            ),
+        ]
+    )
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-scope",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate("allowed", "allowed"),
+            _candidate("cross-user", "cross-user"),
+            _candidate("cross-session", "cross-session"),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="Atlas", limit=3),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == ["allowed"]
 
 
 @pytest.fixture
@@ -185,6 +249,87 @@ def test_product_pack_orders_chronology_by_timeline_index(
     assert [span["id"] for span in pack.source_spans] == ["span-early", "span-late"]
 
 
+@pytest.mark.parametrize(
+    ("ordering", "expected_ids"),
+    [
+        (OrderingMode.RECENCY, ["span-new", "span-old"]),
+        (OrderingMode.RELEVANCE, ["span-old", "span-new"]),
+    ],
+)
+def test_product_pack_applies_product_ordering(
+    ordering: OrderingMode,
+    expected_ids: list[str],
+) -> None:
+    repository = SpanRepository(
+        [
+            _span("span-old", timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+            _span("span-new", timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc)),
+        ]
+    )
+    context = RetrievalContext(
+        scope=Scope(user_id="user-a", session_id="session-a"),
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-ordering",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate("candidate-old", "span-old"),
+            _candidate("candidate-new", "span-new"),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(ordering),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="Atlas", limit=2),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == expected_ids
+
+
+def test_product_pack_deduplicates_multiple_source_ids_in_engine_rank_order() -> None:
+    repository = SpanRepository(
+        [
+            _span(f"span-{index}", timestamp=datetime(2026, 7, index, tzinfo=timezone.utc))
+            for index in range(1, 4)
+        ]
+    )
+    context = RetrievalContext(
+        scope=Scope(user_id="user-a", session_id="session-a"),
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-dedupe",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate("candidate-a", source_span_ids=["span-1", "span-2"]),
+            _candidate("candidate-b", source_span_ids=["span-2", "span-3"]),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="Atlas", limit=2),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == ["span-1", "span-2", "span-3"]
+    assert [call[0] for call in repository.calls] == ["span-1", "span-2", "span-3"]
+
+
 @pytest.fixture
 def empty_pack_fixture() -> PackFixture:
     scope = Scope(user_id="user-a")
@@ -225,7 +370,187 @@ def test_product_pack_abstains_without_supported_source_evidence(
     assert pack.answer_policy == "abstain_if_not_supported"
     assert "query_type" not in pack.coverage
     assert "category" not in pack.coverage
-    assert pack.debug_trace == {}
+    assert pack.debug_trace == []
+
+
+def test_product_pack_observability_uses_only_product_schema(
+    pack_fixture: PackFixture,
+) -> None:
+    result = RetrievalResult(
+        candidates=pack_fixture.result.candidates,
+        coverage={
+            "degraded": False,
+            "provider_failures": ["model_unavailable"],
+            "provider_counts": {
+                "lexical": 1,
+                "query_type": "nested-leak",
+                "unknown_provider": 99,
+            },
+            "reranker_unavailable": True,
+            "planner_fallback": "invalid_plan",
+            "benchmark": {"category": "abstention"},
+            "rescue": {"preservation": "legacy"},
+            "unknown": "injected",
+        },
+        trace={
+            "stages": ["plan", "recall", "fusion", "selection", "rescue"],
+            "mode": "fast",
+            "intent": "factual",
+            "providers": [
+                {
+                    "kind": "lexical",
+                    "count": 1,
+                    "elapsed_ms": 0.5,
+                    "failure_code": None,
+                    "category": "nested-leak",
+                }
+            ],
+            "filtered_count": 0,
+            "selected_ids": ["hashed-id"],
+            "stage_durations_ms": {
+                "plan": 0.1,
+                "recall": 0.2,
+                "fusion": 0.3,
+                "selection": 0.4,
+                "preservation": 100.0,
+            },
+            "reranker_failure": "reranker_unavailable",
+            "planner_fallback": "invalid_plan",
+            "query_type": "legacy",
+            "unknown": {"benchmark": True},
+        },
+        plan=ProductQueryPlan(
+            **{
+                **pack_fixture.result.plan.__dict__,
+                "query_intent": {
+                    "answer_shape": "short_answer",
+                    "temporal": {
+                        "requires_time": False,
+                        "requires_order": False,
+                        "query_type": "nested-leak",
+                    },
+                    "aggregation": {
+                        "operation": "none",
+                        "distinct": False,
+                        "rescue": "nested-leak",
+                    },
+                    "benchmark": {"category": "abstention"},
+                },
+            }
+        ),
+    )
+
+    pack = pack_fixture.builder.build(
+        pack_fixture.context,
+        pack_fixture.request,
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.coverage == {
+        "degraded": False,
+        "provider_failures": ["model_unavailable"],
+        "provider_counts": {"lexical": 1},
+        "reranker_unavailable": True,
+        "planner_fallback": "invalid_plan",
+        "intent": "factual",
+        "query_intent": {
+            "answer_shape": "short_answer",
+            "temporal": {"requires_time": False, "requires_order": False},
+            "aggregation": {"operation": "none", "distinct": False},
+        },
+        "source_span_count": 1,
+        "token_budget": 1200,
+        "estimated_source_tokens": 3,
+    }
+    assert isinstance(pack.debug_trace, list)
+    assert pack.debug_trace
+    for entry in pack.debug_trace:
+        assert isinstance(entry, dict)
+        assert set(entry) <= {
+            "stages",
+            "mode",
+            "intent",
+            "providers",
+            "filtered_count",
+            "selected_ids",
+            "stage_durations_ms",
+            "reranker_failure",
+            "planner_fallback",
+        }
+    assert pack.debug_trace == [
+        {
+            "stages": ["plan", "recall", "fusion", "selection"],
+            "mode": "fast",
+            "intent": "factual",
+            "providers": [
+                {
+                    "kind": "lexical",
+                    "count": 1,
+                    "elapsed_ms": 0.5,
+                    "failure_code": None,
+                }
+            ],
+            "filtered_count": 0,
+            "selected_ids": ["hashed-id"],
+            "stage_durations_ms": {
+                "plan": 0.1,
+                "recall": 0.2,
+                "fusion": 0.3,
+                "selection": 0.4,
+            },
+            "reranker_failure": "reranker_unavailable",
+            "planner_fallback": "invalid_plan",
+        }
+    ]
+
+
+def test_product_pack_drops_nested_values_from_product_observability(
+    pack_fixture: PackFixture,
+) -> None:
+    result = RetrievalResult(
+        candidates=pack_fixture.result.candidates,
+        coverage={
+            "degraded": {"query_type": "nested-leak"},
+            "provider_failures": ["model_unavailable", {"category": "nested-leak"}],
+            "reranker_unavailable": {"rescue": "nested-leak"},
+            "planner_fallback": {"benchmark": "nested-leak"},
+        },
+        trace={
+            "stages": ["plan", "rescue"],
+            "providers": [
+                {
+                    "kind": "lexical",
+                    "count": {"category": "nested-leak"},
+                    "elapsed_ms": {"query_type": "nested-leak"},
+                    "failure_code": {"rescue": "nested-leak"},
+                }
+            ],
+        },
+        plan=pack_fixture.result.plan,
+    )
+
+    pack = pack_fixture.builder.build(
+        pack_fixture.context,
+        pack_fixture.request,
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.coverage == {
+        "provider_failures": ["model_unavailable"],
+        "intent": "factual",
+        "query_intent": {},
+        "source_span_count": 1,
+        "token_budget": 1200,
+        "estimated_source_tokens": 3,
+    }
+    assert pack.debug_trace == [
+        {
+            "stages": ["plan"],
+            "providers": [{"kind": "lexical"}],
+        }
+    ]
 
 
 def test_product_pack_stops_before_exceeding_its_token_budget(pack_fixture: PackFixture) -> None:
@@ -281,6 +606,40 @@ def test_product_pack_stops_after_the_first_record_that_exceeds_its_budget() -> 
     assert [call[0] for call in repository.calls] == ["too-large"]
 
 
+def test_product_pack_compacts_over_limit_source_content() -> None:
+    original = "Atlas evidence contains a deliberately long explanation that must be compacted."
+    repository = SpanRepository(
+        [_span("long-span", timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc), content=original)]
+    )
+    context = RetrievalContext(
+        scope=Scope(user_id="user-a", session_id="session-a"),
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-compaction",
+        deadline=None,
+        include_session=True,
+    )
+    result = RetrievalResult(
+        candidates=(_candidate("candidate-long", "long-span"),),
+        coverage={},
+        trace={},
+        plan=_plan(),
+    )
+
+    pack = ProductEvidencePackBuilder(
+        repository,
+        MemoryConfig(evidence_span_summary_chars=24),
+    ).build(
+        context,
+        SearchRequest(query="Atlas", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.source_spans[0]["content"] == "Atlas evidence contai..."
+    assert pack.source_spans[0]["content"] != original
+
+
 def test_engine_delegates_product_pack_building(pack_fixture: PackFixture) -> None:
     class RecordingPackBuilder:
         def __init__(self) -> None:
@@ -315,3 +674,13 @@ def test_engine_delegates_product_pack_building(pack_fixture: PackFixture) -> No
     assert pack_builder.calls == [
         (pack_fixture.context, pack_fixture.request, pack_fixture.result, 400)
     ]
+
+
+def test_engine_requires_product_pack_builder() -> None:
+    class NoopRegistry:
+        def run(self, *args: object) -> tuple[object, ...]:
+            del args
+            return ()
+
+    with pytest.raises(TypeError, match="pack_builder"):
+        ProductRetrievalEngine(None, NoopRegistry())

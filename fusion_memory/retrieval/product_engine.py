@@ -3,6 +3,7 @@ from __future__ import annotations
 from time import perf_counter
 from typing import Protocol
 
+from fusion_memory.core.models import EvidencePack
 from fusion_memory.retrieval.context import (
     ProductQueryPlan,
     RetrievalContext,
@@ -11,7 +12,6 @@ from fusion_memory.retrieval.context import (
 )
 from fusion_memory.retrieval.engine import RetrievalUnavailable
 from fusion_memory.retrieval.product_planner import ProductQueryPlanner
-from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
 from fusion_memory.retrieval.providers.product_base import ProviderOutcome
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.selection import select_candidates
@@ -37,15 +37,25 @@ class ProductRegistry(Protocol):
     ) -> tuple[ProviderOutcome, ...]: ...
 
 
+class ProductPackBuilder(Protocol):
+    def build(
+        self,
+        context: RetrievalContext,
+        request: SearchRequest,
+        result: RetrievalResult,
+        token_budget: int,
+    ) -> EvidencePack: ...
+
+
 class ProductRetrievalEngine:
     def __init__(
         self,
         planner: ProductPlanner | None,
         registry: ProductRegistry,
         *,
+        pack_builder: ProductPackBuilder,
         reranker: Reranker | None = None,
         mmr_lambda: float = 0.72,
-        pack_builder: ProductEvidencePackBuilder | None = None,
     ) -> None:
         self.planner = planner or ProductQueryPlanner()
         self.registry = registry
@@ -59,9 +69,7 @@ class ProductRetrievalEngine:
         request: SearchRequest,
         result: RetrievalResult,
         token_budget: int,
-    ):
-        if self.pack_builder is None:
-            raise RuntimeError("ProductRetrievalEngine requires a pack_builder to build evidence packs")
+    ) -> EvidencePack:
         return self.pack_builder.build(context, request, result, token_budget)
 
     def search(

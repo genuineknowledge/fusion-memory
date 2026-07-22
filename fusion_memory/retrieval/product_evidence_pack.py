@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -8,6 +9,7 @@ from fusion_memory.core.models import Candidate, EvidencePack, EvidenceSpan
 from fusion_memory.core.text import compact_summary, tokenize
 from fusion_memory.retrieval.context import (
     OrderingMode,
+    ProviderKind,
     RetrievalContext,
     RetrievalResult,
     SearchRequest,
@@ -15,7 +17,31 @@ from fusion_memory.retrieval.context import (
 from fusion_memory.retrieval.ports import MemorySearchRepository
 
 
-_PRODUCT_PACK_EXCLUDED_KEYS = {"category", "query_type"}
+_PRODUCT_COVERAGE_FIELDS = (
+    "degraded",
+    "provider_failures",
+    "provider_counts",
+    "reranker_unavailable",
+    "planner_fallback",
+)
+_PRODUCT_PROVIDER_KINDS = {provider.value for provider in ProviderKind}
+_PRODUCT_STAGES = {"plan", "recall", "fusion", "selection"}
+_QUERY_INTENT_STRING_FIELDS = (
+    "schema_version",
+    "language",
+    "answer_shape",
+    "evidence_scope",
+    "speaker_scope",
+)
+_QUERY_INTENT_STRING_LIST_FIELDS = (
+    "entities",
+    "target_terms",
+    "object_types",
+    "route_reasons",
+)
+_TEMPORAL_STRING_LIST_FIELDS = ("endpoint_roles", "time_expressions")
+_TEMPORAL_BOOLEAN_FIELDS = ("requires_time", "requires_order", "requires_duration")
+_AGGREGATION_STRING_LIST_FIELDS = ("target_terms", "unit_terms")
 
 
 class ProductEvidencePackBuilder:
@@ -69,18 +95,12 @@ class ProductEvidencePackBuilder:
 
         source_records = _ordered_source_records(source_records, result.plan.ordering)
         source_spans = [record for record, _, _, _ in source_records]
-        coverage = {
-            **{
-                key: value
-                for key, value in result.coverage.items()
-                if key not in _PRODUCT_PACK_EXCLUDED_KEYS
-            },
-            "intent": result.plan.intent,
-            "query_intent": result.plan.query_intent,
-            "source_span_count": len(source_spans),
-            "token_budget": token_budget,
-            "estimated_source_tokens": estimated_tokens,
-        }
+        coverage = _product_coverage(
+            result,
+            source_span_count=len(source_spans),
+            token_budget=token_budget,
+            estimated_tokens=estimated_tokens,
+        )
         return EvidencePack(
             query=request.query,
             answer_policy=(
@@ -144,15 +164,164 @@ def _ordered_source_records(
     return records
 
 
-def _product_trace(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _product_trace(item)
-            for key, item in value.items()
-            if key not in _PRODUCT_PACK_EXCLUDED_KEYS
-        }
-    if isinstance(value, list):
-        return [_product_trace(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_product_trace(item) for item in value)
-    return value
+def _product_coverage(
+    result: RetrievalResult,
+    *,
+    source_span_count: int,
+    token_budget: int,
+    estimated_tokens: int,
+) -> dict[str, Any]:
+    coverage: dict[str, Any] = {}
+    for field in _PRODUCT_COVERAGE_FIELDS:
+        if field not in result.coverage:
+            continue
+        value = result.coverage[field]
+        if field == "provider_counts":
+            value = _provider_counts(value)
+        elif field == "provider_failures":
+            value = _string_list(value)
+        elif field in {"degraded", "reranker_unavailable"}:
+            if not isinstance(value, bool):
+                continue
+        elif field == "planner_fallback" and not isinstance(value, str):
+            continue
+        coverage[field] = value
+    coverage.update(
+        intent=result.plan.intent,
+        query_intent=_query_intent(result.plan.query_intent),
+        source_span_count=source_span_count,
+        token_budget=token_budget,
+        estimated_source_tokens=estimated_tokens,
+    )
+    return coverage
+
+
+def _product_trace(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return []
+    trace: dict[str, Any] = {}
+    stages = value.get("stages")
+    if isinstance(stages, (list, tuple)):
+        trace["stages"] = [
+            stage
+            for stage in stages
+            if isinstance(stage, str) and stage in _PRODUCT_STAGES
+        ]
+    if value.get("mode") in {"fast", "balanced"}:
+        trace["mode"] = value["mode"]
+    if isinstance(value.get("intent"), str):
+        trace["intent"] = value["intent"]
+    providers = _provider_trace(value.get("providers"))
+    if providers:
+        trace["providers"] = providers
+    if isinstance(value.get("filtered_count"), int):
+        trace["filtered_count"] = value["filtered_count"]
+    selected_ids = _string_list(value.get("selected_ids"))
+    if selected_ids:
+        trace["selected_ids"] = selected_ids
+    durations = _stage_durations(value.get("stage_durations_ms"))
+    if durations:
+        trace["stage_durations_ms"] = durations
+    for field in ("reranker_failure", "planner_fallback"):
+        if isinstance(value.get(field), str):
+            trace[field] = value[field]
+    return [trace] if trace else []
+
+
+def _provider_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(kind): count
+        for kind, count in value.items()
+        if kind in _PRODUCT_PROVIDER_KINDS and isinstance(count, int)
+    }
+
+
+def _provider_trace(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    providers: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("kind") not in _PRODUCT_PROVIDER_KINDS:
+            continue
+        record: dict[str, Any] = {"kind": item["kind"]}
+        if isinstance(item.get("count"), int):
+            record["count"] = item["count"]
+        if isinstance(item.get("elapsed_ms"), (int, float)):
+            record["elapsed_ms"] = item["elapsed_ms"]
+        failure_code = item.get("failure_code")
+        if failure_code is None or isinstance(failure_code, str):
+            record["failure_code"] = failure_code
+        providers.append(record)
+    return providers
+
+
+def _stage_durations(value: Any) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        stage: duration
+        for stage, duration in value.items()
+        if stage in _PRODUCT_STAGES and isinstance(duration, (int, float))
+    }
+
+
+def _query_intent(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    intent: dict[str, Any] = {}
+    for field in _QUERY_INTENT_STRING_FIELDS:
+        if isinstance(value.get(field), str):
+            intent[field] = value[field]
+    for field in _QUERY_INTENT_STRING_LIST_FIELDS:
+        items = _string_list(value.get(field))
+        if field in value:
+            intent[field] = items
+    for field in ("needs_current_state", "needs_conflict_check"):
+        if isinstance(value.get(field), bool):
+            intent[field] = value[field]
+    if isinstance(value.get("confidence"), (int, float)):
+        intent["confidence"] = value["confidence"]
+    temporal = _temporal_intent(value.get("temporal"))
+    if temporal:
+        intent["temporal"] = temporal
+    aggregation = _aggregation_intent(value.get("aggregation"))
+    if aggregation:
+        intent["aggregation"] = aggregation
+    return intent
+
+
+def _temporal_intent(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    temporal: dict[str, Any] = {}
+    for field in _TEMPORAL_BOOLEAN_FIELDS:
+        if isinstance(value.get(field), bool):
+            temporal[field] = value[field]
+    if isinstance(value.get("order_direction"), str):
+        temporal["order_direction"] = value["order_direction"]
+    for field in _TEMPORAL_STRING_LIST_FIELDS:
+        if field in value:
+            temporal[field] = _string_list(value[field])
+    return temporal
+
+
+def _aggregation_intent(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    aggregation: dict[str, Any] = {}
+    if isinstance(value.get("operation"), str):
+        aggregation["operation"] = value["operation"]
+    if isinstance(value.get("distinct"), bool):
+        aggregation["distinct"] = value["distinct"]
+    for field in _AGGREGATION_STRING_LIST_FIELDS:
+        if field in value:
+            aggregation[field] = _string_list(value[field])
+    return aggregation
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, str)]

@@ -7,7 +7,7 @@ import pytest
 
 import fusion_memory.retrieval.product_engine as product_engine_module
 import fusion_memory.retrieval.selection as selection_module
-from fusion_memory.core.models import Candidate, Scope
+from fusion_memory.core.models import Candidate, EvidencePack, Scope
 from fusion_memory.core.text import stable_hash
 from fusion_memory.model_pool import EndpointUnavailable
 from fusion_memory.retrieval.context import (
@@ -17,6 +17,7 @@ from fusion_memory.retrieval.context import (
     ProviderKind,
     ProviderRequest,
     RetrievalContext,
+    RetrievalResult,
     SearchRequest,
 )
 from fusion_memory.retrieval.engine import RetrievalUnavailable
@@ -80,6 +81,32 @@ class StaticRegistry:
     ) -> tuple[ProviderOutcome, ...]:
         self.calls += 1
         return self.outcomes
+
+
+class StubPackBuilder:
+    def build(
+        self,
+        context: RetrievalContext,
+        request: SearchRequest,
+        result: RetrievalResult,
+        token_budget: int,
+    ) -> EvidencePack:
+        del context, result
+        return EvidencePack(
+            query=request.query,
+            answer_policy="abstain_if_not_supported",
+            current_views=[],
+            entity_profiles=[],
+            facts=[],
+            events=[],
+            source_spans=[],
+            conflicts=[],
+            coverage={"token_budget": token_budget},
+            debug_trace=[],
+        )
+
+
+PACK_BUILDER = StubPackBuilder()
 
 
 @dataclass
@@ -146,7 +173,11 @@ def engine_fixture() -> EngineFixture:
         include_session=False,
     )
     return EngineFixture(
-        engine=ProductRetrievalEngine(StaticPlanner(plan), StaticRegistry(outcomes)),
+        engine=ProductRetrievalEngine(
+            StaticPlanner(plan),
+            StaticRegistry(outcomes),
+            pack_builder=PACK_BUILDER,
+        ),
         context=context,
         request=request,
         plan=plan,
@@ -191,6 +222,7 @@ def test_engine_degrades_when_one_provider_is_unavailable(engine_fixture: Engine
                 ProviderOutcome(ProviderKind.LEXICAL, (lexical,), 0.5),
             )
         ),
+        pack_builder=PACK_BUILDER,
     )
 
     result = engine.search(engine_fixture.context, engine_fixture.request)
@@ -210,6 +242,7 @@ def test_engine_raises_when_all_planned_providers_fail(engine_fixture: EngineFix
                 _failed_outcome(ProviderKind.LEXICAL),
             )
         ),
+        pack_builder=PACK_BUILDER,
     )
 
     with pytest.raises(RetrievalUnavailable, match="all planned providers failed"):
@@ -235,6 +268,7 @@ def test_engine_uses_safe_default_for_invalid_plan(engine_fixture: EngineFixture
                 ),
             )
         ),
+        pack_builder=PACK_BUILDER,
     )
 
     result = engine.search(engine_fixture.context, engine_fixture.request)
@@ -329,6 +363,7 @@ def test_engine_sanitizes_provider_unavailable_code_in_coverage_and_trace(
     engine = ProductRetrievalEngine(
         StaticPlanner(engine_fixture.plan),
         ProductProviderRegistry([FailingVectorProvider(), StaticLexicalProvider()]),
+        pack_builder=PACK_BUILDER,
     )
 
     result = engine.search(engine_fixture.context, engine_fixture.request)
@@ -436,6 +471,7 @@ def test_balanced_engine_runs_rrf_reranker_and_mmr_exactly_once(
         StaticPlanner(plan),
         engine_fixture.engine.registry,
         reranker=TrackingReranker(),
+        pack_builder=PACK_BUILDER,
     )
 
     engine.search(engine_fixture.context, request)
@@ -472,7 +508,11 @@ def test_selection_orders_exact_rrf_and_utility_ties_by_candidate_id() -> None:
 
 
 def test_engine_propagates_planner_exceptions(engine_fixture: EngineFixture) -> None:
-    engine = ProductRetrievalEngine(RaisingPlanner(), StaticRegistry(()))
+    engine = ProductRetrievalEngine(
+        RaisingPlanner(),
+        StaticRegistry(()),
+        pack_builder=PACK_BUILDER,
+    )
 
     with pytest.raises(RuntimeError, match="planner programming error"):
         engine.search(engine_fixture.context, engine_fixture.request)
@@ -490,6 +530,7 @@ def test_engine_keeps_pre_rerank_selection_when_endpoint_is_unavailable(
         StaticPlanner(plan),
         StaticRegistry(engine_fixture.engine.registry.outcomes),
         reranker=UnavailableReranker(),
+        pack_builder=PACK_BUILDER,
     )
 
     result = engine.search(engine_fixture.context, engine_fixture.request)
@@ -511,6 +552,7 @@ def test_engine_propagates_non_endpoint_reranker_errors(engine_fixture: EngineFi
         StaticPlanner(plan),
         StaticRegistry(engine_fixture.engine.registry.outcomes),
         reranker=BrokenReranker(),
+        pack_builder=PACK_BUILDER,
     )
 
     with pytest.raises(TypeError, match="reranker contract violation"):
