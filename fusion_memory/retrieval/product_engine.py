@@ -11,6 +11,7 @@ from fusion_memory.retrieval.context import (
 )
 from fusion_memory.retrieval.engine import RetrievalUnavailable
 from fusion_memory.retrieval.product_planner import ProductQueryPlanner
+from fusion_memory.retrieval.product_evidence_pack import ProductEvidencePackBuilder
 from fusion_memory.retrieval.providers.product_base import ProviderOutcome
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.selection import select_candidates
@@ -44,11 +45,24 @@ class ProductRetrievalEngine:
         *,
         reranker: Reranker | None = None,
         mmr_lambda: float = 0.72,
+        pack_builder: ProductEvidencePackBuilder | None = None,
     ) -> None:
         self.planner = planner or ProductQueryPlanner()
         self.registry = registry
         self.reranker = reranker or LexicalCrossEncoderReranker()
         self.mmr_lambda = mmr_lambda
+        self.pack_builder = pack_builder
+
+    def build_evidence_pack(
+        self,
+        context: RetrievalContext,
+        request: SearchRequest,
+        result: RetrievalResult,
+        token_budget: int,
+    ):
+        if self.pack_builder is None:
+            raise RuntimeError("ProductRetrievalEngine requires a pack_builder to build evidence packs")
+        return self.pack_builder.build(context, request, result, token_budget)
 
     def search(
         self,
