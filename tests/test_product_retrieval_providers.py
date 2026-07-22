@@ -490,6 +490,61 @@ def test_temporal_provider_keeps_query_relevant_records_in_descending_recency(
     assert all("temporal_score" in candidate.scores for candidate in outcome.candidates)
 
 
+@pytest.mark.parametrize("provider_type", [TemporalProvider, ChronologyProvider])
+def test_temporal_and_chronology_provider_repository_is_read_only(
+    product_provider_context, repository_fake, provider_type
+) -> None:
+    provider = provider_type(repository_fake)
+
+    assert provider.repository is repository_fake
+    with pytest.raises(AttributeError):
+        provider.repository = RepositoryFake()
+
+
+def test_temporal_provider_passes_true_session_visibility_to_repository(product_provider_context, repository_fake) -> None:
+    context = _with_session(product_provider_context("Atlas", ProviderKind.TEMPORAL))
+
+    TemporalProvider(repository_fake).recall(context)
+
+    assert repository_fake.calls == [
+        ("list_spans", {"scope": context.runtime.scope, "include_session": True}),
+        ("list_events", {"scope": context.runtime.scope, "include_session": True}),
+    ]
+
+
+def test_chronology_provider_passes_context_to_selector_and_fallback_repository(
+    product_provider_context, repository_fake, monkeypatch
+) -> None:
+    received: dict[str, object] = {}
+
+    def select_candidates(query, scope, repository, limit, *, include_session):
+        received.update(
+            query=query,
+            scope=scope,
+            repository=repository,
+            limit=limit,
+            include_session=include_session,
+        )
+        return [], {}
+
+    monkeypatch.setattr(
+        "fusion_memory.retrieval.providers.chronology.select_persisted_graph_event_ordering_candidates",
+        select_candidates,
+    )
+    context = _with_session(product_provider_context("Atlas timeline", ProviderKind.CHRONOLOGY))
+
+    ChronologyProvider(repository_fake).recall(context)
+
+    assert received == {
+        "query": context.request.query,
+        "scope": context.runtime.scope,
+        "repository": repository_fake,
+        "limit": context.limit,
+        "include_session": True,
+    }
+    assert repository_fake.calls == [("list_events", {"scope": context.runtime.scope, "include_session": True})]
+
+
 def test_registry_records_model_provider_failure_and_keeps_lexical_result(
     product_provider_context, repository_fake
 ) -> None:
@@ -541,6 +596,28 @@ def test_registry_records_model_provider_failure_and_keeps_lexical_result(
     assert outcomes[0].failure is not None
     assert outcomes[0].failure.error_code == "model_unavailable"
     assert [candidate.id for candidate in outcomes[1].candidates] == ["lexical-1"]
+
+
+def test_registry_does_not_recall_provider_after_deadline_expires(product_provider_context, repository_fake) -> None:
+    class RecordingProvider:
+        kind = ProviderKind.VECTOR
+
+        def __init__(self) -> None:
+            self.repository = repository_fake
+            self.was_recalled = False
+
+        def recall(self, context: ProviderContext) -> ProviderOutcome:
+            self.was_recalled = True
+            raise AssertionError("expired request must not recall a provider")
+
+    context = product_provider_context("Atlas", ProviderKind.VECTOR)
+    runtime = replace(context.runtime, deadline=datetime.now(timezone.utc) - timedelta(seconds=1))
+    provider = RecordingProvider()
+
+    with pytest.raises(TimeoutError, match="retrieval deadline exceeded"):
+        ProductProviderRegistry([provider]).run(runtime, context.request, context.plan)
+
+    assert not provider.was_recalled
 
 
 def test_registry_skips_disabled_provider(product_provider_context, repository_fake) -> None:

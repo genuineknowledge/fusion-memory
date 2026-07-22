@@ -17,14 +17,18 @@ class ChronologyProvider:
     kind = ProviderKind.CHRONOLOGY
 
     def __init__(self, repository: MemorySearchRepository) -> None:
-        self.repository = repository
+        self._repository = repository
+
+    @property
+    def repository(self) -> MemorySearchRepository:
+        return self._repository
 
     def recall(self, context: ProviderContext) -> ProviderOutcome:
         started = perf_counter()
         graph_candidates, _telemetry = select_persisted_graph_event_ordering_candidates(
             context.request.query,
             context.runtime.scope,
-            self.repository,
+            self._repository,
             context.limit,
             include_session=context.runtime.include_session,
         )
@@ -34,7 +38,7 @@ class ChronologyProvider:
             candidates = tuple(
                 _event_candidate(event)
                 for event in sorted(
-                    self.repository.list_events(
+                    self._repository.list_events(
                         context.runtime.scope,
                         include_session=context.runtime.include_session,
                     ),

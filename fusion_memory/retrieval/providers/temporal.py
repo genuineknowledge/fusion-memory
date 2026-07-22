@@ -17,7 +17,11 @@ class TemporalProvider:
     kind = ProviderKind.TEMPORAL
 
     def __init__(self, repository: MemorySearchRepository) -> None:
-        self.repository = repository
+        self._repository = repository
+
+    @property
+    def repository(self) -> MemorySearchRepository:
+        return self._repository
 
     def recall(self, context: ProviderContext) -> ProviderOutcome:
         started = perf_counter()
@@ -26,7 +30,7 @@ class TemporalProvider:
         time_range = context.request.time_range
         records: list[tuple[datetime, Candidate]] = []
 
-        for span in self.repository.list_spans(scope, include_session=include_session):
+        for span in self._repository.list_spans(scope, include_session=include_session):
             if not _include_record(context.request.query, span.content, span.timestamp, time_range):
                 continue
             records.append(
@@ -48,7 +52,7 @@ class TemporalProvider:
                 )
             )
 
-        for event in self.repository.list_events(scope, include_session=include_session):
+        for event in self._repository.list_events(scope, include_session=include_session):
             timestamp = event.time_start or event.time_end
             if timestamp is None or not _include_record(context.request.query, event.description, timestamp, time_range):
                 continue
