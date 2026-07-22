@@ -57,8 +57,18 @@ def _model_call_summary(model_calls: list[dict[str, Any]]) -> dict[str, Any]:
                 usage_totals[key] = usage_totals.get(key, 0.0) + float(value)
     return {
         "count": len(model_calls),
-        "model_versions": sorted({str(call.get("model_version")) for call in model_calls if call.get("model_version")}),
-        "total_latency_ms": sum(float(call.get("latency_ms", 0.0)) for call in model_calls if isinstance(call.get("latency_ms"), int | float)),
+        "model_versions": sorted(
+            {
+                str(call.get("model_version"))
+                for call in model_calls
+                if call.get("model_version")
+            }
+        ),
+        "total_latency_ms": sum(
+            float(call.get("latency_ms", 0.0))
+            for call in model_calls
+            if isinstance(call.get("latency_ms"), int | float)
+        ),
         "usage": usage_totals,
     }
 
@@ -120,7 +130,16 @@ def _model_calls_since(service: Any, marks: dict[int, int]) -> list[dict[str, An
             if isinstance(call, dict):
                 calls_out.append(_sanitize_model_call(component, source, call))
             else:
-                calls_out.append({"component": component, "model_version": getattr(source, "version", source.__class__.__name__)})
+                calls_out.append(
+                    {
+                        "component": component,
+                        "model_version": getattr(
+                            source,
+                            "version",
+                            source.__class__.__name__,
+                        ),
+                    }
+                )
     return calls_out
 
 

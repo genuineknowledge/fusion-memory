@@ -1298,6 +1298,42 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("deployment_deadline", pack.coverage["temporal_target_roles"])
         self.assertNotIn("temporal_role_candidates", pack.coverage)
 
+    def test_temporal_lookup_uses_topic_scope_before_date_roles(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+        memory.add(
+            "The screenplay launch preparation has a final deployment deadline of March 20, 2024.",
+            scope,
+            ts("2026-06-01T09:00:00+00:00"),
+            {"source_uri": "beam:test:20:batch1:msg1"},
+        )
+        memory.add(
+            "The transaction management features are completed by January 15, 2024.",
+            scope,
+            ts("2026-06-01T10:00:00+00:00"),
+            {"source_uri": "beam:test:1:batch1:msg1"},
+        )
+        memory.add(
+            "The final deployment deadline for the budget tracker is March 15, 2024.",
+            scope,
+            ts("2026-06-02T10:00:00+00:00"),
+            {"source_uri": "beam:test:1:batch1:msg2"},
+        )
+
+        pack = memory.answer_context(
+            (
+                "How many weeks do I have between finishing the transaction management "
+                "features and the final deployment deadline?"
+            ),
+            scope,
+            budget={"limit": 6},
+        )
+
+        content = " ".join(span["content"] for span in pack.source_spans)
+        self.assertIn("transaction management features", content)
+        self.assertIn("March 15, 2024", content)
+        self.assertNotIn("screenplay launch preparation", content)
+
     def test_temporal_lookup_infers_year_for_month_day_ranges(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
@@ -1531,6 +1567,49 @@ class FusionMemoryTests(unittest.TestCase):
         content = " ".join(span["content"].lower() for span in pack.source_spans)
         self.assertIn("downloaded", content)
         self.assertIn("12 days", content)
+
+    def test_event_ordering_topic_scope_prevents_generic_milestone_bleed(self) -> None:
+        memory = MemoryService()
+        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
+        memory.add(
+            "I'm implementing transaction CRUD response handling for my budget tracker.",
+            scope,
+            ts("2026-06-01T10:00:00+00:00"),
+            {"source_uri": "beam:test:1:batch1:msg1"},
+        )
+        memory.add(
+            "I'm configuring Render deployment with Gunicorn workers for the budget tracker.",
+            scope,
+            ts("2026-06-02T10:00:00+00:00"),
+            {"source_uri": "beam:test:1:batch1:msg2"},
+        )
+        memory.add(
+            "I started managing stress by setting no-work Sundays and reducing burnout.",
+            scope,
+            ts("2026-06-03T10:00:00+00:00"),
+            {"source_uri": "beam:test:16:batch1:msg1"},
+        )
+        memory.add(
+            "I handled financial concerns by tracking rent, groceries, and emergency savings.",
+            scope,
+            ts("2026-06-04T10:00:00+00:00"),
+            {"source_uri": "beam:test:16:batch1:msg2"},
+        )
+
+        pack = memory.answer_context(
+            (
+                "Can you walk me through the order in which I brought up different ways "
+                "I've been managing stress and financial concerns throughout our chats, in order?"
+            ),
+            scope,
+            budget={"limit": 8},
+        )
+
+        content = " ".join(span["content"] for span in pack.source_spans).lower()
+        self.assertIn("managing stress", content)
+        self.assertIn("financial concerns", content)
+        self.assertNotIn("transaction crud", content)
+        self.assertNotIn("gunicorn", content)
 
     def test_summarization_expands_same_topic_group_timeline(self) -> None:
         memory = MemoryService()
@@ -2780,8 +2859,14 @@ class FusionMemoryTests(unittest.TestCase):
             scope,
             ts("2026-01-01T10:00:00+00:00"),
         )
-        memory.add(
-            {"role": "user", "content": "I switched Project Atlas retrieval from Qdrant to Postgres pgvector for production."},
+        current_add = memory.add(
+            {
+                "role": "user",
+                "content": (
+                    "I switched Project Atlas retrieval from Qdrant to "
+                    "Postgres pgvector for production."
+                ),
+            },
             scope,
             ts("2026-01-08T10:00:00+00:00"),
         )
@@ -2797,9 +2882,21 @@ class FusionMemoryTests(unittest.TestCase):
             budget={"allow_cross_session": True, "limit": 4},
         )
 
-        evidence = "\n".join(span["content"] for span in pack.source_spans)
-        self.assertIn("Postgres pgvector", evidence)
-        self.assertNotIn("initially prefer Qdrant", evidence)
+        contents = [span["content"] for span in pack.source_spans]
+        current_index = next(
+            index for index, content in enumerate(contents) if "Postgres pgvector" in content
+        )
+        history_index = next(
+            index
+            for index, content in enumerate(contents)
+            if "initially prefer Qdrant" in content
+        )
+        self.assertLess(current_index, history_index)
+
+        current_view = next(
+            view for view in pack.current_views if "Postgres pgvector" in view["text"]
+        )
+        self.assertTrue(set(current_add.span_ids) <= set(current_view["source_span_ids"]))
 
     def test_chinese_error_query_recalls_traceback_guidance(self) -> None:
         memory = MemoryService()

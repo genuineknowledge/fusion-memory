@@ -12,7 +12,12 @@ def deterministic_id(prefix: str, *parts: str | None) -> str:
 
 
 class ViewBuilder:
-    def build_current_views(self, scope: Scope, facts: list[MemoryFact], superseded_fact_ids: set[str]) -> list[CurrentView]:
+    def build_current_views(
+        self,
+        scope: Scope,
+        facts: list[MemoryFact],
+        superseded_fact_ids: set[str],
+    ) -> list[CurrentView]:
         active = [fact for fact in facts if fact.fact_id not in superseded_fact_ids]
         views: list[CurrentView] = []
         for category, view_type in [

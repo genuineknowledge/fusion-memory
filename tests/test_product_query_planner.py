@@ -27,3 +27,22 @@ def test_planner_uses_recency_for_current_state() -> None:
     assert ProviderKind.TEMPORAL in _providers(plan)
     assert plan.intent == "current_state"
     assert plan.ordering is OrderingMode.RECENCY
+
+
+def test_planner_does_not_emit_semantic_current_state_whitelists() -> None:
+    owner_plan = ProductQueryPlanner().plan(
+        SearchRequest("Who is the current owner of the Acme service?", 6)
+    )
+    database_plan = ProductQueryPlanner().plan(
+        SearchRequest("What database does the Acme service currently use?", 6)
+    )
+    retrieval_plan = ProductQueryPlanner().plan(
+        SearchRequest("What retrieval backend does Project Atlas currently use?", 6)
+    )
+    latest_plan = ProductQueryPlanner().plan(
+        SearchRequest("What is the latest Atlas backend?", 6)
+    )
+
+    for plan in (owner_plan, database_plan, retrieval_plan, latest_plan):
+        assert "entity_context_terms" not in plan.query_intent
+        assert "current_state_slot_groups" not in plan.query_intent
