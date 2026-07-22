@@ -33,4 +33,9 @@ class ProviderOutcome:
 
 
 class CandidateProvider(Protocol):
+    kind: ProviderKind
+
+    @property
+    def repository(self) -> MemorySearchRepository: ...
+
     def recall(self, context: ProviderContext) -> ProviderOutcome: ...

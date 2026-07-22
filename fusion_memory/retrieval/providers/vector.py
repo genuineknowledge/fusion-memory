@@ -4,6 +4,7 @@ from time import perf_counter
 
 from fusion_memory.core.models import Candidate
 from fusion_memory.model_pool import EndpointUnavailable
+from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
 from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome, ProviderUnavailable
 
@@ -12,8 +13,14 @@ VECTOR_SOURCE = "product_vector"
 
 
 class VectorProvider:
+    kind = ProviderKind.VECTOR
+
     def __init__(self, repository: MemorySearchRepository) -> None:
         self._repository = repository
+
+    @property
+    def repository(self) -> MemorySearchRepository:
+        return self._repository
 
     def recall(self, context: ProviderContext) -> ProviderOutcome:
         started = perf_counter()

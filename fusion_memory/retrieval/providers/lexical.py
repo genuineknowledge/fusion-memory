@@ -6,6 +6,7 @@ from typing import Any
 
 from fusion_memory.core.models import Candidate
 from fusion_memory.core.text import keyword_score
+from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
 from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome
 
@@ -14,8 +15,14 @@ LEXICAL_SOURCE = "product_lexical"
 
 
 class LexicalProvider:
+    kind = ProviderKind.LEXICAL
+
     def __init__(self, repository: MemorySearchRepository) -> None:
         self._repository = repository
+
+    @property
+    def repository(self) -> MemorySearchRepository:
+        return self._repository
 
     def recall(self, context: ProviderContext) -> ProviderOutcome:
         started = perf_counter()

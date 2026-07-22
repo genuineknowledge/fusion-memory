@@ -3,6 +3,7 @@ from __future__ import annotations
 from time import perf_counter
 
 from fusion_memory.core.models import Candidate
+from fusion_memory.retrieval.context import ProviderKind
 from fusion_memory.retrieval.ports import MemorySearchRepository
 from fusion_memory.retrieval.providers.product_base import ProviderContext, ProviderOutcome
 
@@ -11,8 +12,14 @@ ENTITY_SOURCE = "product_entity"
 
 
 class EntityProvider:
+    kind = ProviderKind.ENTITY
+
     def __init__(self, repository: MemorySearchRepository) -> None:
         self._repository = repository
+
+    @property
+    def repository(self) -> MemorySearchRepository:
+        return self._repository
 
     def recall(self, context: ProviderContext) -> ProviderOutcome:
         started = perf_counter()
