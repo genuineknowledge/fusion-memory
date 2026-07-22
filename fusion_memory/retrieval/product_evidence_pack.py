@@ -8,6 +8,7 @@ from typing import Any
 from fusion_memory.core.config import DEFAULT_CONFIG, MemoryConfig
 from fusion_memory.core.models import Candidate, EvidencePack, EvidenceSpan
 from fusion_memory.core.text import ENTITY_STOPWORDS, compact_summary, tokenize
+from fusion_memory.retrieval.aggregation_keys import aggregation_keys_for_query
 from fusion_memory.retrieval.context import (
     OrderingMode,
     ProviderKind,
@@ -88,23 +89,58 @@ class ProductEvidencePackBuilder:
             tuple[dict[str, Any], int | None, datetime, int, int]
         ] = []
         seen_span_ids: set[str] = set()
+        hydrated_spans: dict[str, EvidenceSpan | None] = {}
         target_terms = _product_target_terms(result)
-        candidates = _evidence_candidates(result, target_terms)
+        candidates = result.candidates
         selected_views = self._selected_views(context, candidates)
+        requires_duration = _requires_duration(result)
+        seen_duration_support: set[
+            tuple[frozenset[str], str, tuple[str, ...]]
+        ] = set()
 
         for candidate_rank, candidate in enumerate(candidates):
             for span_id in candidate.source_span_ids:
                 if not span_id or span_id in seen_span_ids:
                     continue
-                seen_span_ids.add(span_id)
-                span = self.repository.get_span(
-                    span_id,
-                    context.scope,
-                    include_session=context.include_session,
-                )
+                if span_id not in hydrated_spans:
+                    hydrated_spans[span_id] = self.repository.get_span(
+                        span_id,
+                        context.scope,
+                        include_session=context.include_session,
+                    )
+                span = hydrated_spans[span_id]
                 if span is None:
                     continue
-                record, content_tokens = self._source_record(candidate, span)
+                aggregation_keys = _source_aggregation_keys(
+                    request.query,
+                    result,
+                    span,
+                )
+                support = _source_span_support(
+                    candidate,
+                    span,
+                    target_terms,
+                    aggregation_keys,
+                )
+                if not support:
+                    continue
+                if requires_duration:
+                    endpoint_role = _endpoint_role(span.content)
+                    provenance = (
+                        (span.span_id,)
+                        if endpoint_role == "unknown"
+                        else ()
+                    )
+                    duration_support = (support, endpoint_role, provenance)
+                    if duration_support in seen_duration_support:
+                        continue
+                    seen_duration_support.add(duration_support)
+                seen_span_ids.add(span_id)
+                record, content_tokens = self._source_record(
+                    candidate,
+                    span,
+                    aggregation_keys,
+                )
                 source_records.append(
                     (
                         record,
@@ -209,20 +245,28 @@ class ProductEvidencePackBuilder:
             if view.view_id in selected_view_ids
         }
 
-    def _source_record(self, candidate: Candidate, span: EvidenceSpan) -> tuple[dict[str, Any], int]:
+    def _source_record(
+        self,
+        candidate: Candidate,
+        span: EvidenceSpan,
+        aggregation_keys: list[str],
+    ) -> tuple[dict[str, Any], int]:
         content = compact_summary(span.content, self.config.evidence_span_summary_chars)
+        record = {
+            "id": span.span_id,
+            "session_id": span.scope.session_id,
+            "turn_id": span.turn_id,
+            "speaker": span.speaker,
+            "timestamp": span.timestamp.isoformat(),
+            "source_uri": span.source_uri,
+            "content": content,
+            "candidate_source": candidate.source,
+            "source_span_ids": [span.span_id],
+        }
+        if aggregation_keys:
+            record["aggregation_keys"] = aggregation_keys
         return (
-            {
-                "id": span.span_id,
-                "session_id": span.scope.session_id,
-                "turn_id": span.turn_id,
-                "speaker": span.speaker,
-                "timestamp": span.timestamp.isoformat(),
-                "source_uri": span.source_uri,
-                "content": content,
-                "candidate_source": candidate.source,
-                "source_span_ids": list(candidate.source_span_ids),
-            },
+            record,
             len(tokenize(content)),
         )
 
@@ -294,10 +338,12 @@ class ProductEvidencePackBuilder:
 def _product_target_terms(result: RetrievalResult) -> frozenset[str] | None:
     raw_terms = result.plan.query_intent.get("target_terms")
     if not isinstance(raw_terms, (list, tuple)):
-        return None
+        if not result.plan.entities:
+            return None
+        raw_terms = ()
     return frozenset(
         token
-        for value in raw_terms
+        for value in (*raw_terms, *result.plan.entities)
         if isinstance(value, str)
         for token in _support_tokens(value)
     )
@@ -314,59 +360,63 @@ def _is_support_token(token: str) -> bool:
     return len(token) >= 3 and token not in _GENERIC_SUPPORT_TOKENS
 
 
-def _evidence_candidates(
-    result: RetrievalResult,
-    target_terms: frozenset[str] | None,
-) -> tuple[Candidate, ...]:
-    if target_terms is None:
-        return result.candidates
-    if not target_terms:
-        return ()
-
-    requires_duration = bool(
+def _requires_duration(result: RetrievalResult) -> bool:
+    return bool(
         isinstance(result.plan.query_intent.get("temporal"), Mapping)
         and result.plan.query_intent["temporal"].get("requires_duration") is True
     )
-    candidates: list[Candidate] = []
-    seen_duration_support: set[
-        tuple[frozenset[str], str, tuple[str, ...]]
-    ] = set()
-    for candidate in result.candidates:
-        support = _candidate_support(candidate, target_terms)
-        if not support:
-            continue
-        if requires_duration:
-            endpoint_role = _candidate_endpoint_role(candidate)
-            provenance = (
-                tuple(candidate.source_span_ids)
-                if endpoint_role == "unknown"
-                else ()
-            )
-            duration_support = (support, endpoint_role, provenance)
-            if duration_support in seen_duration_support:
-                continue
-            seen_duration_support.add(duration_support)
-        candidates.append(candidate)
-    return tuple(candidates)
 
 
-def _candidate_support(
+def _source_aggregation_keys(
+    query: str,
+    result: RetrievalResult,
+    span: EvidenceSpan,
+) -> list[str]:
+    if (
+        span.speaker not in {"user", "document"}
+        or not _plan_requests_aggregation(result)
+    ):
+        return []
+    return aggregation_keys_for_query(query, span.content, speaker=span.speaker)
+
+
+def _plan_requests_aggregation(result: RetrievalResult) -> bool:
+    aggregation = result.plan.query_intent.get("aggregation")
+    return bool(
+        isinstance(aggregation, Mapping)
+        and aggregation.get("operation") not in {None, "", "none"}
+    )
+
+
+def _source_span_support(
     candidate: Candidate,
-    target_terms: frozenset[str],
+    span: EvidenceSpan,
+    target_terms: frozenset[str] | None,
+    aggregation_keys: list[str],
 ) -> frozenset[str]:
-    overlap = target_terms.intersection(tokenize(candidate.text))
+    if target_terms is None:
+        return frozenset({f"selected:{candidate.id}:{span.span_id}"})
+    overlap = target_terms.intersection(tokenize(span.content))
     if overlap:
         return frozenset(overlap)
-    if max(
-        float(candidate.scores.get("exact_signal", 0.0)),
-        float(candidate.scores.get("value_exact_signal", 0.0)),
-    ) > 0:
+    if aggregation_keys:
+        return frozenset(f"aggregation:{key}" for key in aggregation_keys)
+    candidate_span_ids = {
+        span_id for span_id in candidate.source_span_ids if span_id
+    }
+    if (
+        len(candidate_span_ids) == 1
+        and max(
+            float(candidate.scores.get("exact_signal", 0.0)),
+            float(candidate.scores.get("value_exact_signal", 0.0)),
+        )
+        > 0
+    ):
         return frozenset({f"exact:{candidate.id}"})
     return frozenset()
 
 
-def _candidate_endpoint_role(candidate: Candidate) -> str:
-    text = candidate.text
+def _endpoint_role(text: str) -> str:
     has_start = bool(_DURATION_START_RE.search(text))
     has_end = bool(_DURATION_END_RE.search(text))
     if has_start and has_end:

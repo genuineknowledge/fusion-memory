@@ -13,6 +13,7 @@ from fusion_memory.core.models import (
     MemoryFact,
     Scope,
 )
+from fusion_memory.core.text import tokenize
 from fusion_memory.ingestion.candidate_records import candidate_to_fact
 from fusion_memory.ingestion.extractors import RuleBasedExtractor
 from fusion_memory.ingestion.views import ViewBuilder
@@ -105,12 +106,13 @@ def _span(
     timestamp: datetime,
     content: str = "Atlas source evidence",
     scope: Scope | None = None,
+    speaker: str = "user",
 ) -> EvidenceSpan:
     return EvidenceSpan(
         span_id=span_id,
         scope=scope or Scope(user_id="user-a", session_id="session-a"),
         turn_id=f"turn-{span_id}",
-        speaker="user",
+        speaker=speaker,
         span_type="turn",
         content=content,
         content_hash=f"hash-{span_id}",
@@ -129,6 +131,7 @@ def _candidate(
     timeline_index: int | None = None,
     source_span_ids: list[str] | None = None,
     metadata: dict[str, object] | None = None,
+    scores: dict[str, float] | None = None,
 ) -> Candidate:
     candidate_metadata = dict(metadata or {})
     if timeline_index is not None:
@@ -138,7 +141,7 @@ def _candidate(
         type=candidate_type,
         text=text,
         source=source,
-        scores={"bm25_score": 0.8},
+        scores=scores or {"bm25_score": 0.8},
         source_span_ids=source_span_ids if source_span_ids is not None else [str(span_id)],
         metadata=candidate_metadata,
     )
@@ -644,7 +647,7 @@ def test_product_pack_does_not_treat_arbitrary_selected_span_as_aggregate_item()
     assert pack.coverage["coverage_insufficient"] is True
 
 
-def test_product_pack_does_not_infer_untyped_multi_session_aggregate_items() -> None:
+def test_product_pack_authorizes_only_typed_per_span_aggregation_items() -> None:
     scope = Scope(user_id="user-a")
     resume = _span(
         "span-resume",
@@ -664,7 +667,20 @@ def test_product_pack_does_not_infer_untyped_multi_session_aggregate_items() -> 
         content="I drink coffee every morning.",
         scope=scope,
     )
-    repository = SpanRepository([resume, portfolio, coffee])
+    database = _span(
+        "span-database",
+        timestamp=datetime(2026, 7, 4, tzinfo=timezone.utc),
+        content="Remember that my database is PostgreSQL.",
+        scope=scope,
+    )
+    assistant = _span(
+        "span-interview-advice",
+        timestamp=datetime(2026, 7, 5, tzinfo=timezone.utc),
+        content="Selected resume improvements for interview practice.",
+        scope=scope,
+        speaker="assistant",
+    )
+    repository = SpanRepository([resume, portfolio, coffee, database, assistant])
     context = RetrievalContext(
         scope=scope,
         user_id="user-a",
@@ -674,15 +690,24 @@ def test_product_pack_does_not_infer_untyped_multi_session_aggregate_items() -> 
         include_session=False,
     )
     result = RetrievalResult(
-        candidates=tuple(
+        candidates=(
             _candidate(
-                f"candidate-{span.span_id}",
-                span.span_id,
-                text=span.content,
+                "candidate-planning-areas",
+                text="Selected planning areas across sessions.",
                 source="product_lexical+product_vector",
-                metadata={"speaker": "user"},
-            )
-            for span in (resume, portfolio, coffee)
+                source_span_ids=[
+                    resume.span_id,
+                    portfolio.span_id,
+                    coffee.span_id,
+                    database.span_id,
+                    assistant.span_id,
+                ],
+                metadata={
+                    "aggregation_keys": ["area:cohort_umbrella"],
+                    "speaker": "user",
+                },
+                scores={"exact_signal": 1.0},
+            ),
         ),
         coverage={},
         trace={},
@@ -708,8 +733,22 @@ def test_product_pack_does_not_infer_untyped_multi_session_aggregate_items() -> 
         token_budget=1200,
     )
 
-    assert pack.source_spans == []
-    assert pack.answer_policy == "abstain_if_not_supported"
+    assert [span["id"] for span in pack.source_spans] == [
+        resume.span_id,
+        portfolio.span_id,
+    ]
+    assert {
+        span["id"]: span["aggregation_keys"]
+        for span in pack.source_spans
+    } == {
+        resume.span_id: ["area:resume_international_standards"],
+        portfolio.span_id: ["area:portfolio_project_selection"],
+    }
+    assert all(
+        "cohort_umbrella" not in key
+        for span in pack.source_spans
+        for key in span["aggregation_keys"]
+    )
 
 
 def test_product_pack_uses_active_current_view_provenance_for_recency() -> None:
@@ -2259,6 +2298,130 @@ def test_product_pack_keeps_unknown_duration_roles_by_distinct_provenance() -> N
     ]
 
 
+def test_product_pack_keeps_multi_span_duration_endpoints_supported_by_entities() -> None:
+    scope = Scope(user_id="user-a")
+    started = _span(
+        "span-atlas-start-multi",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Project Atlas began on January 1, 2026.",
+        scope=scope,
+    )
+    ended = _span(
+        "span-atlas-end-multi",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="Project Atlas ended on February 1, 2026.",
+        scope=scope,
+    )
+    repository = SpanRepository([started, ended])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-duration-multi-span",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-atlas-duration",
+                text="Project Atlas duration endpoints.",
+                source_span_ids=[started.span_id, ended.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(
+            intent="temporal",
+            entities=("Project Atlas",),
+            query_intent={
+                "target_terms": ["weeks", "take"],
+                "temporal": {
+                    "requires_duration": True,
+                    "endpoint_roles": ["start", "end"],
+                },
+            },
+        ),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="How many weeks did Project Atlas take?", limit=2),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [
+        started.span_id,
+        ended.span_id,
+    ]
+    assert [span["source_span_ids"] for span in pack.source_spans] == [
+        [started.span_id],
+        [ended.span_id],
+    ]
+
+
+def test_product_pack_deduplicates_duration_only_after_source_authorization() -> None:
+    scope = Scope(user_id="user-a")
+    coffee = _span(
+        "span-unsupported-start",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="I drink coffee every morning.",
+        scope=scope,
+    )
+    started = _span(
+        "span-supported-start",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="Project Atlas started on January 1, 2026.",
+        scope=scope,
+    )
+    repository = SpanRepository([coffee, started])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-duration-authorized-dedupe",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-unsupported-start",
+                text="Project Atlas started on an exact date.",
+                source_span_ids=[coffee.span_id],
+            ),
+            _candidate(
+                "candidate-supported-start",
+                text=started.content,
+                source_span_ids=[started.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(
+            intent="temporal",
+            entities=("Project Atlas",),
+            query_intent={
+                "target_terms": ["project", "atlas"],
+                "temporal": {
+                    "requires_duration": True,
+                    "endpoint_roles": ["start", "end"],
+                },
+            },
+        ),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="How long did Project Atlas take?", limit=2),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [started.span_id]
+
+
 def test_product_pack_does_not_use_cjk_pronoun_as_query_support() -> None:
     scope = Scope(user_id="user-a")
     span = _span(
@@ -2729,6 +2892,238 @@ def test_product_pack_deduplicates_multiple_source_ids_in_engine_rank_order() ->
 
     assert [span["id"] for span in pack.source_spans] == ["span-1", "span-2", "span-3"]
     assert [call[0] for call in repository.calls] == ["span-1", "span-2", "span-3"]
+
+
+def test_product_pack_requires_each_multi_span_source_to_support_recency_target() -> None:
+    scope = Scope(user_id="user-a")
+    atlas = _span(
+        "span-atlas-deadline",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Project Atlas has a deadline on August 15.",
+        scope=scope,
+    )
+    coffee = _span(
+        "span-newer-coffee",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="I drink coffee every morning.",
+        scope=scope,
+    )
+    repository = SpanRepository([atlas, coffee])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-multi-span-recency",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-atlas-deadline",
+                text="Project Atlas has a deadline on August 15.",
+                source_span_ids=[coffee.span_id, atlas.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(
+            OrderingMode.RECENCY,
+            entities=("Project Atlas",),
+            query_intent={"target_terms": ["project", "atlas", "deadline"]},
+        ),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What is the current Project Atlas deadline?", limit=1),
+        result,
+        token_budget=len(tokenize(atlas.content)),
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [atlas.span_id]
+    assert pack.source_spans[0]["source_span_ids"] == [atlas.span_id]
+
+
+def test_product_pack_uses_hydrated_span_support_when_candidate_text_is_generic() -> None:
+    scope = Scope(user_id="user-a")
+    atlas = _span(
+        "span-generic-candidate-atlas",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Project Atlas has a deadline on Friday.",
+        scope=scope,
+    )
+    repository = SpanRepository([atlas])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-generic-candidate-text",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-generic-summary",
+                atlas.span_id,
+                text="Selected evidence.",
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(
+            entities=("Project Atlas",),
+            query_intent={"target_terms": ["project", "atlas", "deadline"]},
+        ),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What is the Project Atlas deadline?", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [atlas.span_id]
+
+
+def test_product_pack_uses_entities_when_target_terms_are_absent() -> None:
+    scope = Scope(user_id="user-a")
+    atlas = _span(
+        "span-entity-only-atlas",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="Project Atlas has a deadline on Friday.",
+        scope=scope,
+    )
+    coffee = _span(
+        "span-entity-only-coffee",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="I drink coffee every morning.",
+        scope=scope,
+    )
+    repository = SpanRepository([atlas, coffee])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-entity-only-targets",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-entity-only-atlas",
+                text="Project Atlas answer.",
+                source_span_ids=[coffee.span_id, atlas.span_id],
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(entities=("Project Atlas",), query_intent={}),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="Tell me about Project Atlas.", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [atlas.span_id]
+
+
+def test_product_pack_rejects_ambiguous_multi_span_exact_signal() -> None:
+    scope = Scope(user_id="user-a")
+    coffee = _span(
+        "span-exact-coffee",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="I drink coffee every morning.",
+        scope=scope,
+    )
+    database = _span(
+        "span-exact-database",
+        timestamp=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        content="Remember that my database is PostgreSQL.",
+        scope=scope,
+    )
+    repository = SpanRepository([coffee, database])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-ambiguous-exact",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-exact-atlas",
+                text="Exact Project Atlas answer.",
+                source_span_ids=[coffee.span_id, database.span_id],
+                scores={"exact_signal": 1.0},
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(
+            entities=("Project Atlas",),
+            query_intent={"target_terms": ["project", "atlas"]},
+        ),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What is the exact Project Atlas answer?", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert pack.source_spans == []
+    assert pack.answer_policy == "abstain_if_not_supported"
+
+
+def test_product_pack_accepts_unambiguous_single_span_exact_signal() -> None:
+    scope = Scope(user_id="user-a")
+    source = _span(
+        "span-unambiguous-exact",
+        timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        content="The internal identifier is 7F3A.",
+        scope=scope,
+    )
+    repository = SpanRepository([source])
+    context = RetrievalContext(
+        scope=scope,
+        user_id="user-a",
+        now=datetime.now(timezone.utc),
+        trace_id="trace-unambiguous-exact",
+        deadline=None,
+        include_session=False,
+    )
+    result = RetrievalResult(
+        candidates=(
+            _candidate(
+                "candidate-exact-identifier",
+                source.span_id,
+                text="Exact identifier answer.",
+                scores={"exact_signal": 1.0},
+            ),
+        ),
+        coverage={},
+        trace={},
+        plan=_plan(query_intent={"target_terms": ["atlas", "identifier"]}),
+    )
+
+    pack = ProductEvidencePackBuilder(repository).build(
+        context,
+        SearchRequest(query="What is the Atlas identifier?", limit=1),
+        result,
+        token_budget=1200,
+    )
+
+    assert [span["id"] for span in pack.source_spans] == [source.span_id]
 
 
 @pytest.fixture

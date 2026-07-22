@@ -2047,9 +2047,36 @@ class FusionMemoryTests(unittest.TestCase):
     def test_multi_session_generic_user_spans_are_preserved_by_aggregation_signal(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
-        memory.add("I focused on adapting my resume to international standards.", scope, ts("2026-06-01T10:00:00+00:00"), {"source_uri": "beam:test:generic:batch1:msg1"})
-        memory.add("I also wanted to improve my portfolio project selection.", scope, ts("2026-06-02T10:00:00+00:00"), {"source_uri": "beam:test:generic:batch2:msg1"})
-        memory.add("You could also improve general interview practice.", scope, ts("2026-06-03T10:00:00+00:00"), {"source_uri": "beam:test:generic:batch3:msg1"})
+        memory.add(
+            "I focused on adapting my resume to international standards.",
+            scope,
+            ts("2026-06-01T10:00:00+00:00"),
+            {"source_uri": "beam:test:generic:batch1:msg1"},
+        )
+        memory.add(
+            "I also wanted to improve my portfolio project selection.",
+            scope,
+            ts("2026-06-02T10:00:00+00:00"),
+            {"source_uri": "beam:test:generic:batch2:msg1"},
+        )
+        memory.add(
+            "You could also improve general interview practice.",
+            scope,
+            ts("2026-06-03T10:00:00+00:00"),
+            {"source_uri": "beam:test:generic:batch3:msg1"},
+        )
+        memory.add(
+            "I drink coffee every morning.",
+            scope,
+            ts("2026-06-04T10:00:00+00:00"),
+            {"source_uri": "beam:test:generic:batch4:msg1"},
+        )
+        memory.add(
+            "Remember that my database is PostgreSQL.",
+            scope,
+            ts("2026-06-05T10:00:00+00:00"),
+            {"source_uri": "beam:test:generic:batch5:msg1"},
+        )
 
         pack = memory.answer_context(
             "How many different planning areas did I mention across my sessions?",
@@ -2060,7 +2087,14 @@ class FusionMemoryTests(unittest.TestCase):
         content = " ".join(span["content"].lower() for span in pack.source_spans)
         self.assertIn("resume to international standards", content)
         self.assertIn("portfolio project selection", content)
-        keyed_content = " ".join(span["content"].lower() for span in pack.source_spans if span.get("aggregation_keys"))
+        self.assertNotIn("interview practice", content)
+        self.assertNotIn("coffee", content)
+        self.assertNotIn("postgresql", content)
+        keyed_content = " ".join(
+            span["content"].lower()
+            for span in pack.source_spans
+            if span.get("aggregation_keys")
+        )
         self.assertNotIn("interview practice", keyed_content)
 
     def test_multi_session_expansion_spans_receive_generic_aggregation_keys(self) -> None:
