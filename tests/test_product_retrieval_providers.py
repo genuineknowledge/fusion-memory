@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +15,7 @@ from fusion_memory.core.models import (
     MemoryFact,
     Scope,
 )
+from fusion_memory.core.auth import AuthorizationError
 from fusion_memory.model_pool import EndpointUnavailable
 from fusion_memory.retrieval.context import (
     OrderingMode,
@@ -37,41 +40,74 @@ class RepositoryFake:
         self.profiles: list[tuple[EntityProfile, dict[str, float]]] = []
         self.entities: list[tuple[EntityRecord, dict[str, float]]] = []
         self.span_scores: list[tuple[EvidenceSpan, dict[str, float]]] = []
+        self.search_spans_error: Exception | None = None
         self.raise_endpoint_unavailable = False
-        self.calls: list[tuple[str, object]] = []
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
     def search_spans(self, query, scope, limit=20, speaker=None, *, include_session=False):
-        self.calls.append(("search_spans", scope))
+        self.calls.append(
+            (
+                "search_spans",
+                {
+                    "query": query,
+                    "scope": scope,
+                    "limit": limit,
+                    "speaker": speaker,
+                    "include_session": include_session,
+                },
+            )
+        )
+        if self.search_spans_error is not None:
+            raise self.search_spans_error
         if self.raise_endpoint_unavailable:
             raise EndpointUnavailable("all endpoints unavailable")
         return self.span_scores[:limit]
 
     def list_spans(self, scope, *, include_session=False):
-        self.calls.append(("list_spans", scope))
+        self.calls.append(("list_spans", {"scope": scope, "include_session": include_session}))
         return list(self.spans)
 
     def list_facts(self, scope, category=None, *, include_session=False):
-        self.calls.append(("list_facts", scope))
+        self.calls.append(
+            ("list_facts", {"scope": scope, "category": category, "include_session": include_session})
+        )
         return list(self.facts)
 
     def list_events(self, scope, *, include_session=False):
-        self.calls.append(("list_events", scope))
+        self.calls.append(("list_events", {"scope": scope, "include_session": include_session}))
         return list(self.events)
 
     def list_current_views(self, scope, view_type=None, *, include_session=False):
-        self.calls.append(("list_current_views", scope))
+        self.calls.append(
+            ("list_current_views", {"scope": scope, "view_type": view_type, "include_session": include_session})
+        )
         return list(self.views)
 
     def search_entity_profiles(self, query, scope, limit=20, *, include_session=False):
-        self.calls.append(("search_entity_profiles", scope))
+        self.calls.append(
+            (
+                "search_entity_profiles",
+                {"query": query, "scope": scope, "limit": limit, "include_session": include_session},
+            )
+        )
         return self.profiles[:limit]
 
     def search_entities(self, query, scope, limit=20, *, include_session=False):
-        self.calls.append(("search_entities", scope))
+        self.calls.append(
+            (
+                "search_entities",
+                {"query": query, "scope": scope, "limit": limit, "include_session": include_session},
+            )
+        )
         return self.entities[:limit]
 
     def get_span(self, span_id, scope=None, *, include_session=False):
-        self.calls.append(("get_span", scope))
+        self.calls.append(
+            (
+                "get_span",
+                {"span_id": span_id, "scope": scope, "include_session": include_session},
+            )
+        )
         return next((span for span in self.spans if span.span_id == span_id and span.scope == scope), None)
 
 
@@ -127,6 +163,10 @@ def _span(span_id: str, content: str, scope: Scope, *, timestamp: datetime | Non
     )
 
 
+def _with_session(context: ProviderContext) -> ProviderContext:
+    return replace(context, runtime=replace(context.runtime, include_session=True))
+
+
 def test_lexical_provider_reads_repository_without_service(product_provider_context, repository_fake) -> None:
     scope = Scope(user_id="user-a")
     repository_fake.spans = [_span("span-1", "Atlas uses Qdrant for retrieval.", scope)]
@@ -173,6 +213,45 @@ def test_vector_provider_converts_only_model_endpoint_unavailability(product_pro
     assert error.value.code == "model_unavailable"
 
 
+@pytest.mark.parametrize(
+    "repository_error",
+    [
+        sqlite3.OperationalError("database is locked"),
+        AuthorizationError("memory access denied"),
+        TypeError("repository contract violation"),
+    ],
+    ids=["storage", "authorization", "programming"],
+)
+def test_vector_provider_propagates_non_endpoint_errors_unchanged(
+    product_provider_context, repository_fake, repository_error: Exception
+) -> None:
+    repository_fake.search_spans_error = repository_error
+
+    with pytest.raises(type(repository_error)) as error:
+        VectorProvider(repository_fake).recall(product_provider_context("Atlas", ProviderKind.VECTOR))
+
+    assert error.value is repository_error
+
+
+def test_vector_provider_passes_true_session_visibility_to_repository(product_provider_context, repository_fake) -> None:
+    context = _with_session(product_provider_context("Atlas", ProviderKind.VECTOR))
+
+    VectorProvider(repository_fake).recall(context)
+
+    assert repository_fake.calls == [
+        (
+            "search_spans",
+            {
+                "query": "Atlas",
+                "scope": context.runtime.scope,
+                "limit": context.limit,
+                "speaker": context.plan.speaker,
+                "include_session": True,
+            },
+        )
+    ]
+
+
 def test_entity_provider_hydrates_only_source_spans_in_context_scope(product_provider_context, repository_fake) -> None:
     user_scope = Scope(user_id="user-a")
     other_scope = Scope(user_id="user-b")
@@ -200,7 +279,50 @@ def test_entity_provider_hydrates_only_source_spans_in_context_scope(product_pro
     assert outcome.candidates[0].source == "product_entity"
     assert outcome.candidates[0].metadata["entity_name"] == "Atlas"
     assert outcome.candidates[0].metadata["entity_id"] == "entity-atlas"
-    assert all(scope == user_scope for name, scope in repository_fake.calls if name == "get_span")
+    assert all(call["scope"] == user_scope for name, call in repository_fake.calls if name == "get_span")
+
+
+def test_entity_provider_passes_true_session_visibility_to_repository(product_provider_context, repository_fake) -> None:
+    scope = Scope(user_id="user-a")
+    source_span = _span("span-1", "Atlas uses Qdrant", scope)
+    repository_fake.spans = [source_span]
+    repository_fake.entities = [
+        (
+            EntityRecord(
+                entity_id="entity-atlas",
+                scope=scope,
+                name="Atlas",
+                entity_type="project",
+                aliases=[],
+                source_span_ids=[source_span.span_id],
+                observed_count=1,
+            ),
+            {"entity_overlap": 1.0, "score": 1.0},
+        )
+    ]
+    context = _with_session(product_provider_context("Atlas", ProviderKind.ENTITY))
+
+    EntityProvider(repository_fake).recall(context)
+
+    assert repository_fake.calls == [
+        (
+            "search_entities",
+            {
+                "query": "Atlas",
+                "scope": context.runtime.scope,
+                "limit": context.limit,
+                "include_session": True,
+            },
+        ),
+        (
+            "get_span",
+            {
+                "span_id": source_span.span_id,
+                "scope": context.runtime.scope,
+                "include_session": True,
+            },
+        ),
+    ]
 
 
 def test_lexical_provider_sorts_exact_phrase_then_score_timestamp_and_id(product_provider_context, repository_fake) -> None:
@@ -215,6 +337,41 @@ def test_lexical_provider_sorts_exact_phrase_then_score_timestamp_and_id(product
     outcome = LexicalProvider(repository_fake).recall(product_provider_context("Atlas Qdrant", ProviderKind.LEXICAL))
 
     assert [candidate.id for candidate in outcome.candidates] == ["later", "earlier", "higher-score"]
+
+
+def test_lexical_provider_breaks_full_ties_by_stable_id(product_provider_context, repository_fake) -> None:
+    scope = Scope(user_id="user-a")
+    timestamp = datetime.now(timezone.utc)
+    repository_fake.spans = [
+        _span("span-z", "Atlas Qdrant detail", scope, timestamp=timestamp),
+        _span("span-a", "Atlas Qdrant detail", scope, timestamp=timestamp),
+    ]
+
+    outcome = LexicalProvider(repository_fake).recall(product_provider_context("Atlas Qdrant", ProviderKind.LEXICAL))
+
+    assert [candidate.id for candidate in outcome.candidates] == ["span-a", "span-z"]
+
+
+def test_lexical_provider_passes_true_session_visibility_to_repository(product_provider_context, repository_fake) -> None:
+    context = _with_session(product_provider_context("Atlas", ProviderKind.LEXICAL))
+
+    LexicalProvider(repository_fake).recall(context)
+
+    assert repository_fake.calls == [
+        ("list_spans", {"scope": context.runtime.scope, "include_session": True}),
+        ("list_facts", {"scope": context.runtime.scope, "category": None, "include_session": True}),
+        ("list_events", {"scope": context.runtime.scope, "include_session": True}),
+        ("list_current_views", {"scope": context.runtime.scope, "view_type": None, "include_session": True}),
+        (
+            "search_entity_profiles",
+            {
+                "query": "Atlas",
+                "scope": context.runtime.scope,
+                "limit": context.limit,
+                "include_session": True,
+            },
+        ),
+    ]
 
 
 def test_provider_outcome_has_only_product_provider_fields(product_provider_context, repository_fake) -> None:
