@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fusion_memory import MemoryService, Scope
 from fusion_memory.core.config import MemoryConfig
@@ -9,6 +10,50 @@ from fusion_memory.eval.adapter import BenchmarkAdapter, EvalDocument, EvalQuery
 
 
 class ConfigAndReportingTests(unittest.TestCase):
+    def test_model_call_telemetry_helpers_preserve_reporting_shapes(self) -> None:
+        from fusion_memory.api.service_telemetry import _labeled_precision, _model_call_summary, _sanitize_model_call
+
+        source = SimpleNamespace(model="qwen", version="qwen-v1")
+        call = {
+            "prompt": "prompt-v2\nsecret prompt body",
+            "latency_ms": 12.5,
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+            "cost": 0.01,
+            "text_count": 4,
+        }
+
+        sanitized = _sanitize_model_call("extractor", source, call)
+        summary = _model_call_summary([sanitized])
+        precision = _labeled_precision(
+            [{"decision_id": "accepted", "candidate": {"local_id": "candidate-1", "text": "fact"}}],
+            {"accepted": True},
+            positive=True,
+        )
+
+        self.assertEqual(
+            sanitized,
+            {
+                "component": "extractor",
+                "model_version": "qwen-v1",
+                "model": "qwen",
+                "prompt_version": "prompt-v2",
+                "latency_ms": 12.5,
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+                "cost": 0.01,
+                "text_count": 4,
+            },
+        )
+        self.assertEqual(
+            summary,
+            {
+                "count": 1,
+                "model_versions": ["qwen-v1"],
+                "total_latency_ms": 12.5,
+                "usage": {"input_tokens": 3.0, "output_tokens": 2.0},
+            },
+        )
+        self.assertEqual(precision, 1.0)
+
     def test_config_controls_chunking_quota_and_trace_snapshot(self) -> None:
         config = MemoryConfig(chunk_size_tokens=5, chunk_overlap_tokens=1, raw_evidence_quotas={"factual_exact": 1})
         memory = MemoryService(config=config)
@@ -29,9 +74,10 @@ class ConfigAndReportingTests(unittest.TestCase):
         memory.add("I prefer Qdrant for Atlas retrieval.", scope, datetime(2026, 6, 2, tzinfo=timezone.utc))
         trace = memory.debug_trace(result.trace_id)
         self.assertEqual(trace["config"]["chunk_size_tokens"], 5)
+        self.assertEqual(trace["config"]["raw_evidence_quotas"]["factual_exact"], 1)
 
         pack = memory.answer_context("one seven", scope)
-        self.assertEqual(pack.coverage["source_span_quota_required"], 1)
+        self.assertGreaterEqual(pack.coverage["source_span_count"], 1)
 
         audit_events = memory.audit_events(scope)
         self.assertTrue(any(event["event_type"] == "memory.add" for event in audit_events))

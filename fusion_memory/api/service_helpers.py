@@ -50,19 +50,6 @@ register_rule(
     )
 )
 
-def _source_coverage(items: list[Any]) -> float:
-    if not items:
-        return 0.0
-    covered = 0
-    for item in items:
-        if isinstance(item, dict):
-            source_span_ids = item.get("source_span_ids") or item.get("candidate", {}).get("source_span_ids") or []
-        else:
-            source_span_ids = getattr(item, "source_span_ids", [])
-        covered += int(bool(source_span_ids))
-    return covered / len(items)
-
-
 def _broad_recall_candidate_allowed(query: str, plan: Any, candidate: Candidate) -> bool:
     if getattr(plan, "query_type", None) != "summarization":
         return True
@@ -1699,75 +1686,3 @@ def _service_date_scope_labels(text_lower: str) -> set[str]:
     for match in re.finditer(r"\b20\d{2}[-/](\d{1,2})[-/](\d{1,2})\b", text_lower):
         labels.add(f"{int(match.group(1))}:{int(match.group(2))}")
     return labels
-
-
-def _sanitize_model_call(component: str, source: Any, call: dict[str, Any]) -> dict[str, Any]:
-    model = call.get("model") or getattr(source, "model", None)
-    model_version = getattr(source, "version", None) or model or source.__class__.__name__
-    out: dict[str, Any] = {
-        "component": component,
-        "model_version": model_version,
-    }
-    if model:
-        out["model"] = model
-    prompt_version = call.get("prompt_version") or call.get("prompt")
-    if isinstance(prompt_version, str):
-        prompt_version = prompt_version.splitlines()[0]
-        out["prompt_version"] = prompt_version
-    latency_ms = call.get("latency_ms")
-    if isinstance(latency_ms, int | float):
-        out["latency_ms"] = latency_ms
-    usage = call.get("usage")
-    if isinstance(usage, dict):
-        out["usage"] = usage
-    cost = call.get("cost")
-    if isinstance(cost, int | float):
-        out["cost"] = cost
-    for key in ("text_count", "doc_count"):
-        if isinstance(call.get(key), int):
-            out[key] = call[key]
-    return out
-
-
-def _model_call_summary(model_calls: list[dict[str, Any]]) -> dict[str, Any]:
-    usage_totals: dict[str, float] = {}
-    for call in model_calls:
-        usage = call.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        for key, value in usage.items():
-            if isinstance(value, int | float):
-                usage_totals[key] = usage_totals.get(key, 0.0) + float(value)
-    return {
-        "count": len(model_calls),
-        "model_versions": sorted({str(call.get("model_version")) for call in model_calls if call.get("model_version")}),
-        "total_latency_ms": sum(float(call.get("latency_ms", 0.0)) for call in model_calls if isinstance(call.get("latency_ms"), int | float)),
-        "usage": usage_totals,
-    }
-
-
-def _labeled_precision(items: list[dict[str, Any]], labels: dict[str, bool], *, positive: bool) -> float | None:
-    known = 0
-    correct = 0
-    for item in items:
-        candidate = item.get("candidate", {})
-        keys = [item.get("decision_id"), candidate.get("local_id"), candidate.get("text")]
-        label = next((labels[key] for key in keys if key in labels), None)
-        if label is None:
-            continue
-        known += 1
-        correct += int(label is positive)
-    return correct / known if known else None
-
-
-ORDER_RE = re.compile(r"\b(after|before)\s+(?:the\s+)?(.+?)(?:,|\.|;|\bthen\b|\bi\s+|\bwe\s+|$)", re.I)
-
-
-def _explicit_order_mentions(text: str) -> list[tuple[str, str]]:
-    mentions: list[tuple[str, str]] = []
-    for match in ORDER_RE.finditer(text):
-        direction = match.group(1).lower()
-        target = match.group(2).strip()
-        if target:
-            mentions.append((target, direction))
-    return mentions

@@ -7,6 +7,7 @@ from fusion_memory.core.models import EvidencePack
 from fusion_memory.core.text import stable_hash
 from fusion_memory.retrieval.context import (
     ProductQueryPlan,
+    ProviderKind,
     RetrievalContext,
     RetrievalResult,
     SearchRequest,
@@ -210,6 +211,120 @@ def sanitize_retrieval_trace(trace: dict[str, Any]) -> dict[str, Any]:
             fallback if fallback == "invalid_plan" else sanitize_dimension(fallback)
         )
     return sanitized
+
+
+def prepare_retrieval_engine_options(
+    options: dict[str, Any] | None,
+    config: Any,
+) -> dict[str, Any]:
+    options = dict(options or {})
+    supported_options = {
+        "allow_cross_session",
+        "deadline",
+        "enabled_providers",
+        "enabled_sources",
+        "include_trace",
+        "limit",
+        "mode",
+        "time_range",
+        "token_budget",
+    }
+    if any(option not in supported_options for option in options):
+        raise ValueError("unsupported retrieval options")
+
+    mode = options.get("mode", "fast")
+    if type(mode) is not str or mode not in {"fast", "balanced"}:
+        raise ValueError("mode must be fast or balanced")
+
+    source_provider_kinds = {
+        "raw": {
+            ProviderKind.VECTOR,
+            ProviderKind.LEXICAL,
+            ProviderKind.TEMPORAL,
+            ProviderKind.CHRONOLOGY,
+        },
+        "exact": {ProviderKind.LEXICAL},
+        "entities": {ProviderKind.ENTITY},
+        "facts": {ProviderKind.VECTOR, ProviderKind.LEXICAL},
+        "events": {
+            ProviderKind.VECTOR,
+            ProviderKind.TEMPORAL,
+            ProviderKind.CHRONOLOGY,
+        },
+        "views": {ProviderKind.LEXICAL},
+        "profiles": {ProviderKind.LEXICAL, ProviderKind.ENTITY},
+    }
+    enabled_sources_option = options.get("enabled_sources")
+    if enabled_sources_option is None:
+        source_values: list[str] | None = None
+    elif type(enabled_sources_option) is str:
+        source_values = [enabled_sources_option]
+    elif isinstance(enabled_sources_option, (list, tuple, set, frozenset)):
+        source_values = list(enabled_sources_option)
+    else:
+        source_values = None
+    if source_values is None and enabled_sources_option is not None:
+        raise ValueError("enabled_sources contains an unsupported source family")
+    if source_values is not None and any(
+        type(value) is not str or value not in source_provider_kinds
+        for value in source_values
+    ):
+        raise ValueError("enabled_sources contains an unsupported source family")
+
+    enabled_providers_option = options.get("enabled_providers")
+    if enabled_providers_option is not None:
+        if isinstance(enabled_providers_option, ProviderKind) or type(enabled_providers_option) is str:
+            provider_values = [enabled_providers_option]
+        elif isinstance(enabled_providers_option, (list, tuple, set, frozenset)):
+            provider_values = list(enabled_providers_option)
+        else:
+            provider_values = None
+        if provider_values is None:
+            raise ValueError("enabled_providers contains an unsupported provider")
+        provider_by_name = {provider.value: provider for provider in ProviderKind}
+        parsed_providers: set[ProviderKind] = set()
+        for value in provider_values:
+            if isinstance(value, ProviderKind):
+                parsed_providers.add(value)
+                continue
+            if type(value) is not str:
+                raise ValueError("enabled_providers contains an unsupported provider")
+            provider = provider_by_name.get(value)
+            if provider is None:
+                raise ValueError("enabled_providers contains an unsupported provider")
+            parsed_providers.add(provider)
+        enabled_providers = frozenset(parsed_providers)
+    elif source_values is None:
+        enabled_providers = None
+    else:
+        enabled_providers = frozenset(
+            provider
+            for source_name in source_values
+            for provider in source_provider_kinds[source_name]
+        )
+
+    limit = options.get("limit", config.retrieval_output_n)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit must be positive")
+    token_budget = options.get("token_budget")
+    if token_budget is not None and (
+        not isinstance(token_budget, int)
+        or isinstance(token_budget, bool)
+        or token_budget < 0
+    ):
+        raise ValueError("token_budget must be a non-negative integer")
+
+    return {
+        "allow_cross_session": bool(options.get("allow_cross_session", False)),
+        "deadline": options.get("deadline"),
+        "enabled_providers": enabled_providers,
+        "enabled_sources": tuple(source_values) if source_values is not None else None,
+        "include_trace": bool(options.get("include_trace", True)),
+        "limit": int(limit),
+        "mode": mode,
+        "time_range": options.get("time_range"),
+        "token_budget": int(token_budget) if token_budget is not None else None,
+    }
 
 
 class RetrievalEngine(Protocol):

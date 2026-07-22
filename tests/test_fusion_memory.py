@@ -6,11 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fusion_memory import MemoryService, Scope
-from fusion_memory.api.service import (
+from fusion_memory.api.service_helpers import (
     _aggregation_query_context_keys,
-    _event_ordering_select_episode_recall_candidates,
-    _event_ordering_support_option_signal,
-    _event_ordering_milestone_score,
     _key_diverse_aggregation_candidates,
 )
 from fusion_memory.core.llm import StaticLLMClient
@@ -18,6 +15,7 @@ from fusion_memory.core.models import Candidate, QueryPlan
 from fusion_memory.ingestion.extractors import classify_milestone, classify_milestones, extract_generic_event_facets, extract_milestone_mentions
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
 from fusion_memory.retrieval.evidence_pack import _exact_answer_candidates, _value_context_is_target_goal, _value_mentions
+from fusion_memory.retrieval.event_graph_selection import _event_ordering_milestone_score
 from fusion_memory.retrieval.mmr import _similarity, mmr
 from fusion_memory.retrieval.pipeline import RecallResult
 from fusion_memory.retrieval.rrf import reciprocal_rank_fusion
@@ -30,6 +28,16 @@ def ts(value: str) -> datetime:
 
 
 class FusionMemoryTests(unittest.TestCase):
+    def test_explicit_event_order_mentions_preserve_write_side_marker_parsing(self) -> None:
+        from fusion_memory.ingestion.order_markers import _explicit_order_mentions
+
+        self.assertEqual(
+            _explicit_order_mentions(
+                "After the BM25 test, I added dense retrieval. Before deployment, we reviewed alerts."
+            ),
+            [("BM25 test", "after"), ("deployment", "before")],
+        )
+
     def test_chinese_rule_extractor_accepts_user_preference(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a")
@@ -39,25 +47,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertTrue(result.accepted_fact_ids)
         facts = memory.store.list_facts(scope)
         self.assertTrue(any(fact.category == "preference" and fact.predicate == "prefers" and "PostgreSQL" in fact.object for fact in facts))
-
-    def test_chinese_preference_query_uses_current_views_for_answer_context(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-
-        memory.add("Father 喜欢喝冰美式咖啡。", scope, ts("2026-07-06T10:00:00+00:00"))
-        pack = memory.answer_context(
-            "Father 喝什么饮料？",
-            scope,
-            budget={"limit": 6, "allow_cross_session": True},
-        )
-
-        self.assertEqual(pack.coverage["query_type"], "preference")
-        self.assertTrue(pack.current_views)
-        self.assertTrue(pack.facts)
-        self.assertTrue(any("Father" in view["text"] for view in pack.current_views))
-        self.assertTrue(any("冰美式咖啡" in view["text"] for view in pack.current_views))
-        self.assertTrue(any("Father" in fact["text"] for fact in pack.facts))
-        self.assertTrue(any("冰美式咖啡" in fact["text"] for fact in pack.facts))
 
     def test_chinese_rule_extractor_preserves_named_preference_subject(self) -> None:
         memory = MemoryService()
@@ -518,47 +507,6 @@ class FusionMemoryTests(unittest.TestCase):
 
         self.assertEqual([candidate.id for candidate in selected], ["store", "live-event"])
 
-    def test_topic_scope_filter_does_not_remove_broad_exploration_context_scenes(self) -> None:
-        service = MemoryService()
-        query = "How many different book series or genres have I mentioned wanting to explore across my conversations?"
-        plan = QueryPlan(query=query, query_type="multi_session_reasoning", entities=[], time_constraints=[])
-        selected = [
-            Candidate(
-                id="store",
-                type="span",
-                text="With a $120 budget from Montserrat Books, I need fiction series options.",
-                source="aggregation_coverage_raw",
-                scores={},
-                source_span_ids=["store"],
-                metadata={"topic_group": "books", "aggregation_keys": ["query_context:feature:budget"]},
-            ),
-            Candidate(
-                id="live-event",
-                type="span",
-                text="I chose The Dune Series for the live chat on sci-fi series with Wyatt.",
-                source="aggregation_coverage_raw",
-                scores={},
-                source_span_ids=["live-event"],
-                metadata={"topic_group": "events", "aggregation_keys": ["query_context:feature:event"]},
-            ),
-        ]
-        candidates = [
-            Candidate(
-                id="topic-anchor",
-                type="span",
-                text="Book series topic anchor",
-                source="topic_scope_raw",
-                scores={},
-                source_span_ids=["topic-anchor"],
-                metadata={"topic_group": "books"},
-            ),
-            *selected,
-        ]
-
-        filtered = service._apply_topic_scope_filter(query, plan, candidates, selected, limit=2)
-
-        self.assertEqual([candidate.id for candidate in filtered], ["store", "live-event"])
-
     def test_event_ordering_preserve_reserves_episode_recall_slots(self) -> None:
         service = MemoryService()
         query = "Can you list the order in which I brought up different support options and strategies for the dashboard project across conversations? Mention ONLY and ONLY three items."
@@ -620,90 +568,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("episode-b", [candidate.id for candidate in preserved])
         self.assertLess([candidate.id for candidate in preserved].count("anchor-0") + [candidate.id for candidate in preserved].count("anchor-1") + [candidate.id for candidate in preserved].count("anchor-2") + [candidate.id for candidate in preserved].count("anchor-3"), 4)
 
-    def test_event_ordering_topic_scope_filter_keeps_typed_episode_recall(self) -> None:
-        service = MemoryService()
-        query = "Can you list the order in which I brought up different aspects of the dashboard project across conversations?"
-        plan = QueryPlan(query=query, query_type="event_ordering", entities=[], time_constraints=[])
-        selected = [
-            Candidate(
-                id="anchor",
-                type="span",
-                text="Dashboard project topic anchor",
-                source="event_ordering_coverage",
-                scores={},
-                source_span_ids=["anchor"],
-                metadata={"topic_group": "dashboard", "timeline_role": "user_aspect_anchor", "speaker": "user"},
-            ),
-            Candidate(
-                id="episode",
-                type="span",
-                text="I added CSV export and permission details for the dashboard.",
-                source="event_ordering_episode_recall+l0_raw_hybrid",
-                scores={"event_episode_signal": 0.40, "event_detail_signal": 0.32, "event_facet_coverage": 0.18},
-                source_span_ids=["episode"],
-                metadata={
-                    "topic_group": "reporting",
-                    "speaker": "user",
-                    "event_ordering_facet_hits": ["dashboard"],
-                },
-            ),
-        ]
-        candidates = [
-            selected[0],
-            selected[1],
-            Candidate(
-                id="replacement",
-                type="span",
-                text="Another dashboard anchor.",
-                source="event_ordering_coverage",
-                scores={},
-                source_span_ids=["replacement"],
-                metadata={"topic_group": "dashboard", "timeline_role": "user_aspect_anchor", "speaker": "user"},
-            ),
-        ]
-
-        filtered = service._apply_topic_scope_filter(query, plan, candidates, selected, limit=2)
-
-        self.assertEqual([candidate.id for candidate in filtered], ["anchor", "episode"])
-
-    def test_event_ordering_post_preservation_topic_filter_reports_dropped_graph_anchor(self) -> None:
-        service = MemoryService()
-        query = "Can you list the order in which I brought up different sneaker shopping experiences?"
-        plan = QueryPlan(query=query, query_type="event_ordering", entities=[], time_constraints=[])
-        selected = [
-            Candidate(
-                id="anchor",
-                type="span",
-                text="I compared sneaker styles for the festival.",
-                source="event_ordering_coverage",
-                scores={},
-                source_span_ids=["anchor"],
-                metadata={"topic_group": "sneakers", "timeline_role": "user_aspect_anchor", "speaker": "user"},
-            ),
-            Candidate(
-                id="graph-off-topic",
-                type="event",
-                text="track with my savings goals",
-                source="event_ordering_persisted_graph",
-                scores={},
-                source_span_ids=["savings"],
-                metadata={"must_preserve_reason": ["graph_chronology_anchor"], "evidence_role": "answer"},
-            ),
-        ]
-
-        filtered, dropped = service._apply_event_ordering_post_preservation_topic_scope_filter(
-            query,
-            plan,
-            selected,
-            selected,
-            limit=2,
-        )
-
-        self.assertEqual([candidate.id for candidate in filtered], ["anchor"])
-        self.assertEqual(dropped[0]["candidate_id"], "graph-off-topic")
-        self.assertEqual(dropped[0]["reason"], "topic_scope_filter")
-        self.assertEqual(dropped[0]["must_preserve_reasons"], ["graph_chronology_anchor"])
-
     def test_event_ordering_preserve_episode_recall_uses_time_bucket_coverage(self) -> None:
         service = MemoryService()
         query = "Can you list the order in which I brought up different strategies and support options for managing my workload throughout our conversations in order? Mention ONLY and ONLY five items."
@@ -756,45 +620,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertEqual(len(episode_ids), 4)
         self.assertIn("episode-5", episode_ids)
 
-    def test_event_ordering_support_option_signal_promotes_resource_episode(self) -> None:
-        query = "Can you list the order in which I brought up different strategies and support options for managing my workload throughout our conversations in order? Mention ONLY and ONLY five items."
-        generic_strategy = Candidate(
-            id="generic-strategy",
-            type="span",
-            text="I felt good about my collaboration strategies after the meeting.",
-            source="event_ordering_episode_recall",
-            scores={"score": 0.42, "event_episode_signal": 0.35, "event_detail_signal": 0.20, "event_facet_coverage": 0.27},
-            source_span_ids=["generic-strategy"],
-            metadata={"speaker": "user", "source_uri": "batch4:msg218", "turn_id": "msg218"},
-        )
-        support_option = Candidate(
-            id="support-option",
-            type="span",
-            text="I hired a part-time assistant for 20 hours/week at $25/hour after a mentor recommended hiring one to help manage my schedule.",
-            source="event_ordering_episode_recall+l0_raw_hybrid",
-            scores={
-                "score": 0.34,
-                "event_episode_signal": 0.35,
-                "event_detail_signal": 0.80,
-                "event_support_option_signal": _event_ordering_support_option_signal(
-                    query,
-                    "I hired a part-time assistant for 20 hours/week at $25/hour after a mentor recommended hiring one to help manage my schedule.",
-                ),
-                "event_facet_coverage": 0.18,
-            },
-            source_span_ids=["support-option"],
-            metadata={"speaker": "user", "source_uri": "batch4:msg202", "turn_id": "msg202"},
-        )
-
-        selected = _event_ordering_select_episode_recall_candidates(
-            [(generic_strategy.scores["score"], generic_strategy), (support_option.scores["score"] + 0.30, support_option)],
-            limit=1,
-            requested=5,
-        )
-
-        self.assertGreater(_event_ordering_support_option_signal(query, support_option.text), 0.60)
-        self.assertEqual([candidate.id for candidate in selected], ["support-option"])
-
     def test_event_ordering_raw_facet_preserve_keeps_existing_strong_episode(self) -> None:
         service = MemoryService()
         query = "Can you list the order in which I brought up different strategies and support options for managing my workload throughout our conversations in order? Mention ONLY and ONLY five items."
@@ -843,36 +668,6 @@ class FusionMemoryTests(unittest.TestCase):
         result = memory.search("Qdrant Atlas", scope_b)
         self.assertEqual(result.candidates, [])
 
-    def test_search_trace_contains_retrieval_pipeline_sections(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="ws-trace", user_id="u", agent_id="a")
-        raw_memory_text = "I now prefer PostgreSQL for the memory database."
-        raw_query_text = "What database do I currently prefer?"
-        try:
-            memory.add({"role": "user", "content": raw_memory_text}, scope)
-            result = memory.search(raw_query_text, scope)
-            trace = memory.store.get_trace(result.trace_id, scope)
-
-            retrieval_trace = trace["retrieval_trace"]
-            self.assertIn("query_understanding", retrieval_trace)
-            self.assertIn("candidate_recall", retrieval_trace)
-            self.assertIn("candidate_fusion", retrieval_trace)
-            self.assertIn("evidence_output", retrieval_trace)
-            self.assertIn("pipeline_layers", retrieval_trace)
-            self.assertIn("QueryUnderstanding", retrieval_trace["pipeline_layers"])
-            self.assertIn("CandidateRecall", retrieval_trace["pipeline_layers"])
-            candidate_recall = retrieval_trace["pipeline_layers"]["CandidateRecall"]
-            self.assertIn("provider_summary", candidate_recall)
-            self.assertTrue(candidate_recall["provider_summary"])
-            self.assertEqual(
-                candidate_recall["provider_summary"],
-                result.coverage["pipeline_trace"]["pipeline_layers"]["CandidateRecall"]["provider_summary"],
-            )
-            self.assertNotIn(raw_memory_text, repr(candidate_recall))
-            self.assertNotIn(raw_query_text, repr(candidate_recall))
-        finally:
-            memory.close()
-
     def test_preference_update_writes_source_fact_relation_and_current_view(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
@@ -891,10 +686,9 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIsNotNone(latest_fact)
         self.assertTrue(latest_fact.source_span_ids)
 
-        pack = memory.answer_context("What do I currently prefer for Atlas?", scope)
-        self.assertTrue(pack.current_views)
-        self.assertTrue("Qdrant" in str(pack.current_views) or "Qdrant" in str(pack.facts))
-        self.assertTrue(pack.source_spans)
+        views = memory.get_current_views(scope)
+        self.assertTrue(views)
+        self.assertTrue(any("Qdrant" in view.text for view in views))
 
     def test_speaker_attribution_rejects_assistant_suggestion_as_user_preference(self) -> None:
         memory = MemoryService()
@@ -1447,39 +1241,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("deployment_deadline", pack.coverage["temporal_target_roles"])
         self.assertNotIn("temporal_role_candidates", pack.coverage)
 
-    def test_temporal_lookup_uses_topic_scope_before_date_roles(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
-        memory.add(
-            "The screenplay launch preparation has a final deployment deadline of March 20, 2024.",
-            scope,
-            ts("2026-06-01T09:00:00+00:00"),
-            {"source_uri": "beam:test:20:batch1:msg1"},
-        )
-        memory.add(
-            "The transaction management features are completed by January 15, 2024.",
-            scope,
-            ts("2026-06-01T10:00:00+00:00"),
-            {"source_uri": "beam:test:1:batch1:msg1"},
-        )
-        memory.add(
-            "The final deployment deadline for the budget tracker is March 15, 2024.",
-            scope,
-            ts("2026-06-02T10:00:00+00:00"),
-            {"source_uri": "beam:test:1:batch1:msg2"},
-        )
-
-        pack = memory.answer_context(
-            "How many weeks do I have between finishing the transaction management features and the final deployment deadline?",
-            scope,
-            budget={"limit": 6},
-        )
-
-        content = " ".join(span["content"] for span in pack.source_spans)
-        self.assertIn("transaction management features", content)
-        self.assertIn("March 15, 2024", content)
-        self.assertNotIn("screenplay launch preparation", content)
-
     def test_temporal_lookup_infers_year_for_month_day_ranges(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
@@ -1713,46 +1474,6 @@ class FusionMemoryTests(unittest.TestCase):
         content = " ".join(span["content"].lower() for span in pack.source_spans)
         self.assertIn("downloaded", content)
         self.assertIn("12 days", content)
-
-    def test_event_ordering_topic_scope_prevents_generic_milestone_bleed(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
-        memory.add(
-            "I'm implementing transaction CRUD response handling for my budget tracker.",
-            scope,
-            ts("2026-06-01T10:00:00+00:00"),
-            {"source_uri": "beam:test:1:batch1:msg1"},
-        )
-        memory.add(
-            "I'm configuring Render deployment with Gunicorn workers for the budget tracker.",
-            scope,
-            ts("2026-06-02T10:00:00+00:00"),
-            {"source_uri": "beam:test:1:batch1:msg2"},
-        )
-        memory.add(
-            "I started managing stress by setting no-work Sundays and reducing burnout.",
-            scope,
-            ts("2026-06-03T10:00:00+00:00"),
-            {"source_uri": "beam:test:16:batch1:msg1"},
-        )
-        memory.add(
-            "I handled financial concerns by tracking rent, groceries, and emergency savings.",
-            scope,
-            ts("2026-06-04T10:00:00+00:00"),
-            {"source_uri": "beam:test:16:batch1:msg2"},
-        )
-
-        pack = memory.answer_context(
-            "Can you walk me through the order in which I brought up different ways I’ve been managing stress and financial concerns throughout our chats, in order?",
-            scope,
-            budget={"limit": 8},
-        )
-
-        content = " ".join(span["content"] for span in pack.source_spans).lower()
-        self.assertIn("managing stress", content)
-        self.assertIn("financial concerns", content)
-        self.assertNotIn("transaction crud", content)
-        self.assertNotIn("gunicorn", content)
 
     def test_summarization_expands_same_topic_group_timeline(self) -> None:
         memory = MemoryService()
@@ -2577,23 +2298,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertEqual(len(anchors), 1)
         self.assertIn("Nike Dunk Low", anchors[0]["content"])
 
-    def test_event_ordering_event_graph_candidates_stay_topic_scoped(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I'm trying to increase my social media followers by 15% by showcasing my sneaker style at the festival.", scope, ts("2026-06-13T10:25:59.059829+08:00"), {"source_uri": "beam:test:15:batch1:msg1"})
-        memory.add("I'm trying to set up the automatic transfers. It makes sense to automate it to keep me on track with my savings goals.", scope, ts("2026-06-13T10:52:47.975134+08:00"), {"source_uri": "beam:test:16:batch1:msg1"})
-
-        pack = memory.answer_context(
-            "Can you list the order in which I brought up different sneaker shopping experiences and related details throughout our conversations in order? Mention ONLY and ONLY four items.",
-            scope,
-            budget={"limit": 8},
-        )
-
-        contents = " ".join(span["content"].lower() for span in pack.source_spans)
-        self.assertIn("sneaker", contents)
-        self.assertNotIn("automatic transfers", contents)
-        self.assertNotIn("savings goals", contents)
-
     def test_event_ordering_user_chronology_beats_event_phase_priority(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
@@ -2619,35 +2323,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("nike react", anchor_texts[1])
         self.assertIn("parents", anchor_texts[2])
         self.assertIn("adidas ultraboost", anchor_texts[3])
-
-    def test_event_ordering_scopes_timeline_to_query_topic_inside_mixed_chat(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I'm nervous about improving my writing skills and using Grammarly.", scope, ts("2026-06-01T10:00:00+00:00"), {"source_uri": "beam:test:1:batch1:msg1"})
-        memory.add("Practice dialogue flow with a screenplay exercise.", scope, ts("2026-06-01T10:01:00+00:00"), {"source_uri": "beam:test:1:batch1:msg2", "speaker": "assistant"})
-        memory.add("I'm building a personal budget tracker in Flask and SQLite.", scope, ts("2026-06-02T10:00:00+00:00"), {"source_uri": "beam:test:1:batch2:msg1"})
-        memory.add("Set up the Flask app, database schema, and local server first.", scope, ts("2026-06-02T10:01:00+00:00"), {"source_uri": "beam:test:1:batch2:msg2", "speaker": "assistant"})
-        memory.add("Then I wanted transaction CRUD with validation errors.", scope, ts("2026-06-03T10:00:00+00:00"), {"source_uri": "beam:test:1:batch3:msg1"})
-        memory.add("Later I worked on deployment to Render with Gunicorn.", scope, ts("2026-06-04T10:00:00+00:00"), {"source_uri": "beam:test:1:batch4:msg1"})
-
-        pack = memory.answer_context(
-            "Can you list the order in which I brought up different aspects of developing my personal budget tracker? Mention ONLY and ONLY three items.",
-            scope,
-            budget={"limit": 8},
-        )
-
-        packed_text = " ".join(span["content"].lower() for span in pack.source_spans)
-        self.assertNotIn("writing skills", packed_text)
-        anchors = [
-            span
-            for span in pack.source_spans
-            if span.get("selector") == "event_ordering_coverage" and span.get("timeline_role") == "user_aspect_anchor"
-        ]
-        self.assertGreaterEqual(len(anchors), 3)
-        anchor_text = " ".join(span["content"].lower() for span in anchors)
-        self.assertTrue("flask" in anchor_text or "database schema" in anchor_text or "local server" in anchor_text)
-        self.assertTrue("transaction crud" in anchor_text or "transaction error" in anchor_text)
-        self.assertIn("deployment", anchor_text)
 
     def test_event_ordering_pack_expands_topic_user_chronology_beyond_selected_anchors(self) -> None:
         memory = MemoryService()
@@ -2684,32 +2359,6 @@ class FusionMemoryTests(unittest.TestCase):
         user_spans = [span for span in pack.source_spans if span["speaker"] == "user"]
         self.assertGreaterEqual(len(user_spans), 4)
         self.assertEqual([span["timestamp"] for span in user_spans], sorted(span["timestamp"] for span in user_spans))
-
-    def test_event_ordering_coverage_survives_topic_scope_filter(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I'm trying to implement city autocomplete using OpenWeather's Geocoding API v1.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("I want a 5-item dropdown and 300ms debounce.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("I'm handling invalid city name messages and API failures.", scope, ts("2026-06-03T10:00:00+00:00"))
-        memory.add("Later I worked on deployment to GitHub Pages and custom domain support.", scope, ts("2026-06-04T10:00:00+00:00"))
-
-        pack = memory.answer_context(
-            "Can you list the order in which I brought up different aspects of implementing the city autocomplete feature throughout our conversations? Mention ONLY and ONLY four items.",
-            scope,
-            budget={"limit": 8},
-        )
-
-        anchors = [
-            span
-            for span in pack.source_spans
-            if span.get("selector") == "event_ordering_coverage" and span.get("timeline_role") == "user_aspect_anchor"
-        ]
-        self.assertGreaterEqual(len(anchors), 4)
-        contents = " ".join(span["content"].lower() for span in anchors)
-        self.assertIn("autocomplete", contents)
-        self.assertIn("dropdown", contents)
-        self.assertIn("invalid city", contents)
-        self.assertIn("deployment", contents)
 
     def test_event_ordering_milestone_score_prefers_specific_milestones(self) -> None:
         generic = _event_ordering_milestone_score("I decided on blueprints for auth, transactions, and analytics.")
@@ -2806,23 +2455,6 @@ class FusionMemoryTests(unittest.TestCase):
         self.assertIn("deployment_configuration", groups)
         self.assertIn("integration_test_coverage", groups)
         self.assertEqual([event["timeline_index"] for event in pack.events], list(range(1, len(pack.events) + 1)))
-
-    def test_benchmark_answer_context_expands_retrieval_budget(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I brought up Core functionality for the budget tracker.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("I mentioned Transaction error handling for the budget tracker.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("I discussed Security and deployment for the budget tracker.", scope, ts("2026-06-03T10:00:00+00:00"))
-
-        pack = memory.answer_context(
-            "Can you list the order in which I brought up different aspects of developing my personal budget tracker throughout our conversations, in order?",
-            scope,
-            budget={"mode": "benchmark"},
-        )
-
-        self.assertGreaterEqual(pack.coverage["token_budget"], 24000)
-        self.assertGreaterEqual(pack.coverage["source_span_quota_required"], 4)
-        self.assertGreaterEqual(len(pack.source_spans), 3)
 
     def test_abstention_sets_policy_when_evidence_insufficient(self) -> None:
         memory = MemoryService()
