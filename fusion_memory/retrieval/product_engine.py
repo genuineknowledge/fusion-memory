@@ -14,7 +14,11 @@ from fusion_memory.retrieval.product_planner import ProductQueryPlanner
 from fusion_memory.retrieval.providers.product_base import ProviderOutcome
 from fusion_memory.retrieval.reranker import LexicalCrossEncoderReranker, Reranker
 from fusion_memory.retrieval.selection import select_candidates
-from fusion_memory.retrieval.tracing import build_retrieval_trace, validate_product_plan
+from fusion_memory.retrieval.tracing import (
+    build_retrieval_trace,
+    sanitize_dimension,
+    validate_product_plan,
+)
 
 
 class ProductPlanner(Protocol):
@@ -111,7 +115,7 @@ class ProductRetrievalEngine:
         )
 
         failures = [
-            outcome.failure.error_code
+            sanitize_dimension(outcome.failure.error_code)
             for outcome in outcomes
             if outcome.failure is not None
         ]
@@ -120,7 +124,7 @@ class ProductRetrievalEngine:
             str(reranker_failure_value) if reranker_failure_value is not None else None
         )
         coverage = {
-            "intent": plan.intent,
+            "intent": sanitize_dimension(plan.intent),
             "degraded": bool(failures) or reranker_failure is not None,
             "provider_failures": failures,
             "provider_counts": {

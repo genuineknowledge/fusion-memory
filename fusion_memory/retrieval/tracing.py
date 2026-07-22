@@ -42,14 +42,14 @@ def build_retrieval_trace(
     trace: dict[str, Any] = {
         "stages": ["plan", "recall", "fusion", "selection"],
         "mode": request.mode,
-        "intent": _safe_dimension(plan.intent),
+        "intent": sanitize_dimension(plan.intent),
         "providers": [
             {
                 "kind": outcome.provider.value,
                 "count": len(outcome.candidates),
                 "elapsed_ms": round(max(0.0, float(outcome.elapsed_ms)), 3),
                 "failure_code": (
-                    _safe_dimension(outcome.failure.error_code)
+                    sanitize_dimension(outcome.failure.error_code)
                     if outcome.failure is not None
                     else None
                 ),
@@ -64,11 +64,11 @@ def build_retrieval_trace(
         },
     }
     if reranker_failure is not None:
-        trace["reranker_failure"] = reranker_failure
+        trace["reranker_failure"] = sanitize_dimension(reranker_failure)
     return trace
 
 
-def _safe_dimension(value: object) -> str:
+def sanitize_dimension(value: object) -> str:
     label = str(value)
     if label in _SAFE_DIMENSIONS:
         return label
