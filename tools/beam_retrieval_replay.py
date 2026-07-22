@@ -252,7 +252,7 @@ def run_replay(
         pack = engine.answer_context(
             query.query,
             query_scope,
-            canonical_category,
+            query.category,
         )
         coverage = _coverage_dict(getattr(pack, "coverage", {}))
         pipeline_trace = _pipeline_trace_from_pack(coverage, getattr(pack, "debug_trace", []) or [])

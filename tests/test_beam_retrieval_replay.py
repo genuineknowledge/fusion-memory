@@ -69,6 +69,33 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         self.assertEqual(retrieval_engine.answer_context.call_count, 2)
         service.answer_context.assert_not_called()
 
+    def test_run_replay_groups_aliases_canonically_but_evaluates_beam_categories(self) -> None:
+        queries = [
+            SimpleNamespace(id="q1", query="What is current?", category="knowledge_update"),
+            SimpleNamespace(id="q2", query="What happened when?", category="temporal_reasoning"),
+        ]
+        pack = SimpleNamespace(source_spans=[], coverage={}, debug_trace=[])
+        retrieval_engine = _eval_engine(pack)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(replay, "_load_queries", return_value=queries):
+            report = replay.run_replay(
+                MagicMock(),
+                base_scope=replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
+                categories={"current_value", "multi_condition"},
+                output_path=Path(tmp) / "replay.json",
+                query_limit=None,
+                retrieval_engine=retrieval_engine,
+            )
+
+        self.assertEqual(
+            [(record["category"], record["beam_category"]) for record in report["records"]],
+            [("current_value", "knowledge_update"), ("multi_condition", "temporal_reasoning")],
+        )
+        self.assertEqual(
+            [call.args[2] for call in retrieval_engine.answer_context.call_args_list],
+            ["knowledge_update", "temporal_reasoning"],
+        )
+
     def test_run_replay_writes_records_with_pipeline_trace(self) -> None:
         fake_query = SimpleNamespace(id="q1", query="What is my current IDE?", category="knowledge_update")
         fake_pack = SimpleNamespace(
@@ -97,7 +124,7 @@ class BeamRetrievalReplayTests(unittest.TestCase):
         retrieval_engine.answer_context.assert_called_once_with(
             "What is my current IDE?",
             replay.Scope(workspace_id="w", user_id="u", agent_id="a"),
-            "current_value",
+            "knowledge_update",
         )
         service.answer_context.assert_not_called()
 
