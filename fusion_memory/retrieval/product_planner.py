@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from fusion_memory.retrieval.context import OrderingMode, ProductQueryPlan, ProviderKind, ProviderRequest, SearchRequest
+from fusion_memory.retrieval.context import (
+    OrderingMode,
+    ProductQueryPlan,
+    ProviderKind,
+    ProviderRequest,
+    SearchRequest,
+)
 from fusion_memory.retrieval.query_intent import QueryIntent, analyze_query_intent
 
 
@@ -18,6 +24,20 @@ class ProductQueryPlanner:
             ordering=_ordering(intent),
             use_reranker=request.mode == "balanced",
             query_intent=intent.to_dict(),
+        )
+
+    def safe_default(self, request: SearchRequest) -> ProductQueryPlan:
+        return ProductQueryPlan(
+            intent="factual",
+            provider_requests=(
+                ProviderRequest(ProviderKind.VECTOR, max(request.limit * 2, 12)),
+                ProviderRequest(ProviderKind.LEXICAL, max(request.limit * 2, 12)),
+            ),
+            time_range=request.time_range,
+            entities=(),
+            speaker=None,
+            ordering=OrderingMode.RELEVANCE,
+            use_reranker=request.mode == "balanced",
         )
 
 

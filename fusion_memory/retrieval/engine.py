@@ -18,6 +18,13 @@ class RetrievalEngine(Protocol):
         plan: ProductQueryPlan | None = None,
     ) -> RetrievalResult: ...
 
+    def search_with_plan(
+        self,
+        context: RetrievalContext,
+        request: SearchRequest,
+        plan: ProductQueryPlan,
+    ) -> RetrievalResult: ...
+
     def build_evidence_pack(
         self,
         context: RetrievalContext,
