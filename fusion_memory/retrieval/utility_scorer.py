@@ -28,7 +28,7 @@ def feature_vector(
 def weak_label(candidate: Candidate, plan: ProductQueryPlan) -> str:
     if candidate.type == "span" and candidate.scores.get("bm25_score", 0.0) > 0.15:
         return "useful"
-    if candidate.type in {"view", "profile"} and plan.intent in {"preference", "instruction"}:
+    if candidate.type in {"view", "profile"} and plan.intent in {"current_state", "instruction"}:
         return "useful"
     if candidate.scores.get("utility_score", 0.0) <= 0:
         return "not_useful"

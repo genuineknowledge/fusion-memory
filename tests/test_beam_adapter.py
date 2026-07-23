@@ -14,8 +14,10 @@ from fusion_memory import MemoryService, Scope
 from fusion_memory.core.models import EvidencePack
 from fusion_memory.eval.adapter import BenchmarkAdapter, EvalQuery
 from fusion_memory.eval.beam.engine import BeamRetrievalEngine
+from fusion_memory.eval.beam.model_adapters import as_beam_answer_model
 from fusion_memory.eval.beam.query_planner import BeamQueryPlanner
 from fusion_memory.eval.beam_adapter import BeamAdapter, _event_ordering_score
+from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel
 from fusion_memory.retrieval.context import (
     ProductQueryPlan,
     ProviderKind,
@@ -99,6 +101,22 @@ class CapturePackBuilder:
 
 
 class BeamAdapterTests(unittest.TestCase):
+    def test_beam_answer_model_adapter_preserves_injected_subclasses(self) -> None:
+        class CustomAnswerModel(OpenAICompatibleAnswerModel):
+            def __init__(self) -> None:
+                self.custom_state = {"preserved": True}
+
+            def answer_with_context(self, query, pack, **kwargs):
+                del query, pack, kwargs
+                return "custom answer"
+
+        answer_model = CustomAnswerModel()
+
+        adapted = as_beam_answer_model(answer_model)
+
+        self.assertIs(adapted, answer_model)
+        self.assertEqual(adapted.custom_state, {"preserved": True})
+
     def test_beam_query_planner_decorates_product_plan_by_category(self) -> None:
         expected = {
             "event_ordering": (

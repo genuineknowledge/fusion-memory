@@ -19,6 +19,7 @@ from fusion_memory.eval.adapter import (
     _pack_summary,
 )
 from fusion_memory.eval.beam.engine import BeamRetrievalEngine
+from fusion_memory.eval.beam.model_adapters import as_beam_answer_model
 
 
 BEAM_SPLITS = {"small", "dev", "100k", "500k", "1m", "10m"}
@@ -53,7 +54,12 @@ class BeamAdapter(BenchmarkAdapter):
         retrieval_engine: Any | None = None,
     ) -> None:
         validate_beam_split(split)
-        super().__init__(service, scope, answer_model=answer_model, judge_model=judge_model)
+        super().__init__(
+            service,
+            scope,
+            answer_model=as_beam_answer_model(answer_model),
+            judge_model=judge_model,
+        )
         self.split = split
         self.retrieval_engine = (
             retrieval_engine

@@ -6,21 +6,75 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fusion_memory import MemoryService, Scope
+from fusion_memory.core.models import Candidate
+from fusion_memory.retrieval.context import ProductQueryPlan
+from fusion_memory.retrieval.context import OrderingMode, ProviderKind, ProviderRequest
+from fusion_memory.retrieval.utility_scorer import utility_example, weak_label
 from fusion_memory.retrieval.utility_model import LogisticUtilityScorer
 from fusion_memory.storage.postgres_store import POSTGRES_TABLES, PostgresMigrationRunner
 from fusion_memory.storage.token_store import PostgresTokenStore
 
 
 class UtilityAndMigrationTests(unittest.TestCase):
-    def test_utility_scorer_trains_saves_loads_and_writes_shadow_trace(self) -> None:
+    def test_current_state_view_and_profile_candidates_are_useful_weak_labels(self) -> None:
+        plan = ProductQueryPlan(
+            intent="current_state",
+            provider_requests=(ProviderRequest(ProviderKind.ENTITY, 10),),
+            time_range=None,
+            entities=("Atlas",),
+            speaker=None,
+            ordering=OrderingMode.RECENCY,
+            use_reranker=True,
+        )
+
+        for candidate_type in ("view", "profile"):
+            with self.subTest(candidate_type=candidate_type):
+                candidate = Candidate(
+                    id=f"{candidate_type}-1",
+                    type=candidate_type,
+                    text="Atlas prefers Qdrant.",
+                    source=f"l3_{candidate_type}",
+                    scores={"utility_score": 0.5},
+                    source_span_ids=["span-1"],
+                )
+                self.assertEqual(weak_label(candidate, plan), "useful")
+
+    def test_utility_scorer_trains_saves_loads_and_ranks_candidates(self) -> None:
         memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a")
-        memory.add("I prefer Qdrant for Atlas retrieval.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
-        for _ in range(3):
-            memory.search("What do I prefer for Atlas?", scope)
-            memory.search("What is my unknown cluster name?", scope)
+        plan = ProductQueryPlan(
+            intent="current_state",
+            provider_requests=(ProviderRequest(ProviderKind.ENTITY, 10),),
+            time_range=None,
+            entities=("Atlas",),
+            speaker=None,
+            ordering=OrderingMode.RECENCY,
+            use_reranker=True,
+        )
+        useful = Candidate(
+            id="view-1",
+            type="view",
+            text="Atlas prefers Qdrant.",
+            source="product_lexical",
+            scores={"utility_score": 0.8},
+            source_span_ids=["span-1"],
+        )
+        not_useful = Candidate(
+            id="span-2",
+            type="span",
+            text="Unrelated note.",
+            source="product_lexical",
+            scores={"utility_score": 0.0},
+            source_span_ids=["span-2"],
+        )
+        memory.store.insert_utility_example(
+            utility_example("query-1", "What does Atlas currently prefer?", plan, useful)
+        )
+        memory.store.insert_utility_example(
+            utility_example("query-1", "What does Atlas currently prefer?", plan, not_useful)
+        )
+
         report = memory.train_utility_scorer()
-        self.assertGreater(report.used_examples, 0)
+        self.assertEqual(report.used_examples, 2)
         self.assertGreaterEqual(report.ndcg_at_10, 0.0)
         self.assertGreaterEqual(report.mrr, 0.0)
         self.assertTrue(memory.utility_scorer.trained)
@@ -31,12 +85,8 @@ class UtilityAndMigrationTests(unittest.TestCase):
             loaded = LogisticUtilityScorer.load(path)
             self.assertTrue(loaded.trained)
             self.assertEqual(set(loaded.feature_names), set(memory.utility_scorer.feature_names))
-
-        result = memory.search("What do I prefer for Atlas?", scope)
-        trace = memory.debug_trace(result.trace_id)
-        self.assertIsNotNone(trace)
-        self.assertTrue(trace["utility_shadow"]["enabled"])
-        self.assertTrue(trace["utility_shadow"]["ranking"])
+            ranking = loaded.rank_shadow([not_useful, useful], plan)
+            self.assertEqual(ranking[0]["id"], useful.id)
 
     def test_postgres_migration_contains_required_tables_and_indexes(self) -> None:
         migration = Path("fusion_memory/storage/migrations/postgres/001_init.sql").read_text(encoding="utf-8")

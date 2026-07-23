@@ -164,3 +164,30 @@ def test_product_production_modules_do_not_import_legacy_scenario_helpers() -> N
 def test_memory_service_is_within_facade_size_budget() -> None:
     lines = Path("fusion_memory/api/service.py").read_text(encoding="utf-8").splitlines()
     assert len(lines) <= 1200
+
+
+def test_beam_category_literals_are_confined_to_beam_eval_package() -> None:
+    generic_eval = Path("fusion_memory/eval/model_adapters.py").read_text(encoding="utf-8")
+    for category in (
+        "contradiction_resolution",
+        "multi_session_reasoning",
+        "preference_following",
+        "instruction_following",
+        "information_extraction",
+    ):
+        assert category not in generic_eval
+
+
+def test_only_beam_adapter_imports_beam_model_adapter() -> None:
+    beam_import = "fusion_memory.eval.beam.model_adapters"
+    generic_eval_paths = (
+        Path("fusion_memory/eval/adapter.py"),
+        Path("fusion_memory/eval/longmemeval_adapter.py"),
+        Path("fusion_memory/eval/model_adapters.py"),
+    )
+
+    assert all(
+        beam_import not in path.read_text(encoding="utf-8")
+        for path in generic_eval_paths
+    )
+    assert beam_import in Path("fusion_memory/eval/beam_adapter.py").read_text(encoding="utf-8")

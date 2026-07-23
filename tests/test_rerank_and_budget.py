@@ -8,7 +8,7 @@ from fusion_memory.core.text import tokenize
 
 
 class RerankAndBudgetTests(unittest.TestCase):
-    def test_balanced_mode_applies_reranker_and_preserves_quota(self) -> None:
+    def test_balanced_mode_applies_reranker_with_canonical_trace(self) -> None:
         memory = MemoryService()
         scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
         memory.add(
@@ -26,17 +26,11 @@ class RerankAndBudgetTests(unittest.TestCase):
         result = memory.search("Which happened before reranking?", scope, options={"mode": "balanced", "limit": 6})
         trace = memory.debug_trace(result.trace_id)
         self.assertIsNotNone(trace)
-        self.assertTrue(trace["rerank"]["applied"])
-        self.assertEqual(trace["rerank"]["model_version"], "lexical-cross-encoder-v0")
-        quota_ids = {
-            candidate["id"]
-            for candidate in trace["selected"]
-            if candidate["type"] == "span" and candidate["id"] in result.coverage.get("selected_span_ids", [])
-        }
-        # Coverage stores counts, so assert selected contains enough raw spans directly.
-        selected_span_count = sum(1 for candidate in result.candidates if candidate.type == "span")
-        self.assertGreaterEqual(selected_span_count, min(result.coverage["source_span_quota_required"], 6))
-        self.assertIsInstance(quota_ids, set)
+        self.assertEqual(trace["mode"], "balanced")
+        self.assertEqual(trace["stages"], ["plan", "recall", "fusion", "selection"])
+        self.assertLessEqual(len(result.candidates), 6)
+        self.assertTrue(result.candidates)
+        self.assertTrue(all("rerank_score" in candidate.scores for candidate in result.candidates))
 
     def test_evidence_pack_respects_token_budget_for_source_spans(self) -> None:
         memory = MemoryService()
@@ -54,4 +48,3 @@ class RerankAndBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

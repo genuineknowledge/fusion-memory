@@ -21,15 +21,16 @@ from fusion_memory.core.embedding import DeterministicEmbedder, HTTPEmbeddingCli
 from fusion_memory.core.llm import OpenAICompatibleLLMClient, _extract_structured_response, sanitize_error_text
 from fusion_memory.core.runtime_config import memory_service_from_env
 from fusion_memory.core.models import Candidate, EvidencePack
+from fusion_memory.core.text import stable_hash
 from fusion_memory.eval.adapter import BenchmarkAdapter, EvalDocument, EvalQuery
+from fusion_memory.eval.beam.model_adapters import OpenAICompatibleBeamAnswerModel
+from fusion_memory.eval.beam.model_adapters import _deterministic_temporal_answer
 from fusion_memory.eval.model_adapters import OpenAICompatibleAnswerModel, OpenAICompatibleJudgeModel
-from fusion_memory.eval.model_adapters import _event_ordering_compact_aspect_label
-from fusion_memory.eval.model_adapters import _event_ordering_sequence_output_sort_key
-from fusion_memory.eval.model_adapters import _event_ordering_sequence_label
-from fusion_memory.eval.model_adapters import _deterministic_temporal_answer
 from fusion_memory.eval.model_adapters import _pack_for_model
 from fusion_memory.ingestion.llm_extractor import StructuredLLMExtractor
-from fusion_memory.retrieval.evidence_pack import _event_ordering_chronology_rescue_score
+from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_compact_aspect_label
+from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_sequence_output_sort_key
+from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_sequence_label
 from fusion_memory.retrieval.exact_answer_operators import exact_answer_operator_fields
 from fusion_memory.retrieval.reranker import HTTPReranker, Qwen3Reranker, rerank_candidates
 
@@ -199,7 +200,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(client, use_llm_aggregation=True).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(client, use_llm_aggregation=True).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -213,23 +214,44 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertFalse(evidence_pack["aggregation_telemetry"]["fallback"])
         self.assertEqual(evidence_pack["aggregation_telemetry"]["accepted_count"], 1)
 
-    def test_event_ordering_pack_keeps_legacy_path_while_graph_shadow_is_missing(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I set up the initial project schema and local server.", scope, datetime(2026, 6, 1, tzinfo=timezone.utc))
-        memory.add("I implemented transaction CRUD with validation errors.", scope, datetime(2026, 6, 2, tzinfo=timezone.utc))
+    def test_generic_answer_model_does_not_run_llm_aggregation_for_factual_pack(self) -> None:
+        class RecordingClient:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
 
-        pack = memory.answer_context(
-            "Can you walk me through the order in which I brought up different aspects of my app development and deployment across our conversations?",
-            scope,
-            budget={"limit": 6, "mode": "benchmark"},
+            def structured(self, prompt, schema, input):
+                del schema, input
+                self.prompts.append(prompt)
+                return {"answer": "Qdrant"}
+
+        client = RecordingClient()
+        pack = EvidencePack(
+            query="How many different Atlas retrieval features did I mention?",
+            answer_policy="answer_with_evidence_or_abstain",
+            current_views=[],
+            entity_profiles=[],
+            facts=[],
+            events=[],
+            source_spans=[
+                {
+                    "id": "s1",
+                    "speaker": "user",
+                    "content": "Atlas retrieval includes offline mode and Qdrant.",
+                    "aggregation_keys": ["feature:offline_mode"],
+                }
+            ],
+            conflicts=[],
+            coverage={"query_type": "factual"},
+            debug_trace=[],
         )
 
-        model_pack = _pack_for_model(pack)
+        answer = OpenAICompatibleAnswerModel(
+            client,
+            use_llm_aggregation=True,
+        ).answer_with_context(pack.query, pack)
 
-        self.assertTrue(pack.coverage["query_type"] == "event_ordering")
-        self.assertTrue(model_pack.get("timeline"))
-        self.assertTrue(pack.coverage.get("event_ordering_graph") or pack.coverage.get("event_ordering_shadow"))
+        self.assertEqual(answer, "Qdrant")
+        self.assertEqual(client.prompts, ["eval-answer-v0"])
 
     def test_answer_model_falls_back_to_rule_aggregation_when_llm_fails(self) -> None:
         class FailingAggregationClient:
@@ -263,7 +285,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(client, use_llm_aggregation=True).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(client, use_llm_aggregation=True).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -286,9 +308,16 @@ class ModelAdapterTests(unittest.TestCase):
 
             self.assertTrue(result.candidates)
             trace = memory.debug_trace(result.trace_id)
-            self.assertTrue(any(call["component"] == "embedder" and call["model"] == "test-embed" for call in trace["model_calls"]))
+            expected_version = f"hashed_{stable_hash('http-embedding:test-embed')[:16]}"
+            self.assertTrue(
+                any(
+                    call["component"] == "embedder" and call["model_version"] == expected_version
+                    for call in trace["model_calls"]
+                )
+            )
             audit = memory.audit_events(scope, event_type="memory.search")
             self.assertGreater(audit[0]["payload"]["model_calls"]["count"], 0)
+            self.assertIn(expected_version, audit[0]["payload"]["model_calls"]["model_versions"])
             self.assertTrue(embedder.calls)
             self.assertTrue(any(request["path"] == "/embed" for request in server.requests))
 
@@ -319,9 +348,17 @@ class ModelAdapterTests(unittest.TestCase):
             memory.add("I added dense retrieval today.", scope, datetime(2026, 6, 5, tzinfo=timezone.utc))
             result = memory.search("dense retrieval", scope, options={"mode": "balanced"})
 
+            self.assertTrue(any("rerank_score" in candidate.scores for candidate in result.candidates))
             trace = memory.debug_trace(result.trace_id)
-            self.assertEqual(trace["rerank"]["model_version"], "http-reranker:test-rerank")
-            self.assertTrue(any(call["component"] == "reranker" and call["model"] == "test-rerank" for call in trace["model_calls"]))
+            expected_version = f"hashed_{stable_hash('http-reranker:test-rerank')[:16]}"
+            self.assertTrue(
+                any(
+                    call["component"] == "reranker" and call["model_version"] == expected_version
+                    for call in trace["model_calls"]
+                )
+            )
+            audit = memory.audit_events(scope, event_type="memory.search")
+            self.assertIn(expected_version, audit[0]["payload"]["model_calls"]["model_versions"])
             self.assertTrue(reranker.calls)
             self.assertTrue(any(request["path"] == "/rerank" for request in server.requests))
 
@@ -646,7 +683,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            answer = OpenAICompatibleAnswerModel(client).answer_with_context(
+            answer = OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -723,7 +760,7 @@ class ModelAdapterTests(unittest.TestCase):
         }
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -793,7 +830,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -846,7 +883,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="event_ordering")
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="event_ordering")
 
         request_input = _decode_model_payload(server.requests[-1]["json"])["input"]
         sequence_items = request_input["evidence_pack"]["sequence_items"]
@@ -877,7 +914,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="event_ordering")
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="event_ordering")
 
         sequence_items = _decode_model_payload(server.requests[-1]["json"])["input"]["evidence_pack"]["sequence_items"]
         self.assertEqual(len(sequence_items), 5)
@@ -1192,7 +1229,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -1227,7 +1264,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -1378,7 +1415,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(
                 pack.query,
                 pack,
                 benchmark="BEAM",
@@ -1424,7 +1461,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
 
         aggregation_items = _decode_model_payload(server.requests[-1]["json"])["input"]["evidence_pack"]["aggregation_items"]
         included_keys = {item["key"] for item in aggregation_items if item["included"]}
@@ -1466,7 +1503,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
 
         aggregation_items = _decode_model_payload(server.requests[-1]["json"])["input"]["evidence_pack"]["aggregation_items"]
         included = {item["key"]: item["label"] for item in aggregation_items if item["included"]}
@@ -2171,7 +2208,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         client = UnexpectedAnswerClient()
 
-        answer = OpenAICompatibleAnswerModel(client).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(client).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -2224,7 +2261,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(AnswerClient()).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(AnswerClient()).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -2379,7 +2416,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
+            OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="multi_session_reasoning")
 
         aggregation_items = _decode_model_payload(server.requests[-1]["json"])["input"]["evidence_pack"]["aggregation_items"]
         included = {item["key"]: item["label"] for item in aggregation_items if item["included"]}
@@ -3089,7 +3126,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
 
         client = UnexpectedAnswerClient()
-        answer = OpenAICompatibleAnswerModel(client).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(client).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -3252,7 +3289,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
 
         client = UnexpectedAnswerClient()
-        answer = OpenAICompatibleAnswerModel(client).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(client).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -3357,7 +3394,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(UnexpectedAnswerClient()).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(UnexpectedAnswerClient()).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -3401,7 +3438,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(UnexpectedAnswerClient()).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(UnexpectedAnswerClient()).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -3479,7 +3516,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(AnswerClient()).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(AnswerClient()).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -3925,26 +3962,6 @@ class ModelAdapterTests(unittest.TestCase):
 
         self.assertEqual([item["timeline_index"] for item in ordered], [2, 6, 10, 15])
 
-    def test_event_ordering_chronology_rescue_scores_out_of_window_profile_updates(self) -> None:
-        query = (
-            "Can you list the order in which I brought up different aspects of improving "
-            "my professional profile and resume throughout our conversations?"
-        )
-
-        score = _event_ordering_chronology_rescue_score(
-            query,
-            "I used Textio to identify 15 action verbs for my resume and Applicant Tracking System readiness.",
-            "user",
-        )
-        assistant_plan_score = _event_ordering_chronology_rescue_score(
-            query,
-            "Sure, let's break it down. Components: resume update, portfolio polish, and networking milestones.",
-            "user",
-        )
-
-        self.assertGreaterEqual(score, 0.26)
-        self.assertEqual(assistant_plan_score, 0.0)
-
     def test_event_ordering_query_scoped_phase_selector_filters_topic_drift(self) -> None:
         pack = EvidencePack(
             query=(
@@ -4061,7 +4078,7 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertIn("surprise", labels[3])
 
     def test_event_ordering_cluster_label_prefers_chronological_representative(self) -> None:
-        from fusion_memory.eval.model_adapters import _event_ordering_cluster_label
+        from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_cluster_label
 
         label = _event_ordering_cluster_label(
             [
@@ -4078,7 +4095,7 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertNotIn("bootstrap", label.lower())
 
     def test_event_ordering_phase_clusters_split_on_topic_shift(self) -> None:
-        from fusion_memory.eval.model_adapters import _event_ordering_phase_clusters
+        from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_phase_clusters
 
         anchors = [
             {"timeline_index": 1, "label": "initial project setup", "content": "I set up the Flask app and local server.", "conversation_content": "I set up the Flask app and local server."},
@@ -4095,7 +4112,7 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertIn("initial project setup", " ".join(clusters[0]["candidate_labels"]).lower())
 
     def test_event_ordering_milestone_selection_prefers_source_diversity(self) -> None:
-        from fusion_memory.eval.model_adapters import _event_ordering_select_milestones
+        from fusion_memory.retrieval.event_ordering_sequence import _event_ordering_select_milestones
 
         candidates = [
             {"milestone_group": "initial_project_setup", "timeline_index": 1, "source_span_id": "s1"},
@@ -4137,7 +4154,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            model = OpenAICompatibleAnswerModel(client)
+            model = OpenAICompatibleBeamAnswerModel(client)
             model.answer_with_context("Missing?", pack, benchmark="BEAM", category="abstention")
             model.answer_with_context("Contradiction?", pack, benchmark="BEAM", category="contradiction_resolution")
 
@@ -4431,7 +4448,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            model = OpenAICompatibleAnswerModel(client)
+            model = OpenAICompatibleBeamAnswerModel(client)
             model.answer_with_context(pack.query, pack, benchmark="BEAM", category="contradiction_resolution")
 
         payload = _decode_model_payload(server.requests[-1]["json"])["input"]
@@ -4746,7 +4763,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         with FakeModelServer() as server:
             client = OpenAICompatibleLLMClient(server.url("/answer"), model="answer-model")
-            model = OpenAICompatibleAnswerModel(client)
+            model = OpenAICompatibleBeamAnswerModel(client)
             model.answer_with_context(pack.query, pack, benchmark="BEAM", category="temporal_reasoning")
             model.answer_with_context(pack.query, pack, benchmark="BEAM", category="knowledge_update")
             model.answer_with_context(pack.query, pack, benchmark="BEAM", category="summarization")
@@ -4933,7 +4950,7 @@ class ModelAdapterTests(unittest.TestCase):
             debug_trace=[],
         )
 
-        answer = OpenAICompatibleAnswerModel(DateClient()).answer_with_context(
+        answer = OpenAICompatibleBeamAnswerModel(DateClient()).answer_with_context(
             pack.query,
             pack,
             benchmark="BEAM",
@@ -5852,7 +5869,7 @@ class ModelAdapterTests(unittest.TestCase):
         )
         client = RecordingClient()
 
-        answer = OpenAICompatibleAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="temporal_reasoning")
+        answer = OpenAICompatibleBeamAnswerModel(client).answer_with_context(pack.query, pack, benchmark="BEAM", category="temporal_reasoning")
 
         self.assertEqual(answer, "model answer")
         self.assertEqual(client.calls, 1)

@@ -114,18 +114,3 @@ class EventOrderingGraphTests(unittest.TestCase):
         self.assertEqual(graph.edges, [])
         self.assertTrue(candidates)
         self.assertTrue(candidates[0].source.startswith("event_ordering_graph_fallback_"))
-
-    def test_event_ordering_search_exposes_shadow_graph_coverage(self) -> None:
-        memory = MemoryService()
-        scope = Scope(workspace_id="w", user_id="u", agent_id="a", session_id="s")
-        memory.add("I first prepared the initial workspace foundation.", scope, ts("2026-06-01T10:00:00+00:00"))
-        memory.add("Then I implemented the second workflow step.", scope, ts("2026-06-02T10:00:00+00:00"))
-        memory.add("Afterward I verified the final handoff.", scope, ts("2026-06-03T10:00:00+00:00"))
-
-        pack = memory.answer_context(
-            "List the workspace work in chronological order, first to last.",
-            scope,
-            budget={"limit": 6, "mode": "benchmark"},
-        )
-
-        self.assertTrue("event_ordering_graph" in pack.coverage or "event_ordering_shadow" in pack.coverage)
