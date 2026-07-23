@@ -37,20 +37,39 @@ def postgres_connection():
 
 @pytest.mark.integration
 def test_user_scope_and_cross_session_workspace_retrieval(deployed_stack: DeployedMcpStack):
-    marker = f"user-a-e2e-{uuid.uuid4().hex}"
-    added = deployed_stack.client(user="a", workspace="ws-a", session="s1").call(
-        "memory_add", {"content": marker, "source": "task10-e2e"}
+    run_marker = f"user-scope-e2e-{uuid.uuid4().hex}"
+    first_marker = f"{run_marker}-user-a-first"
+    second_marker = f"{run_marker}-user-a-second"
+    other_marker = f"{run_marker}-user-b-control"
+    first_added = deployed_stack.client(user="a", workspace="ws-a", session="s1").call(
+        "memory_add", {"content": first_marker, "source": "task13-e2e"}
     )
-    assert added["ok"] is True
+    second_added = deployed_stack.client(user="a", workspace="ws-b", session="s2").call(
+        "memory_add", {"content": second_marker, "source": "task13-e2e"}
+    )
+    other_added = deployed_stack.client(user="b", workspace="ws-b", session="s1").call(
+        "memory_add", {"content": other_marker, "source": "task13-e2e-control"}
+    )
+    assert first_added["ok"] is True
+    assert second_added["ok"] is True
+    assert other_added["ok"] is True
 
-    same_user = deployed_stack.client(user="a", workspace="ws-b", session="s2").call(
-        "memory_search", {"query": marker, "limit": 12}
+    same_user = deployed_stack.client(user="a", workspace=None, session=None).call(
+        "memory_search", {"query": run_marker, "limit": 12}
     )
-    other_user = deployed_stack.client(user="b", workspace="ws-b", session="s2").call(
-        "memory_search", {"query": marker, "limit": 12}
+    other_user = deployed_stack.client(user="b", workspace=None, session=None).call(
+        "memory_search", {"query": run_marker, "limit": 12}
     )
-    assert any(marker in text for text in _candidate_texts(same_user))
-    assert all(marker not in text for text in _candidate_texts(other_user))
+    assert same_user["ok"] is True
+    assert other_user["ok"] is True
+    same_user_texts = _candidate_texts(same_user)
+    other_user_texts = _candidate_texts(other_user)
+    assert any(first_marker in text for text in same_user_texts)
+    assert any(second_marker in text for text in same_user_texts)
+    assert all(other_marker not in text for text in same_user_texts)
+    assert any(other_marker in text for text in other_user_texts)
+    assert all(first_marker not in text for text in other_user_texts)
+    assert all(second_marker not in text for text in other_user_texts)
 
 
 @pytest.mark.integration

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
@@ -31,6 +31,7 @@ from fusion_memory.retrieval.providers.base import (
 )
 from fusion_memory.retrieval.providers.registry import ProductProviderRegistry
 from fusion_memory.retrieval.query_planner import ProductQueryPlanner
+from fusion_memory.storage.postgres_store import PostgresBackendUnavailable
 
 
 def _candidate(
@@ -248,6 +249,98 @@ def test_engine_degrades_when_one_provider_is_unavailable(engine_fixture: Engine
     assert result.coverage["degraded"] is True
     assert result.coverage["provider_failures"] == ["model_unavailable"]
     assert result.trace["providers"][0]["failure_code"] == "model_unavailable"
+
+
+def test_vector_provider_exception_degrades_to_lexical_results(
+    engine_fixture: EngineFixture,
+) -> None:
+    class FailingVectorProvider:
+        kind = ProviderKind.VECTOR
+        repository = object()
+
+        def recall(self, context: ProviderContext) -> ProviderOutcome:
+            raise ProviderUnavailable("model_unavailable")
+
+    class StaticLexicalProvider:
+        kind = ProviderKind.LEXICAL
+        repository = object()
+
+        def recall(self, context: ProviderContext) -> ProviderOutcome:
+            return ProviderOutcome(
+                provider=context.provider,
+                candidates=(
+                    _candidate(
+                        "lexical",
+                        "Atlas lexical fallback",
+                        source="product_lexical",
+                        scores={"bm25_score": 0.9},
+                    ),
+                ),
+                elapsed_ms=0.5,
+            )
+
+    engine = ProductRetrievalEngine(
+        StaticPlanner(engine_fixture.plan),
+        ProductProviderRegistry([FailingVectorProvider(), StaticLexicalProvider()]),
+        pack_builder=PACK_BUILDER,
+    )
+
+    result = engine.search(engine_fixture.context, engine_fixture.request)
+
+    assert [candidate.id for candidate in result.candidates] == ["lexical"]
+    assert result.coverage["degraded"] is True
+    assert result.coverage["provider_failures"] == ["model_unavailable"]
+
+
+def test_storage_failure_propagates_without_partial_candidates(
+    engine_fixture: EngineFixture,
+) -> None:
+    class FailingStorageProvider:
+        kind = ProviderKind.VECTOR
+        repository = object()
+
+        def recall(self, context: ProviderContext) -> ProviderOutcome:
+            raise PostgresBackendUnavailable("postgres unavailable")
+
+    class UnexpectedLexicalProvider:
+        kind = ProviderKind.LEXICAL
+        repository = object()
+
+        def recall(self, context: ProviderContext) -> ProviderOutcome:
+            raise AssertionError("storage failure must stop provider execution")
+
+    engine = ProductRetrievalEngine(
+        StaticPlanner(engine_fixture.plan),
+        ProductProviderRegistry([FailingStorageProvider(), UnexpectedLexicalProvider()]),
+        pack_builder=PACK_BUILDER,
+    )
+
+    with pytest.raises(PostgresBackendUnavailable, match="postgres unavailable"):
+        engine.search(engine_fixture.context, engine_fixture.request)
+
+
+def test_expired_deadline_stops_before_provider_execution(
+    engine_fixture: EngineFixture,
+) -> None:
+    registry = StaticRegistry(engine_fixture.engine.registry.outcomes)
+    engine = ProductRetrievalEngine(
+        StaticPlanner(engine_fixture.plan),
+        registry,
+        pack_builder=PACK_BUILDER,
+    )
+    expired_context = RetrievalContext(
+        scope=engine_fixture.context.scope,
+        user_id=engine_fixture.context.user_id,
+        now=engine_fixture.context.now,
+        trace_id=engine_fixture.context.trace_id,
+        deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        include_session=engine_fixture.context.include_session,
+    )
+
+    with pytest.raises(TimeoutError, match="retrieval deadline exceeded"):
+        engine.search(expired_context, engine_fixture.request)
+
+    assert registry.calls == 0
 
 
 def test_engine_raises_when_all_planned_providers_fail(engine_fixture: EngineFixture) -> None:

@@ -31,7 +31,14 @@ class MissingIntegrationConfig(RuntimeError):
 
 
 class DeployedMcpClient:
-    def __init__(self, config: E2EConfig, *, token: str, workspace_id: str, session_id: str) -> None:
+    def __init__(
+        self,
+        config: E2EConfig,
+        *,
+        token: str,
+        workspace_id: str | None,
+        session_id: str | None,
+    ) -> None:
         self.config = config
         self.token = token
         self.workspace_id = workspace_id
@@ -43,9 +50,11 @@ class DeployedMcpClient:
     async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "X-Fusion-Memory-Workspace": self.workspace_id,
-            "X-Fusion-Memory-Session": self.session_id,
         }
+        if self.workspace_id:
+            headers["X-Fusion-Memory-Workspace"] = self.workspace_id
+        if self.session_id:
+            headers["X-Fusion-Memory-Session"] = self.session_id
         verify: bool | ssl.SSLContext = (
             ssl.create_default_context(cafile=self.config.ca_file) if self.config.ca_file else True
         )
@@ -87,7 +96,13 @@ class DeployedMcpStack:
         _validate_e2e_url(config.url)
         self.config = config
 
-    def client(self, *, user: str, workspace: str = "ws", session: str) -> DeployedMcpClient:
+    def client(
+        self,
+        *,
+        user: str,
+        workspace: str | None = "ws",
+        session: str | None,
+    ) -> DeployedMcpClient:
         if user == "a":
             token = self.config.token_a
         elif user == "b":
