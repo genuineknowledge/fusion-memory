@@ -1,12 +1,23 @@
 # Fusion Memory BEAM Handoff
 
-This file is the current handoff anchor for Fusion Memory BEAM work. Keep it short and update it after any future validation or operator loop.
+This file is the handoff anchor for retained BEAM evidence and the current product retrieval boundary.
+
+## 2026-07-23 Retrieval Refactor
+
+- Branch: `refactor/retrieval-engine-debeam`
+- Product-gate commit before documentation: `faf37d91598b1e2f6d4dd9c358eb7f9b1f673c04`
+- Comparison report: `docs/retrieval-engine-debeam-comparison-20260722.md`
+- Active architecture: `docs/fusion-memory-architecture.md`
+- Production retrieval supports only `fast` and `balanced` and does not import `fusion_memory.eval`.
+- BEAM is now an eval-only profile under `fusion_memory/eval/beam/`; category prompts and deterministic answer behavior live in `fusion_memory/eval/beam/model_adapters.py`.
+- No separately invoked BEAM smoke command, benchmark runner, full scoring run, or new run artifact was produced for this refactor, by user direction. The ordinary full pytest suite still includes BEAM adapter/profile unit tests.
+- Full automated validation at `faf37d9`: `994 passed, 9 skipped, 12 subtests passed`; deployed MCP/PostgreSQL E2E remained unexecuted because URL/tokens were not configured.
 
 ## Current Status
 
 Primary target: beat True Memory Pro `0.766` on BEAM 100K without qid/gold-answer hardcoding.
 
-Status: target achieved in two consecutive full BEAM 100K runs. No further optimization is currently planned.
+Status: the historical target was achieved in two consecutive full BEAM 100K runs. Those scores remain retained baselines, not validation of the 2026-07-23 retrieval refactor.
 
 Observed current-code full-run band:
 - `0.7751916960517531`
@@ -99,8 +110,8 @@ cd "$FUSION_MEMORY_REPO"
 ## Operator State
 
 Useful current operator families:
-- Temporal endpoint pairs and deterministic temporal consumer: `fusion_memory/retrieval/temporal_pack.py`, `fusion_memory/eval/model_adapters.py`
-- Summary coverage matrix / must-mention points: `fusion_memory/eval/model_adapters.py`
+- Temporal endpoint pairs and deterministic temporal consumer: `fusion_memory/retrieval/temporal_pack.py`, `fusion_memory/eval/beam/model_adapters.py`
+- Summary coverage matrix / must-mention points: `fusion_memory/eval/model_adapters.py`; deterministic BEAM summary behavior is under `fusion_memory/eval/beam/model_adapters.py`
 - Value history and slot-state transition: `fusion_memory/retrieval/value_history_pack.py`, `fusion_memory/retrieval/slot_state_transition.py`
 - Multi-session aggregation answer candidates: `fusion_memory/retrieval/aggregation_answers.py`, `fusion_memory/retrieval/aggregation_pack.py`
 - Preference constraints and answer requirements: `fusion_memory/retrieval/aggregation_preferences.py`, `fusion_memory/retrieval/answer_requirements.py`
@@ -108,7 +119,7 @@ Useful current operator families:
 - Exact answer operators: `fusion_memory/retrieval/exact_answer_operators.py`
 
 Architecture risk:
-- `fusion_memory/eval/model_adapters.py` mixes pack projection, prompts, deterministic consumers, benchmark instructions, summary coverage, temporal logic, and contradiction logic. Avoid growing it further without refactoring.
+- `fusion_memory/eval/model_adapters.py` still owns a large generic model-pack projection surface. BEAM category routing has moved out; avoid moving category behavior back into this file.
 - Existing typed operators are acceptable; further single-case answer shortcuts would risk overfitting.
 
 ## Event Ordering

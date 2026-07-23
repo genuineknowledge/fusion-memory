@@ -116,3 +116,24 @@ Recommended first files for project review:
 ## Recommendation
 
 Stop optimization for now and preserve the current baseline. The system passed BEAM 100K twice against the `0.766` target, but the second pass margin is narrow. If work resumes, start with an architecture review and event-ordering design, or with full-category typed-operator loops for summarization and multi-session. Do not continue by adding single-case answer templates.
+
+## 2026-07-23 Retrieval Refactor Note
+
+The product retrieval engine was subsequently refactored on
+`refactor/retrieval-engine-debeam`. At product-gate commit
+`faf37d91598b1e2f6d4dd9c358eb7f9b1f673c04`:
+
+- `MemoryService` is a 1175-line facade over the product retrieval engine;
+- production modes are only `fast` and `balanced`;
+- five repository-backed providers own product recall;
+- BEAM planning, category instructions, and deterministic answer behavior are
+  isolated under `fusion_memory/eval/beam/`;
+- the full automated pytest suite reported `994 passed, 9 skipped, 12 subtests passed` and included ordinary BEAM adapter/profile unit tests.
+
+Comparison report:
+`docs/retrieval-engine-debeam-comparison-20260722.md`.
+
+No separate BEAM smoke command, benchmark runner, or full benchmark scoring was
+run for this refactor, by user direction. No new BEAM artifacts or category
+deltas exist. The two scores and artifact paths recorded earlier in this report
+remain historical baselines and were not overwritten.

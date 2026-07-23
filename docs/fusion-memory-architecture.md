@@ -1,111 +1,135 @@
 # Fusion Memory Architecture
 
-Updated: 2026-06-16
+Updated: 2026-07-23
 
-The long historical architecture note was archived at
+The long historical architecture note is archived at
 `docs/archive/fusion-memory-architecture-20260616-long.md`. This file is the
-active architecture reference.
+active product architecture reference.
 
 ## Objective
 
-Fusion Memory is a product memory layer for agents, not a benchmark-only RAG
-pipeline. The current target is BEAM 100K accuracy above `0.766` while keeping
-the product architecture clean enough to extend.
+Fusion Memory is a multi-user product memory service for agents. Production
+retrieval is optimized for stable evidence recall, explicit failure behavior,
+and user isolation. BEAM is an evaluation profile, not a production retrieval
+mode or a source of production query categories.
+
+## Runtime Flow
+
+1. `MemoryService` validates authorization and builds a `SearchRequest` plus a
+   request-local `RetrievalContext`.
+2. `ProductQueryPlanner` produces a typed `ProductQueryPlan`; invalid model
+   refinement falls back to the deterministic product plan.
+3. `ProductProviderRegistry` executes the requested providers against the
+   repository boundary.
+4. The engine performs reciprocal-rank fusion, optional reranking, utility
+   scoring, and MMR selection exactly once.
+5. The product trace records stage durations, provider counts, and allowlisted
+   failure codes without raw query or memory text.
+6. `ProductEvidencePackBuilder` projects authorized selected evidence into the
+   typed answer-context sections.
+
+Production supports only `fast` and `balanced` search modes.
 
 ## Layer Model
 
 | Layer | Responsibility | Current State |
 | --- | --- | --- |
-| L0 evidence | Raw turns, documents, tool results, provenance | Implemented; must remain visible in packs. |
-| L1 facts | Add-only durable facts linked to source spans | Implemented. |
-| L2 events | Time, order, updates, contradictions | Implemented but event-ordering policy is still noisy. |
-| L3 views/profiles | Current state and long-lived profile summaries | Implemented. |
-| L4 retrieval | Multi-source candidate generation, quota, rerank | Functional; service layer still owns too much policy. |
-| L5 typed packs | Timeline, value history, temporal, aggregation, conflict, summary, instruction | Being split into section modules; event ordering and aggregation now have retrieval-side modules. |
-| L6 model view | Compact serialization for answer/judge models | Adapter is thin again; keep new section logic out of it. |
+| L0 evidence | Raw turns, documents, tool results, provenance | Durable source of truth; always user-scoped. |
+| L1 facts | Add-only facts linked to source spans | Implemented. |
+| L2 events | Time, ordering, updates, contradictions | Implemented with repository-owned chronology data. |
+| L3 views/profiles | Current state and long-lived entity/profile summaries | Implemented; views are supplemental evidence, not authorization roots. |
+| L4 product retrieval | Planning, provider recall, fusion, rerank, MMR, trace | Owned by `fusion_memory/retrieval/`; no benchmark mode. |
+| L5 typed packs | Timeline, value history, temporal, aggregation, conflict, summary, instruction | Built from authorized product results and supporting spans. |
+| L6 eval profiles | Benchmark-specific planning, prompts, deterministic consumers | Isolated under `fusion_memory/eval/`; BEAM-specific code is under `eval/beam/`. |
 
-## Non-Negotiable Boundaries
+## Product Providers
 
-- Raw evidence is the recovery floor. Typed extraction must not hide the source
-  span that supports it.
-- Facts/events/views are derived objects and must retain source-span links.
-- `api/service.py` should orchestrate API calls and retrieval phases; retrieval
-  source policy belongs in `fusion_memory/retrieval/`.
-- `retrieval/evidence_pack.py` should coordinate typed sections; section logic
-  belongs in section modules such as `value_history_pack.py` and
-  `temporal_pack.py`.
-- `eval/model_adapters.py` should serialize model-facing context and call
-  models. It should not be the only place where product evidence is resolved.
+The default product engine installs five providers:
 
-## TrueMemory Pro Takeaways
+| Provider | Purpose |
+| --- | --- |
+| `vector` | Semantic source-span recall through the repository embedding boundary. |
+| `lexical` | Exact/BM25-style span, view, fact, and profile recall. |
+| `temporal` | Date, interval, and temporal-relation evidence. |
+| `entity` | Entity-linked facts, profiles, and source support. |
+| `chronology` | Ordered event/aspect evidence from persisted chronology data. |
 
-Use the ideas, not the code:
+Providers receive a repository, request, plan, and request-local context. They
+do not call private `MemoryService` helpers.
 
-- broad raw retrieval before reranking;
-- hybrid sparse/vector recall with normalized merging;
-- entity, temporal, and cluster supplements as recall aids;
-- raw excerpts preserved into the answer context;
-- reranker after wide recall.
+## Ownership Boundaries
 
-AGPL code from TrueMemory is not copied into Fusion Memory.
+- `fusion_memory/api/service.py` is a facade for authorization, ingestion,
+  request construction, trace persistence, audit events, and public APIs.
+- `fusion_memory/retrieval/query_planner.py` owns the product query plan.
+- `fusion_memory/retrieval/providers/` owns product recall sources.
+- `fusion_memory/retrieval/product_engine.py` owns one-pass execution and
+  degradation semantics.
+- `fusion_memory/retrieval/evidence_pack.py` owns the product pack projection;
+  section algorithms remain in their focused retrieval modules.
+- `fusion_memory/storage/` owns persistence and repository operations. Storage
+  exceptions are not converted into partial retrieval success.
+- Production modules under `api`, `retrieval`, and `mcp_runtime.py` must not
+  import `fusion_memory.eval`.
 
-## Current Refactor State
+## Scope And Isolation
 
-Completed:
+- Authentication establishes the canonical `user_id`.
+- Workspace and session are provenance for writes, not isolation boundaries
+  between memories owned by the same user.
+- Reads with only `Scope(user_id=...)` search all workspaces and sessions for
+  that user.
+- Different users never share candidates, traces, or persisted objects.
+- PostgreSQL writes for one user are serialized with an advisory transaction
+  lock; different users can execute concurrently.
 
-- Evidence packs declare a typed pack contract through
-  `retrieval/pack_contract.py`.
-- Value-history current/latest resolution moved to
-  `retrieval/value_history_pack.py`.
-- Temporal date roles, temporal candidates, range pairs, and temporal summaries
-  moved to `retrieval/temporal_pack.py`.
-- Candidate-source list orchestration moved behind
-  `retrieval/candidate_provider.py`.
-- Aggregation, preference-constraint, financial, and LLM aggregation model-view
-  helpers moved to `retrieval/aggregation_pack.py`.
-- Event-ordering model-view sequence construction moved to
-  `retrieval/event_ordering_pack.py`.
-- Event milestone grouping and representative selection moved to
-  `retrieval/event_graph_selection.py`.
-- Aggregation key composition is shared through
-  `retrieval/aggregation_keys.py`.
+## Failure Semantics
 
-Still overgrown:
+- A model-backed provider may return a retryable `model_unavailable` failure;
+  successful providers still contribute candidates and coverage is marked
+  degraded.
+- Reranker endpoint failure returns the pre-rerank selection and records
+  `reranker_unavailable`.
+- If all planned providers fail, the engine raises `RetrievalUnavailable`.
+- PostgreSQL backend failures propagate and do not return partial candidates.
+- Expired deadlines stop execution before the next provider boundary.
+- Trace and audit payloads contain counts, hashed identifiers, durations, and
+  allowlisted error codes, never raw query/candidate text or credentials.
 
-- `api/service.py`: category-level rescue and post-rerank preservation policy.
-- `retrieval/structured_annotations.py`: event-ordering timeline selection and
-  labeling under a generic name.
-- `retrieval/event_ordering_pack.py`: large temporary home for event-ordering
-  heuristics; it should become graph-first instead of growing more rules.
-- `retrieval/aggregation_pack.py`: large but section-owned; needs a public
-  builder API and contract tests.
-- `storage/postgres_store.py` and `storage/sqlite_store.py`: large but mostly
-  mechanical; avoid adding retrieval semantics there.
+## BEAM Evaluation Boundary
 
-## Next Architecture Moves
+`BeamRetrievalEngine` decorates the product plan inside
+`fusion_memory/eval/beam/`. `BeamAdapter` wraps the generic answer model with
+`OpenAICompatibleBeamAnswerModel`, whose category instructions and
+deterministic answer behavior also live under `eval/beam/`.
 
-1. Make event-ordering graph-first: persist/select topic-scoped aspect/event
-   nodes and ordering/support edges, then use heuristics only as fallback.
-2. Split reusable timeline graph selection out of `structured_annotations.py`
-   and `event_ordering_pack.py`.
-3. Continue moving service-level category rescue and post-rerank preservation
-   into retrieval providers.
-4. Only after these boundaries are stable, run full BEAM 100K and tune by
-   category.
-
-## Heuristic Policy
-
-Heuristics are acceptable when they normalize model-view output, parse explicit
-query constraints, or suppress low-value spans. They are not acceptable as the
-only place where product semantics are recovered. Current event-ordering rules
-are too large because they compensate for an incomplete event graph; the next
-optimization should add graph structure rather than more adapter-style rules.
+Production accepts no `benchmark` mode, no BEAM category on
+`ProductQueryPlan`, and no qid/gold-answer/named-scenario routing. Historical
+BEAM artifacts remain useful evaluation evidence but are not runtime
+dependencies.
 
 ## Validation Policy
 
-Use focused section tests first. Run full BEAM 100K only when:
+Merge gates are:
 
-- section modules compile and focused tests pass;
-- no new typed evidence rule lives only in `model_adapters.py`;
-- broad raw evidence remains present for fallback;
-- no qid/domain/gold-answer shortcuts were introduced.
+- product query cases and same-user/different-user scope tests;
+- provider/reranker degradation and storage/deadline fault tests;
+- PostgreSQL concurrency and deployed MCP integration when configured;
+- architecture scans for deleted legacy symbols, benchmark mode, private
+  service callbacks, and production-to-eval imports;
+- the full automated pytest suite and the `service.py` 1200-line budget.
+
+BEAM scoring is diagnostic and is run only when explicitly requested. Ordinary
+BEAM adapter/profile unit tests remain part of the full pytest suite, but the
+2026-07-23 retrieval refactor did not separately invoke the BEAM smoke command
+or run a benchmark/scoring job.
+
+## Remaining Risks
+
+- `retrieval/structured_annotations.py`, `event_ordering_*`, and
+  `aggregation_pack.py` remain large heuristic-heavy modules. New product
+  behavior should prefer typed repository/provider contracts over query-shaped
+  rules.
+- The deployed MCP/PostgreSQL isolation gate requires an active service URL and
+  two configured user tokens; unit tests cannot substitute for that final
+  deployment check.
